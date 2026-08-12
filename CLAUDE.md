@@ -1073,21 +1073,26 @@ HTTP 状态映射：
 | 500 | 服务器错误 | 未预期错误（经 `respond.Error` 统一 + 记日志） |
 | 503 | 暂不可用 | bulkhead 抢槽失败（`ErrProviderBusy`）、熔断打开、供应商宕机 |
 
-错误码（字符串，`MODULE_REASON` 命名空间；与各模块 `api/` 包哨兵错误一一对应，handler 用 `errors.Is` 映射）：
+错误码（字符串，`MODULE_REASON` 命名空间；哨兵错误的 `Error()` 即码）。哨兵按产生层分散，不集中：跨域通用码在 `platform/errs`，LLM 操作码在 `platform/llm`，业务码在各模块 `api/errors.go`；handler 用 `errors.Is` 映射状态码，通用兜底走 `respond.FailFromSentinel`。
 
-| 码 | HTTP | 来源（示例） |
+| 码 | HTTP | 哨兵位置 / 来源 |
 |---|---|---|
-| `UNAUTHORIZED` | 401 | auth |
-| `VALIDATION_FAILED` | 400 | 通用（`details` 含字段级错误） |
+| `UNAUTHORIZED` | 401 | `authapi.ErrUnauthorized` |
+| `SESSION_EXPIRED` | 401 | `authapi.ErrSessionExpired`（session 失效） |
+| `VALIDATION_FAILED` | 400 | `errs.ErrValidationFailed`（`details` 含字段级错误） |
 | `PROVIDER_NOT_FOUND` | 404 | `providerapi.ErrProviderNotFound` |
-| `PROVIDER_NAME_CONFLICT` | 409 | provider 唯一约束 |
-| `PROVIDER_BUSY` | 503 | `ErrProviderBusy`（bulkhead fail-fast） |
-| `PROVIDER_UNAVAILABLE` | 503 | 熔断打开 / `ProviderDown` |
-| `RATE_LIMITED` | 429 | 供应商 429 透传 / 用户限流 |
-| `BUDGET_EXHAUSTED` | 429 | 每日预算耗尽（新会话被拒） |
-| `AGENT_NOT_FOUND` | 404 | agent |
-| `MODEL_CONTEXT_TOO_LONG` | 400 | LLM 上下文超长 |
-| `INTERNAL_ERROR` | 500 | 兜底（不向前端泄露细节） |
+| `PROVIDER_NAME_CONFLICT` | 409 | `providerapi.ErrProviderNameConflict`（唯一约束） |
+| `PROVIDER_BUSY` | 503 | `llm.ErrProviderBusy`（bulkhead fail-fast） |
+| `PROVIDER_UNAVAILABLE` | 503 | `llm.ErrProviderUnavailable`（熔断打开 / `ProviderDown`） |
+| `RATE_LIMITED` | 429 | `errs.ErrRateLimited`（供应商 429 透传 / 用户限流） |
+| `BUDGET_EXHAUSTED` | 429 | `errs.ErrBudgetExhausted`（每日预算耗尽，新会话被拒） |
+| `SERVICE_UNAVAILABLE` | 503 | `errs.ErrServiceUnavailable`（通用 503 兜底） |
+| `AGENT_NOT_FOUND` | 404 | `agentapi.ErrAgentNotFound` |
+| `MODEL_CONTEXT_TOO_LONG` | 400 | `chatapi.ErrModelContextTooLong`（chat service 翻译自 llm `InvalidRequest`） |
+| `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound` |
+| `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound` |
+| `MCP_SERVER_NOT_FOUND` | 404 | `mcpapi.ErrMCPServerNotFound` |
+| `INTERNAL_ERROR` | 500 | `errs.ErrInternal`（兜底，不向前端泄露细节） |
 
 规则：
 

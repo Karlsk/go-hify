@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/Karlsk/go-hify/internal/platform/errs"
 )
 
 // Result 是所有 HTTP 接口返回的统一信封。
@@ -29,11 +31,11 @@ type ErrorBody struct {
 	Details any    `json:"details"`
 }
 
-// 哨兵机器可读码：避免散落字符串字面量；handler 优先用模块自带哨兵码，这些是通用兜底。
+// 通用机器可读码。VALIDATION_FAILED / INTERNAL_ERROR 等的权威定义在 internal/platform/errs
+// （哨兵的 Error() 即码），respond 经 errs 引用，避免码字符串散落两处。CodeNotFound 无对应哨兵，
+// 是 404 的通用兜底（模块级缺失用各自 api 包哨兵，如 PROVIDER_NOT_FOUND）。
 const (
-	CodeValidationFailed = "VALIDATION_FAILED" // 400：参数绑定 / 校验失败
-	CodeNotFound         = "NOT_FOUND"         // 404：通用资源不存在（模块级用 PROVIDER_NOT_FOUND 等）
-	CodeInternalError    = "INTERNAL_ERROR"    // 500：未预期错误，细节进日志、不回前端
+	CodeNotFound = "NOT_FOUND"
 )
 
 // noStore 给响应统一打 Cache-Control: no-store（CLAUDE.md：API 响应一律 no-store，
@@ -66,7 +68,7 @@ func Fail(c *gin.Context, httpStatus int, code, message string) {
 // BadRequest 写 400 + VALIDATION_FAILED（参数绑定 / 校验失败）。
 // 字段级错误请改用 Fail 自带 details，或在 details 接入后扩展 WithDetails 变体。
 func BadRequest(c *gin.Context, message string) {
-	Fail(c, http.StatusBadRequest, CodeValidationFailed, message)
+	Fail(c, http.StatusBadRequest, errs.ErrValidationFailed.Error(), message)
 }
 
 // NotFound 写 404 + NOT_FOUND（通用资源不存在）。
@@ -79,5 +81,5 @@ func NotFound(c *gin.Context, message string) {
 // TODO: 接入 platform/logging 后在此记录原始 err（含 trace_id、调用上下文）——
 // 当前 logging 模块尚未落地，先不引入其依赖。
 func Error(c *gin.Context, err error) {
-	Fail(c, http.StatusInternalServerError, CodeInternalError, "internal server error")
+	Fail(c, http.StatusInternalServerError, errs.ErrInternal.Error(), "internal server error")
 }
