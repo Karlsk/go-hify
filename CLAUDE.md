@@ -86,8 +86,9 @@ Hify 是简化版 Dify 的 AI Agent 开发平台。约束（一切决策的前�
 ### 包结构
 
 ```
-cmd/hify/main.go              # 组合根：手动 DI 组装所有模块，是全仓库唯一写装配逻辑的地方
+cmd/hify/main.go              # 入口：加载配置 + 调 app.Run（~15 行，无装配细节）
 internal/
+├── app/                      # 组合根装配：Run(cfg) 集中所有 DI + gin 引擎/中间件/路由/启动
 ├── provider/                 # 模型提供商：API Key 加密存储、连通性探测、模型列表
 ├── agent/                    # Agent 配置：选模型、绑 MCP 工具、系统提示词
 ├── chat/                     # 对话引擎：SSE 流式、多轮上下文、工具调用循环
@@ -102,6 +103,7 @@ internal/
     ├── llm/                  # eino 统一适配：provider 配置 → ChatModel 实例
     ├── budget/               # 每用户限流 + 每日预算熔断（fail-open + 80% 告警）
     ├── logging/              # 结构化运行日志（executions：输入/输出/工具链/token/耗时）
+    ├── errs/                 # 跨业务域通用哨兵错误（gin 无关叶子包，供 respond/handler 用 errors.Is 映射）
     └── respond/              # 统一 API 响应信封（success / data / error / meta）
 web/                          # Vue 3 前端，独立构建
 migrations/                   # goose/golang-migrate SQL 文件（禁止 GORM AutoMigrate）
@@ -394,7 +396,7 @@ func (h *Handler) create(c *gin.Context) {
 - 错误响应一律走 `respond.Fail*` 信封：模块哨兵先 `errors.Is(err, …)` → `respond.Fail(c, 状态码, 哨兵.Error(), err.Error())` 显式映射，通用哨兵与未识别错误走 `respond.FailFromSentinel(c, err)`（自动映射 / 兜底 500）。`error.code` 只能是哨兵的 `Error()` 字符串，禁止裸字符串或原始异常文本上抛。
 - handler 只 import 本模块 `api` + `platform/respond` + gin + net/http（状态码常量），不 import 本模块 `service` / `store`。
 
-**组合根（`cmd/hify/main.go`）：** 只装配，无业务。沿依赖清单自下游而上游，每个模块按 store → service → handler 顺序构建；下游模块 `service.New(...)` 的返回值就是 api 接口，直接作为上游 `service.New(...)` 的入参注入：
+**组合根（`cmd/hify/main.go` → `internal/app/server.go`）：** 只装配，无业务。`main.go` 是入口（加载配置 + 调 `app.Run(cfg)` + 处理退出码，~15 行），装配细节集中在 `internal/app/server.go` 的 `Run`——预先拆分、保持 main 精简，装配增长只动 server.go。沿依赖清单自下游而上游，每个模块按 store → service → handler 顺序构建；下游模块 `service.New(...)` 的返回值就是 api 接口，直接作为上游 `service.New(...)` 的入参注入：
 
 ```go
 providerStore := providerstore.New(db)
@@ -405,7 +407,7 @@ agentSvc      := agentsvc.New(agentStore, providerSvc)       // 下游 api 接�
 providerhandler.New(providerSvc).RegisterRoutes(rg)          // handler 注入同一个 api 实现
 ```
 
-步骤：1. 加载配置 → 2. 初始化 platform（db / redis / llm / budget / logging）→ 3. provider → mcp → agent → rag → workflow → chat → 4. 挂中间件（`respond.Recovery()` 必须最外层，兜底其后所有中间件 / handler 的 panic），调各模块 RegisterRoutes → 5. 启动服务。单文件超 400 行拆 `internal/app/`。
+步骤：1. 加载配置 → 2. 初始化 platform（db / redis / llm / budget / logging）→ 3. provider → mcp → agent → rag → workflow → chat → 4. 挂中间件（`respond.Recovery()` 必须最外层，兜底其后所有中间件 / handler 的 panic），调各模块 RegisterRoutes → 5. 启动服务。（本仓库已预先拆分到 `internal/app/server.go`，server.go 再长也不回流 main.go；原「单文件超 400 行拆 `internal/app/`」门槛已提前执行。）
 
 **全模块通则：**
 
