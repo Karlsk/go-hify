@@ -75,6 +75,12 @@ Hify 是简化版 Dify 的 AI Agent 开发平台。约束（一切决策的前�
 - **文件**：全小写 snake_case，按内容命名（`schema.go` / `model.go` / `store.go` / `handler.go`）；包内单文件时可用模块名（`provider.go`）。
 - **import 别名**：跨包引用统一用 `<module><layer>` 形式别名——`providerapi "hify/internal/provider/api"`、`providersvc "hify/internal/provider/service"`、`providerstore "hify/internal/provider/store"`、`providerhandler "hify/internal/provider/handler"`——避免各模块同名包（api/service/store/handler）冲突。
 - **类型名不与包名叠字**：api 包里叫 `ProviderService`（外部引用为 `api.ProviderService`），不叫 `APIProviderService`。
+- **可见性 = 首字母大小写**：首字母大写即导出（公开），小写即包内私有；Go 以此控制可见性，不靠 `public` / `private` 关键字。
+- **命名风格 = 驼峰**：导出标识符用大驼峰（PascalCase，如 `UserName`、`ProviderService`），包内私有用小驼峰（lowerCamelCase，如 `userName`、`localCache`）；不使用下划线 / 连字符命名标识符。
+- **缩写词全大写或全小写，不首字母大写**：`UserID`（导出）/ `userID`（私有）、`HTTPClient`、`APIKey`（导出）/ `apiKey`（私有）；**禁止** `UserId`、`HttpClient`、`ApiKey`（golint 会报错）。
+- **结构体字段保持驼峰，JSON snake_case 用 struct tag 映射**：字段名本身写驼峰（`APIKey string`），序列化下划线通过 tag 实现（`json:"api_key"`），**不改字段名**。即：Go 代码里只见到驼峰字段，snake_case 只出现在 `json` tag 与实际 JSON 报文里。
+- **Getter 不加 `Get` 前缀，Setter 用 `Set`**：`u.Name()` 不写 `u.GetName()`；赋值用 `u.SetName(...)`。
+- **命名导向**：函数 / 方法用动词（`Create` / `RotateKey` / `ListAgents`），结构体用名词（`Provider` / `AgentService`），接口用行为 + `-er` 后缀（`Store` / `Reader` / `Resolver`）。
 - **module 路径**：`github.com/Karlsk/go-hify`（= 仓库路径，Go 惯例）；本文档 `hify/...` 形式的 import 为简写，实际写 `github.com/Karlsk/go-hify/...`。
 
 ### 包结构
@@ -1004,7 +1010,7 @@ Hify 后端所有 HTTP 接口的统一规范，与《代码组织规范》handle
 
 ### 字段命名与类型
 
-- **命名**：JSON 字段 snake_case（与 Go schema 的 `json` tag、DB 列名一致），如 `api_key`、`created_at`、`model_id`。
+- **命名**：JSON 字段 snake_case（与 Go schema 的 `json` tag、DB 列名一致），如 `api_key`、`created_at`、`model_id`。Go 结构体字段本身保持驼峰（如 `APIKey`、`CreatedAt`），snake_case 只出现在 `json` tag 与实际报文里——见《命名规范（Go 标准）》。
 - **ID 序列化为字符串**：bigint 主键/外键在 JSON 里一律输出字符串（Go 用 `json:"id,string"`），避免 JS 超过 `2^53` 丢精度（`"id": "12345678901234567"`，不是数字）。URL `{id}` 同样按字符串传。
 - **时间**：RFC 3339 / ISO 8601，UTC，带 `Z`，如 `"2026-08-10T12:34:56Z"`。
 - **枚举**：字符串（`"role": "assistant"`、`"status": "processing"`），与 DB 的 `text+CHECK` 对齐，不传数字。
@@ -1028,12 +1034,12 @@ GET /api/v1/conversations?limit=20&cursor=eyJpZCI6MTIzNH0
 
 ```jsonc
 { "success": true, "data": [ /* ... */ ],
-  "meta": { "limit": 20, "hasMore": true, "nextCursor": "eyJpZCI6MTI1NH0" } }
+  "meta": { "limit": 20, "has_more": true, "next_cursor": "eyJpZCI6MTI1NH0" } }
 ```
 
-- `limit`：页大小，默认 20，上限 100；`cursor`：上一页 `nextCursor`，首页省略。
-- `cursor` 不透明（base64 排序键），前端原样回传；`hasMore=false` 时 `nextCursor` 为 `null`。
-- 后端实现 = keyset 查询（`LIMIT n+1` 判 `hasMore`），禁用 OFFSET。
+- `limit`：页大小，默认 20，上限 100；`cursor`：上一页 `next_cursor`，首页省略。
+- `cursor` 不透明（base64 排序键），前端原样回传；`has_more=false` 时 `next_cursor` 为 `null`。
+- 后端实现 = keyset 查询（`LIMIT n+1` 判 `has_more`），禁用 OFFSET。
 
 **B. 偏移分页（仅极小静态配置表）** —— `providers` / `agents` / `models` / `mcp_servers` / `knowledge_bases` / `workflows`：
 
@@ -1043,7 +1049,7 @@ GET /api/v1/providers?page=1&page_size=20
 
 ```jsonc
 { "success": true, "data": [ /* ... */ ],
-  "meta": { "page": 1, "pageSize": 20, "total": 47 } }
+  "meta": { "page": 1, "page_size": 20, "total": 47 } }
 ```
 
 - `page` 从 1 起，`page_size` 默认 20 上限 100；这类表行数极小，`total` 可精确算、OFFSET 无性能问题，且原生适配 Element Plus 分页组件。
