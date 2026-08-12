@@ -18,6 +18,11 @@ export default defineConfig({
         target: 'http://localhost:8080',
         changeOrigin: true,
       },
+      // /health 在 /api/v1 之外（探活、不走鉴权），dev 下单独转发
+      '/health': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
     },
   },
 })

@@ -1,20 +1,43 @@
 <template>
-  <div class="page">
-    <h2 class="page__title">模型提供商</h2>
-    <el-empty description="骨架占位 — 业务待实现" />
+  <div>
+    <div class="title">模型提供商管理</div>
+    <div v-if="state === 'loading'" class="status">正在检测后端连通性…</div>
+    <div v-else-if="state === 'ok'" class="status status--ok">
+      后端已连接：{{ message }}
+    </div>
+    <div v-else class="status status--fail">后端未连接</div>
   </div>
 </template>
 
 <script setup lang="ts">
-// ProviderList：多模型提供商管理（OpenAI / Claude / Gemini / Ollama），业务待实现
+import { onMounted, ref } from 'vue'
+import { getHealth } from '@/api/health'
+
+type State = 'loading' | 'ok' | 'fail'
+
+const state = ref<State>('loading')
+const message = ref('')
+
+onMounted(async () => {
+  try {
+    message.value = await getHealth()
+    state.value = 'ok'
+  } catch {
+    state.value = 'fail'
+  }
+})
 </script>
 
 <style scoped>
-.page {
-  padding: 16px;
-}
-.page__title {
-  margin: 0 0 16px;
+.title {
+  margin-bottom: 16px;
   font-size: 18px;
+  font-weight: 600;
+}
+.status--ok {
+  color: var(--el-color-success);
+}
+.status--fail {
+  color: var(--el-color-danger);
 }
 </style>

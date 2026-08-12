@@ -30,12 +30,10 @@ web/
 ├── env.d.ts                # vite/client 类型引用（import.meta.env）
 └── src/
     ├── main.ts             # 挂载 Pinia + Router + ElementPlus + Icons
-    ├── App.vue             # 根组件：<router-view />
+    ├── App.vue             # 根布局：左侧 EP 菜单 + 右侧 <router-view />
     ├── assets/
     │   └── styles/main.css # 全局 reset + 字体
-    ├── router/index.ts     # 路由表（DefaultLayout 嵌套子路由）
-    ├── layouts/
-    │   └── DefaultLayout.vue   # 侧栏导航 + 顶栏外壳（业务页共用）
+    ├── router/index.ts     # 路由表（三条扁平路由 /provider /agent /chat）
     ├── stores/             # Pinia 模块（user/session 等，按业务新增）
     ├── api/                # 各模块接口定义（axios 实例在 utils/request.ts）
     ├── utils/
@@ -56,6 +54,7 @@ web/
 - API 统一前缀 `/api/v1`（`request.ts` 的 `baseURL`）。
 - 所有响应走后端 `respond.Result` 信封：`{ success, data, error, meta }`。
 - `request.ts` 响应拦截器统一拆信封：`success === false` → 取 `error.code` / `error.message` → `ElMessage.error` 提示 + `reject(new RequestError(code, message))`，调用方按 `error.code` 分支。
+- `success === true` 自动解包：导出 `get` / `post` / `put` / `del` 四个泛型 helper（`get<T>(url)` 直接返回 `Promise<T>`，即业务 `data`）；解包后 `meta` 不可见，需分页 `meta` 的列表端点将来用独立 `getList` 取 `{ data, meta }`。
 - HTTP 主信号（2xx/4xx/5xx）由 axios 错误分支兜底；401 预留跳登录钩子（auth 模块落地后接 `router.push('/login')`）。
 - 业务错误码（`PROVIDER_NOT_FOUND` / `BUDGET_EXHAUSTED` / …）见 CLAUDE.md《错误处理》表。
 
