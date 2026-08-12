@@ -1,0 +1,70 @@
+# ===== Secrets / env（CLAUDE.md：API Key 走 .env / Docker secrets，禁止入 Git）=====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# ===== Go =====
+# 编译产物（app 名 hify，见 cmd/hify）
+/hify
+/hify.exe
+/bin/
+/build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+# 测试 / 覆盖率
+*.test
+*.out
+coverage.out
+coverage.html
+# 本地多模块工作区（机器本地用）
+go.work
+go.work.sum
+# 依赖（module 模式默认不提交 vendor；若要锁定可去掉此行）
+vendor/
+
+# ===== Node / Vue 3 / Vite (web/) =====
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
+.eslintcache
+
+# ===== 本地运行数据 / Compose 卷（绝不提交数据与日志）=====
+pgdata/
+redisdata/
+backups/
+logs/
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# ===== OS =====
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# ===== Claude Code 本地配置（项目级共享配置仍提交）=====
+.claude/settings.local.json
