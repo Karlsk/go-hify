@@ -102,7 +102,7 @@ internal/
     ├── redisx/               # Redis 初始化与通用操作
     ├── llm/                  # eino 统一适配：provider 配置 → ChatModel 实例
     ├── budget/               # 每用户限流 + 每日预算熔断（fail-open + 80% 告警）
-    ├── logging/              # 结构化运行日志（executions：输入/输出/工具链/token/耗时）
+    ├── logging/              # slog 结构化日志（stdout + 文件 rotate + SetDefault）；executions 表归 chat/llm 模块
     ├── errs/                 # 跨业务域通用哨兵错误（gin 无关叶子包，供 respond/handler 用 errors.Is 映射）
     └── respond/              # 统一 API 响应信封（success / data / error / meta）
 web/                          # Vue 3 前端，独立构建

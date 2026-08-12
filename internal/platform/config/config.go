@@ -14,12 +14,13 @@ import (
 
 // Config 是 Hify 全量配置，按子系统分组。组合根（internal/app）据此初始化 platform、注入业务模块。
 type Config struct {
-	Server ServerCfg
-	PG     PGCfg
-	Redis  RedisCfg
-	Auth   AuthCfg
-	LLM    LLMCfg
-	Budget BudgetCfg
+	Server  ServerCfg
+	PG      PGCfg
+	Redis   RedisCfg
+	Auth    AuthCfg
+	LLM     LLMCfg
+	Budget  BudgetCfg
+	Logging LoggingCfg
 }
 
 // ServerCfg HTTP 服务监听。
@@ -59,6 +60,13 @@ type BudgetCfg struct {
 	UserRPM             int   // 每用户每分钟请求上限
 }
 
+// LoggingCfg 结构化日志（CLAUDE.md §部署架构 logging：stdout + 文件落 logs 卷 + rotate）。
+type LoggingCfg struct {
+	Level  string // debug/info/warn/error（LOG_LEVEL）
+	Format string // json / text（LOG_FORMAT）
+	File   string // 日志文件路径，空 = 只 stdout（LOG_FILE）
+}
+
 // MustLoad 从环境变量加载配置；必填项缺失即 panic。
 func MustLoad() *Config {
 	cfg := &Config{
@@ -85,6 +93,11 @@ func MustLoad() *Config {
 		Budget: BudgetCfg{
 			DailyBudgetUSDCents: envInt64("DAILY_BUDGET_USD_CENTS", 1000),
 			UserRPM:             envInt("USER_RPM", 60),
+		},
+		Logging: LoggingCfg{
+			Level:  envStr("LOG_LEVEL", "info"),
+			Format: envStr("LOG_FORMAT", "json"),
+			File:   envStr("LOG_FILE", "logs/hify.log"),
 		},
 	}
 	cfg.mustValidate()
