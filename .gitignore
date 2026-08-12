@@ -68,3 +68,4 @@ Thumbs.db
 
 # ===== Claude Code 本地配置（项目级共享配置仍提交）=====
 .claude/settings.local.json
+.qoder
