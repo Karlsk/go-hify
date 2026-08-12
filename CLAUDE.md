@@ -688,6 +688,13 @@ created_at timestamptz NOT NULL DEFAULT now(),
 -- updated_at 仅可变表有（见下）
 ```
 
+> **Go 侧表头**：上述标准表头由 `internal/platform/db` 的三套 mixin 提供，各模块 `service/model.go` 按表性质 embed 即可，不必重复声明 id / created_at：
+> - `db.BaseAppendOnly`（id + created_at）—— append-only 表（executions / messages / chunks）；
+> - `db.BaseMutable`（+ updated_at，`autoUpdateTime`）—— 可变表（providers / agents / ...）；
+> - `db.BaseSoftDelete`（+ deleted_at，`gorm.DeletedAt` 自动加 `WHERE deleted_at IS NULL`）—— 仅 agents / documents。
+>
+> model 只带 `gorm` tag、不带 `json` tag（序列化是 api/schema 的事，ID 的 `"id,string"` 在 schema 上做）；表的真实 DDL（含 `GENERATED ALWAYS AS IDENTITY`、partial 索引）仍由 migrations/ SQL 决定，本包从不 AutoMigrate。
+
 列类型规则：
 
 | 用途 | 类型 | 禁止 |
