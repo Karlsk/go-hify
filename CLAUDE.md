@@ -372,28 +372,27 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 
 func (h *Handler) create(c *gin.Context) {
     var req providerapi.CreateReq
-    if err := c.ShouldBindJSON(&req); err != nil {         // 1 绑定：字段格式用 binding tag
-        respond.BadRequest(c, err.Error()); return
-    }
-    if err := req.Validate(); err != nil {                 // 2 校验：跨字段规则写在 api/schema.go
-        respond.BadRequest(c, err.Error()); return
-    }
-    resp, err := h.svc.Create(c.Request.Context(), req)    // 3 调本模块 api 接口
-    if err != nil {
-        if errors.Is(err, providerapi.ErrProviderNotFound) {   // 4 错误映射：哨兵错误 → 状态码
-            respond.NotFound(c, err.Error()); return
-        }
-        respond.Error(c, err)                              //   其余错误统一 500 + 记日志
+    if !respond.BindJSON(c, &req) {                        // 绑定 + 校验合一步：失败已写 400 信封，直接 return
         return
     }
-    respond.OK(c, resp)                                    // 5 包装响应
+    resp, err := h.svc.Create(c.Request.Context(), req)    // 调本模块 api 接口
+    if err != nil {
+        if errors.Is(err, providerapi.ErrProviderNameConflict) { // 模块哨兵：errors.Is → 显式状态码 + code（= 哨兵 Error()）
+            respond.Fail(c, http.StatusConflict, providerapi.ErrProviderNameConflict.Error(), err.Error())
+            return
+        }
+        respond.FailFromSentinel(c, err)                   // 通用哨兵自动映射，其余兜底 500 + 记日志
+        return
+    }
+    respond.OK(c, resp)                                    // 包装响应
 }
 ```
 
 规则：
 
-- 绑定函数命名用 REST 动词：create / get / list / update / delete，非 CRUD 用动作名（如 testConnection）；固定 5 步模板，一个绑定函数只调一个接口方法。
-- handler 只 import 本模块 `api` + `platform/respond` + gin，不 import 本模块 `service` / `store`。
+- 绑定函数命名用 REST 动词：create / get / list / update / delete，非 CRUD 用动作名（如 testConnection）；绑定 + 校验合一步走 `respond.BindJSON`（Req 须实现 `Validate()`，即 `respond.Validatable`），失败已写 400 信封、handler 直接 return；一个绑定函数只调一个接口方法。
+- 错误响应一律走 `respond.Fail*` 信封：模块哨兵先 `errors.Is(err, …)` → `respond.Fail(c, 状态码, 哨兵.Error(), err.Error())` 显式映射，通用哨兵与未识别错误走 `respond.FailFromSentinel(c, err)`（自动映射 / 兜底 500）。`error.code` 只能是哨兵的 `Error()` 字符串，禁止裸字符串或原始异常文本上抛。
+- handler 只 import 本模块 `api` + `platform/respond` + gin + net/http（状态码常量），不 import 本模块 `service` / `store`。
 
 **组合根（`cmd/hify/main.go`）：** 只装配，无业务。沿依赖清单自下游而上游，每个模块按 store → service → handler 顺序构建；下游模块 `service.New(...)` 的返回值就是 api 接口，直接作为上游 `service.New(...)` 的入参注入：
 
@@ -406,7 +405,7 @@ agentSvc      := agentsvc.New(agentStore, providerSvc)       // 下游 api 接�
 providerhandler.New(providerSvc).RegisterRoutes(rg)          // handler 注入同一个 api 实现
 ```
 
-步骤：1. 加载配置 → 2. 初始化 platform（db / redis / llm / budget / logging）→ 3. provider → mcp → agent → rag → workflow → chat → 4. 挂中间件，调各模块 RegisterRoutes → 5. 启动服务。单文件超 400 行拆 `internal/app/`。
+步骤：1. 加载配置 → 2. 初始化 platform（db / redis / llm / budget / logging）→ 3. provider → mcp → agent → rag → workflow → chat → 4. 挂中间件（`respond.Recovery()` 必须最外层，兜底其后所有中间件 / handler 的 panic），调各模块 RegisterRoutes → 5. 启动服务。单文件超 400 行拆 `internal/app/`。
 
 **全模块通则：**
 

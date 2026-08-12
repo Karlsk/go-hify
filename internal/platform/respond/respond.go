@@ -55,18 +55,24 @@ func OKWithMeta(c *gin.Context, data any, meta any) {
 	c.JSON(http.StatusOK, Result{Success: true, Data: data, Meta: meta})
 }
 
-// Fail 写失败信封：调用方显式指定 HTTP 状态码、机器可读 code、人类可读 message。
-// 其余失败类函数（BadRequest / NotFound / Error）均经此入口，no-store 在此统一打。
+// Fail 写失败信封：调用方显式指定 HTTP 状态码、机器可读 code、人类可读 message（无 details）。
+// 其余失败类函数（FailFromSentinel / BadRequest / NotFound / Error）均经此入口，no-store 在此统一打。
 func Fail(c *gin.Context, httpStatus int, code, message string) {
+	FailWithDetails(c, httpStatus, code, message, nil)
+}
+
+// FailWithDetails 写带 details 的失败信封（如字段级校验错误 details.fields）。
+// 所有失败响应的最底入口：no-store 在此统一打；code 必须取自哨兵的 Error() 字符串，禁止裸字符串。
+func FailWithDetails(c *gin.Context, httpStatus int, code, message string, details any) {
 	noStore(c)
 	c.JSON(httpStatus, Result{
 		Success: false,
-		Error:   &ErrorBody{Code: code, Message: message},
+		Error:   &ErrorBody{Code: code, Message: message, Details: details},
 	})
 }
 
-// BadRequest 写 400 + VALIDATION_FAILED（参数绑定 / 校验失败）。
-// 字段级错误请改用 Fail 自带 details，或在 details 接入后扩展 WithDetails 变体。
+// BadRequest 写 400 + VALIDATION_FAILED（参数绑定 / 校验失败，无字段级 details）。
+// 需要字段级错误用 BindJSON（自动带 details.fields）或直接调 FailWithDetails。
 func BadRequest(c *gin.Context, message string) {
 	Fail(c, http.StatusBadRequest, errs.ErrValidationFailed.Error(), message)
 }
