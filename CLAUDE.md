@@ -105,11 +105,13 @@ internal/
     ├── logging/              # slog 结构化日志（stdout + 文件 rotate + SetDefault）；executions 表归 chat/llm 模块
     ├── errs/                 # 跨业务域通用哨兵错误（gin 无关叶子包，供 respond/handler 用 errors.Is 映射）
     └── respond/              # 统一 API 响应信封（success / data / error / meta）
-web/                          # Vue 3 前端，独立构建
+web/                          # Vue 3 前端，独立构建（目录结构与约定见 web/README.md）
 migrations/                   # goose/golang-migrate SQL 文件（禁止 GORM AutoMigrate）
 ```
 
 模块内部统一为四层子包：`api/`（契约层）/ `service/`（业务层）/ `store/`（数据层）/ `handler/`（HTTP 层），详见《模块内部结构》。
+
+前端骨架（目录结构、技术栈版本、请求 / SSE / 分页约定、开发命令）记录在 [web/README.md](web/README.md)；本节仅列顶层位置，前端规范以该文件为准。
 
 ### 依赖方向（单向，禁止循环）
 
