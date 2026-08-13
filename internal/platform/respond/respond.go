@@ -49,6 +49,12 @@ func OK(c *gin.Context, data any) {
 	OKWithMeta(c, data, nil)
 }
 
+// Created 写 201 + 成功信封（POST 创建成功，CLAUDE.md《错误处理》状态映射）。
+func Created(c *gin.Context, data any) {
+	noStore(c)
+	c.JSON(http.StatusCreated, Result{Success: true, Data: data, Meta: nil})
+}
+
 // OKWithMeta 写 200 + 成功信封，附带 meta（如分页信息）。
 func OKWithMeta(c *gin.Context, data any, meta any) {
 	noStore(c)

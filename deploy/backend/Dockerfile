@@ -6,6 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+COPY migrations ./migrations
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/hify ./cmd/hify
 
 FROM alpine:3.20
@@ -13,6 +14,7 @@ FROM alpine:3.20
 RUN addgroup -S app && adduser -S -G app app
 WORKDIR /app
 COPY --from=builder /out/hify /app/hify
+COPY --from=builder /src/migrations /app/migrations
 RUN mkdir -p /app/logs && chown -R app:app /app
 USER app
 EXPOSE 8080

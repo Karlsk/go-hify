@@ -21,7 +21,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml --env-file deploy/.env
 .DEFAULT_GOAL := help
 
 .PHONY: help start stop restart build build-backend build-frontend clean package \
-        certs compose-up compose-down
+        certs compose-up compose-down migrate-up migrate-down migrate-status
 
 help:
 	@echo "Hify Makefile（当前 ENV=$(ENV)）"
@@ -32,6 +32,9 @@ help:
 	@echo "  make clean                  清理构建产物（bin/ web/dist/ dist/；不动 node_modules、logs）"
 	@echo "  make package                打包可分发 tar.gz（依赖 build）"
 	@echo "  make certs                  生成自签 TLS 证书（开发用，输出 deploy/certs/）"
+	@echo "  make migrate-up             应用全部未执行迁移（goose，./hify migrate up）"
+	@echo "  make migrate-down           回滚最近一个迁移"
+	@echo "  make migrate-status         查看迁移状态"
 
 # ---- 启动 / 停止 / 重启：按 ENV 分派 ----
 ifeq ($(ENV),prod)
@@ -110,3 +113,13 @@ certs:
 	  -keyout deploy/certs/privkey.pem -out deploy/certs/fullchain.pem \
 	  -subj "/CN=localhost" >/dev/null 2>&1
 	@echo "==> 已生成自签证书 deploy/certs/（开发用）；生产环境请替换为正式证书"
+
+# ---- 数据库迁移（goose，经 ./hify migrate 子命令；需本地 PG 就绪 + .env 配置）----
+migrate-up:
+	@$(GO) run ./cmd/hify migrate up
+
+migrate-down:
+	@$(GO) run ./cmd/hify migrate down
+
+migrate-status:
+	@$(GO) run ./cmd/hify migrate status

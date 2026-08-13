@@ -12,6 +12,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	authhandler "github.com/Karlsk/go-hify/internal/auth/handler"
+	authsvc "github.com/Karlsk/go-hify/internal/auth/service"
+	authstore "github.com/Karlsk/go-hify/internal/auth/store"
 	"github.com/Karlsk/go-hify/internal/platform/config"
 	"github.com/Karlsk/go-hify/internal/platform/db"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
@@ -51,8 +54,13 @@ func Run(cfg *config.Config) error {
 	// TODO: platform/budget（每用户限流 + 每日预算熔断，fail-open + 80% 告警）
 
 	// ── ③ 业务模块装配（store → service → handler，自下游而上游）─────
+	// auth 最先：其 handler 提供登录中间件，挂 v1 后其余模块路由受保护。
+	authStore := authstore.New(gormDB)
+	authSvc := authsvc.New(authStore, rdb)
+	authH := authhandler.New(authSvc, cfg.Auth.CookieSecure)
+
+	// 其余模块当前为空壳（任务六），构造函数待业务实现后按下序填入：
 	// 顺序：provider → mcp → agent → rag → workflow → chat（chat 最后，依赖图最外层、零被依赖）。
-	// 各模块当前为空壳（任务六），构造函数待业务实现后按下序填入：
 	//
 	//   providerStore := providerstore.New(gormDB)
 	//   providerSvc   := providersvc.New(providerStore)                  // 返回 providerapi.ProviderService
@@ -63,10 +71,6 @@ func Run(cfg *config.Config) error {
 	//   ... rag / workflow / chat 同理，chat 最后 ...
 	//   providerhandler.New(providerSvc).RegisterRoutes(v1)
 	//   ...
-	//
-	// gormDB / rdb 注入前暂无消费方（下方显式标注，过编译期未用检查）：
-	_ = gormDB // → 各模块 store.New(gormDB)
-	_ = rdb    // → 配置缓存 / 语义缓存 / 限流预算计数模块
 
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()
@@ -78,9 +82,11 @@ func Run(cfg *config.Config) error {
 	r.GET("/health", health)
 
 	v1 := r.Group("/api/v1")
-	// TODO: auth 中间件挂 v1（除 /auth/login 外）—— auth 模块落地后
-	// TODO: 各模块 handler.RegisterRoutes(v1)（provider / mcp / agent / rag / workflow / chat / auth）
-	_ = v1 // 路由组已建、待 auth 中间件与各模块 RegisterRoutes 挂载（骨架阶段过未用检查）
+	// 中间件必须先于路由注册挂载（gin 的 Use 只对之后注册的路由生效）；
+	// login/register 由中间件内部白名单放行。业务 API 一期不按用户隔离，但仍要求登录门槛。
+	v1.Use(authH.Middleware())
+	authH.RegisterRoutes(v1)
+	// TODO: 各模块 handler.RegisterRoutes(v1)（provider / mcp / agent / rag / workflow / chat）
 
 	// ── ⑤ 启动（§组合根步骤 5）──────────────────────────────────────
 	slog.Info("hify ready", slog.String("addr", ":"+cfg.Server.Port), slog.String("version", version))

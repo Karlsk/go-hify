@@ -43,6 +43,7 @@ type RedisCfg struct {
 // AuthCfg 最简登录 / session。
 type AuthCfg struct {
 	SessionSecret string // session 签名密钥；必填，生产用随机长串
+	CookieSecure  bool   // session cookie 加 Secure 属性；生产 HTTPS 下 true，本地 dev http 下 false
 }
 
 // LLMCfg 外部模型提供商 API Key（CLAUDE.md §密钥：禁止入 Git）。
@@ -83,6 +84,7 @@ func MustLoad() *Config {
 		},
 		Auth: AuthCfg{
 			SessionSecret: envStr("SESSION_SECRET", ""),
+			CookieSecure:  envBool("AUTH_COOKIE_SECURE", false),
 		},
 		LLM: LLMCfg{
 			OpenAIKey:     envStr("OPENAI_API_KEY", ""),
@@ -141,6 +143,16 @@ func envInt64(key string, defaultValue int64) int64 {
 	if v, ok := os.LookupEnv(key); ok {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
+		}
+	}
+	return defaultValue
+}
+
+// envBool 读布尔环境变量（true/false/1/0），缺失或非法返回 defaultValue。
+func envBool(key string, defaultValue bool) bool {
+	if v, ok := os.LookupEnv(key); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return defaultValue

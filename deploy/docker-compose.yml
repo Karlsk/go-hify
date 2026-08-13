@@ -24,6 +24,21 @@ services:
     networks:
       - hify
 
+  # 一次性迁移服务：应用表结构演进（goose）后退出；hify 依赖其完成
+  migrate:
+    image: hify-backend:latest
+    command: ["/app/hify", "migrate", "up"]
+    env_file:
+      - .env
+    environment:
+      PG_DSN: "host=postgres user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} dbname=hify port=5432 sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - hify
+
   # 唯一业务进程；非 root；/health 探活
   hify:
     build:
@@ -40,6 +55,8 @@ services:
     volumes:
       - logs:/app/logs
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

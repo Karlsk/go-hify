@@ -104,6 +104,7 @@ internal/
     ├── budget/               # 每用户限流 + 每日预算熔断（fail-open + 80% 告警）
     ├── logging/              # slog 结构化日志（stdout + 文件 rotate + SetDefault）；executions 表归 chat/llm 模块
     ├── errs/                 # 跨业务域通用哨兵错误（gin 无关叶子包，供 respond/handler 用 errors.Is 映射）
+    ├── authctx/              # 登录用户身份 ctx 注入/提取（业务模块不依赖 auth，身份类型下沉 platform）
     └── respond/              # 统一 API 响应信封（success / data / error / meta）
 web/                          # Vue 3 前端，独立构建（目录结构与约定见 web/README.md）
 deploy/                        # Docker Compose 部署：前后端 Dockerfile、nginx 配置、compose、备份脚本（用法见 deploy/README.md）
@@ -990,7 +991,7 @@ Hify 后端所有 HTTP 接口的统一规范，与《代码组织规范》handle
 
 | 模块 | 资源 | 代表路由 |
 |---|---|---|
-| auth | session | `POST /auth/login`、`POST /auth/logout`、`GET /auth/me` |
+| auth | session | `POST /auth/login`、`POST /auth/register`、`POST /auth/logout`、`GET /auth/me` |
 | provider | providers、models | `/providers`、`/providers/{id}/models`、`/providers/{id}/test-connection` |
 | mcp | mcp-servers、tools | `/mcp-servers`、`/mcp-servers/{id}/tools`、`/mcp-servers/{id}/discover` |
 | agent | agents | `/agents`、`/agents/{id}/mcp-tools`、`/agents/{id}/knowledge-bases` |
@@ -1116,7 +1117,8 @@ HTTP 状态映射：
 
 ### 认证
 
-- `POST /api/v1/auth/login` 成功后下发 session（HttpOnly + SameSite=Lax cookie，存 Redis）；其余 `/api/v1/*` 除 `auth/login` 外一律经 auth 中间件。
+- `POST /api/v1/auth/register` 开放注册（20-50 人内部工具，用户名唯一，密码 bcrypt 哈希）；`POST /api/v1/auth/login` 成功后下发 session（cookie 名 `hify_session`：HttpOnly + SameSite=Lax，Secure 由 `AUTH_COOKIE_SECURE` 控制——生产 HTTPS 开、本地 dev 关；session 本体存 Redis，256bit 随机 token，TTL 7 天）。
+- 其余 `/api/v1/*` 除 `auth/login`、`auth/register` 外一律经 auth 中间件（gin 的 `Use` 只对之后注册的路由生效——组合根先挂中间件再 RegisterRoutes，login/register 由中间件内部白名单放行）。业务 API 一期不按用户隔离，但仍要求登录门槛；身份经 `platform/authctx` 注入 ctx，供 budget 计数与后续 `user_id` 落库。
 - SSE 用 `fetch` + `credentials: "include"`（带 cookie），**不用 `EventSource`**（不能自定义 header / 带鉴权）。
 - 用户身份随 `ctx` 注入下游，跨模块调用与 HTTP 复用同一套接口；限流 / 预算在 platform 层按 ctx 内用户计数（见《跨模块调用规则》）。
 
