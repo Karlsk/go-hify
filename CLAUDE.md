@@ -106,7 +106,8 @@ internal/
     ├── errs/                 # 跨业务域通用哨兵错误（gin 无关叶子包，供 respond/handler 用 errors.Is 映射）
     └── respond/              # 统一 API 响应信封（success / data / error / meta）
 web/                          # Vue 3 前端，独立构建（目录结构与约定见 web/README.md）
-migrations/                   # goose/golang-migrate SQL 文件（禁止 GORM AutoMigrate）
+deploy/                        # Docker Compose 部署：前后端 Dockerfile、nginx 配置、compose、备份脚本（用法见 deploy/README.md）
+migrations/                    # goose/golang-migrate SQL 文件（禁止 GORM AutoMigrate）
 ```
 
 模块内部统一为四层子包：`api/`（契约层）/ `service/`（业务层）/ `store/`（数据层）/ `handler/`（HTTP 层），详见《模块内部结构》。
@@ -531,6 +532,8 @@ type Profile struct {
 ## 部署架构
 
 单机 Docker Compose，**4 个常驻容器 + 1 个定时容器**，2C4G 预算内。唯一对外暴露的是 nginx 的 443；Go、PG、Redis 全部走 compose 内部网络，不暴露端口。
+
+> 本节描述的部署形态已落地为 [deploy/](deploy/)（docker-compose.yml + 前后端 Dockerfile + nginx.conf + 备份脚本），部署步骤见 deploy/README.md；`make start ENV=prod` / `make stop ENV=prod` 走容器，`ENV=dev` 走本地脚本。
 
 ```
 ┌────────────────────────── Docker Compose 单机 (2C4G) ──────────────────────────┐

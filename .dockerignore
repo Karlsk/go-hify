@@ -1,0 +1,18 @@
+# Docker build context（仓库根）排除清单
+.git
+.idea
+.qoder
+.DS_Store
+
+# 依赖与构建产物（镜像内自行构建）
+**/node_modules
+web/node_modules
+web/dist
+bin
+dist
+logs
+
+# 密钥与本地配置（禁止入镜像）
+.env
+deploy/.env
+deploy/certs

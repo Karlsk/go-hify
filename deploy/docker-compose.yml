@@ -1,0 +1,129 @@
+# Hify 单机 Docker Compose —— 对应 CLAUDE.md《部署架构》：
+# 4 常驻容器（nginx/hify/postgres/redis）+ 1 定时容器（backup）；仅 nginx 暴露 80/443。
+# 配置在 deploy/.env（cp deploy/.env.example deploy/.env）；容器网络内地址由本文件显式注入。
+name: hify
+
+services:
+  # 入口网关 = 前端镜像：TLS 终结 / 静态 / 反代 / SSE 透传
+  nginx:
+    build:
+      context: ..
+      dockerfile: deploy/frontend/Dockerfile
+    image: hify-web:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - hify
+    restart: always
+    mem_limit: 128m
+    ulimits:
+      nofile: 65535
+    networks:
+      - hify
+
+  # 唯一业务进程；非 root；/health 探活
+  hify:
+    build:
+      context: ..
+      dockerfile: deploy/backend/Dockerfile
+    image: hify-backend:latest
+    env_file:
+      - .env
+    environment:
+      SERVER_PORT: "8080"
+      # 容器网络内地址（覆盖 .env 里的 host=localhost 本地开发值）
+      PG_DSN: "host=postgres user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} dbname=hify port=5432 sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+    volumes:
+      - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    mem_limit: 1g
+    ulimits:
+      nofile: 65535
+    networks:
+      - hify
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: hify
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d hify"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: always
+    mem_limit: 768m
+    ulimits:
+      nofile: 65535
+    networks:
+      - hify
+
+  redis:
+    image: redis:7-alpine
+    # AOF 持久化：预算计数不能因重启清零（CLAUDE.md §卷）
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: always
+    mem_limit: 256m
+    ulimits:
+      nofile: 65535
+    networks:
+      - hify
+
+  # 每日 02:00 pg_dump → backups 卷，保留 14 天（deploy/backup/backup.sh）
+  backup:
+    image: postgres:17-alpine
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+    volumes:
+      - ./backup/backup.sh:/backup.sh:ro
+      - backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'echo "0 2 * * * /backup.sh" | crontab - && crond -f'
+    restart: always
+    mem_limit: 100m
+    ulimits:
+      nofile: 65535
+    networks:
+      - hify
+
+networks:
+  hify:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  logs:
+  backups:
