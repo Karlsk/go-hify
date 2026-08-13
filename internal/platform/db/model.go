@@ -29,10 +29,12 @@ type BaseAppendOnly struct {
 
 // BaseMutable 是可变表（providers / agents / mcp_servers / knowledge_bases /
 // workflows / conversations / documents）的标准表头：在 append-only 基础上加 updated_at。
-// GORM autoUpdateTime 在每次 UPDATE 时维护 updated_at（CLAUDE.md：「GORM autoUpdateTime 维护」）。
+// GORM autoUpdateTime 在 INSERT / UPDATE 时都维护 updated_at（CLAUDE.md：「GORM autoUpdateTime 维护」；
+// INSERT 侧 GORM 源码 callbacks/create.go 对 AutoUpdateTime 有专门分支）；
+// `default:now()` 与 migrations 的 DEFAULT now() 对齐，是裸 SQL 插入路径的兜底。
 type BaseMutable struct {
 	BaseAppendOnly
-	UpdatedAt time.Time `gorm:"type:timestamptz;not null;autoUpdateTime"`
+	UpdatedAt time.Time `gorm:"type:timestamptz;not null;default:now();autoUpdateTime"`
 }
 
 // BaseSoftDelete 是软删除表（仅 agents / documents）的标准表头。
