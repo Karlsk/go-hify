@@ -5,6 +5,9 @@ set -eu
 
 BACKUP_DIR=/backups
 
+# executions 分区维护（建当月/下月分区、删 >90 天旧分区，幂等）
+psql -h postgres -U "${POSTGRES_USER}" -d hify -f /partition_maintenance.sql
+
 pg_dump -h postgres -U "${POSTGRES_USER}" -d hify -Fc \
   -f "${BACKUP_DIR}/hify_$(date +%F_%H%M%S).dump"
 

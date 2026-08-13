@@ -103,6 +103,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
     volumes:
       - ./backup/backup.sh:/backup.sh:ro
+      - ./backup/partition_maintenance.sql:/partition_maintenance.sql:ro
       - backups:/backups
     depends_on:
       postgres:
