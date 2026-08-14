@@ -15,6 +15,9 @@ import (
 	authhandler "github.com/Karlsk/go-hify/internal/auth/handler"
 	authsvc "github.com/Karlsk/go-hify/internal/auth/service"
 	authstore "github.com/Karlsk/go-hify/internal/auth/store"
+	demohandler "github.com/Karlsk/go-hify/internal/demo/handler"
+	demosvc "github.com/Karlsk/go-hify/internal/demo/service"
+	demostore "github.com/Karlsk/go-hify/internal/demo/store"
 	"github.com/Karlsk/go-hify/internal/platform/config"
 	"github.com/Karlsk/go-hify/internal/platform/db"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
@@ -59,7 +62,12 @@ func Run(cfg *config.Config) error {
 	authSvc := authsvc.New(authStore, rdb)
 	authH := authhandler.New(authSvc, cfg.Auth.CookieSecure)
 
-	// 其余模块当前为空壳（任务六），构造函数待业务实现后按下序填入：
+	// demo：标准 CRUD 参照实现（任务 #6，表见 migrations/00008_demo_items.sql）——
+	// 四层结构是真实业务模块的起稿模板，provider 等模块落地后可整体移除。
+	demoStore := demostore.New(gormDB)
+	demoSvc := demosvc.New(demoStore) // 返回 demoapi.DemoService
+
+	// 其余模块当前为空壳，构造函数待业务实现后按下序填入：
 	// 顺序：provider → mcp → agent → rag → workflow → chat（chat 最后，依赖图最外层、零被依赖）。
 	//
 	//   providerStore := providerstore.New(gormDB)
@@ -90,6 +98,7 @@ func Run(cfg *config.Config) error {
 	// login/register 由中间件内部白名单放行。业务 API 一期不按用户隔离，但仍要求登录门槛。
 	v1.Use(authH.Middleware())
 	authH.RegisterRoutes(v1)
+	demohandler.New(demoSvc).RegisterRoutes(v1) // demo 参照实现（受登录中间件保护）
 	// TODO: 各模块 handler.RegisterRoutes(v1)（provider / mcp / agent / rag / workflow / chat）
 
 	// ── ⑤ 启动（§组合根步骤 5）──────────────────────────────────────
