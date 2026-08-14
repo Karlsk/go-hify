@@ -105,7 +105,9 @@ internal/
     ├── logging/              # slog 结构化日志（stdout + 文件 rotate + SetDefault）；executions 表归 chat/llm 模块
     ├── errs/                 # 跨业务域通用哨兵错误（gin 无关叶子包，供 respond/handler 用 errors.Is 映射）
     ├── authctx/              # 登录用户身份 ctx 注入/提取（业务模块不依赖 auth，身份类型下沉 platform）
-    └── respond/              # 统一 API 响应信封（success / data / error / meta）
+    ├── respond/              # 统一 API 响应信封（success / data / error / meta）
+    ├── page/                 # 统一分页：偏移分页（配置表）+ 游标分页（大列表 keyset，禁 OFFSET）
+    └── timex/                # 统一时间序列化：纯日期 Date（yyyy-MM-dd）；datetime 用 time.Time 默认 RFC 3339
 web/                          # Vue 3 前端，独立构建（目录结构与约定见 web/README.md）
 deploy/                        # Docker Compose 部署：前后端 Dockerfile、nginx 配置、compose、备份脚本（用法见 deploy/README.md）
 migrations/                    # goose/golang-migrate SQL 文件（禁止 GORM AutoMigrate）
@@ -1026,7 +1028,7 @@ Hify 后端所有 HTTP 接口的统一规范，与《代码组织规范》handle
 
 - **命名**：JSON 字段 snake_case（与 Go schema 的 `json` tag、DB 列名一致），如 `api_key`、`created_at`、`model_id`。Go 结构体字段本身保持驼峰（如 `APIKey`、`CreatedAt`），snake_case 只出现在 `json` tag 与实际报文里——见《命名规范（Go 标准）》。
 - **ID 序列化为字符串**：bigint 主键/外键在 JSON 里一律输出字符串（Go 用 `json:"id,string"`），避免 JS 超过 `2^53` 丢精度（`"id": "12345678901234567"`，不是数字）。URL `{id}` 同样按字符串传。
-- **时间**：RFC 3339 / ISO 8601，UTC，带 `Z`，如 `"2026-08-10T12:34:56Z"`。
+- **时间**：RFC 3339 / ISO 8601，UTC，带 `Z`，如 `"2026-08-10T12:34:56Z"`。datetime 字段用标准库 `time.Time`（Go 默认即按 RFC 3339 输出，不输出 Unix 时间戳，无需任何开关）；纯日期字段（无时分秒）用 [`platform/timex`](internal/platform/timex/date.go).`Date`（序列化为 `"2006-01-02"`，可空用 `*Date`）。
 - **枚举**：字符串（`"role": "assistant"`、`"status": "processing"`），与 DB 的 `text+CHECK` 对齐，不传数字。
 
 ### 空值约定
