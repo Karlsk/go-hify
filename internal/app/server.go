@@ -74,6 +74,10 @@ func Run(cfg *config.Config) error {
 
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()
+	// 校验错误报 JSON 字段名而非 Go 字段名（填 respond/bind.go 既有 TODO）；失败非致命，回退 Go 名。
+	if err := respond.RegisterFieldNames(); err != nil {
+		slog.Warn("validator field-name registration failed (errors will report Go field names)", "err", err)
+	}
 	// Recovery 必须最外层：兜底其后所有中间件 / handler 的 panic（业务错误走返回值，不到这层）。
 	r.Use(respond.Recovery())
 

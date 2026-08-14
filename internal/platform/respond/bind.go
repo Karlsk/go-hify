@@ -27,7 +27,7 @@ type validationDetails struct {
 	Fields []fieldError `json:"fields"`
 }
 
-// BindJSON 绑定（binding tag 字段格式）+ 校验（跨字段 Validate()）两步合一步。
+// BindJSON 绑定 JSON body（binding tag 字段格式）+ 校验（跨字段 Validate()）两步合一步。
 // 失败时写 400 + VALIDATION_FAILED 信封（binding 失败带 details.fields 字段级错误）并返回 false；
 // 成功返回 true。handler 拿到 false 直接 return，无需再写错误分支：
 //
@@ -35,10 +35,38 @@ type validationDetails struct {
 //	    return
 //	}
 //
-// 字段名当前取 validator 的 Go 字段名；改用 JSON 名需在 gin 装配处给 validator
-// 注册 RegisterTagNameFunc（读 json tag），属 main.go 装配职责，不在此耦合。
+// 校验错误报请求侧字段名（json tag）而非 Go 字段名——需在 gin 装配处调一次 RegisterFieldNames
+// （见 app/server.go）；未注册则回退 Go 字段名。
 func BindJSON(c *gin.Context, req Validatable) bool {
-	if err := c.ShouldBindJSON(req); err != nil {
+	return bind(c, req, c.ShouldBindJSON)
+}
+
+// BindQuery 绑定 query string（form tag 字段格式，如 ?page=1&page_size=20）+ 校验。
+// 语义与 BindJSON 一致，仅数据来源不同（c.ShouldBindQuery）。用于列表分页等 query 参数接口：
+//
+//	var req ListReq
+//	if !respond.BindQuery(c, &req) {
+//	    return
+//	}
+func BindQuery(c *gin.Context, req Validatable) bool {
+	return bind(c, req, c.ShouldBindQuery)
+}
+
+// BindUri 绑定路径参数（uri tag，如 /providers/:id）+ 校验。语义同 BindJSON，来源 c.ShouldBindUri：
+//
+//	var req GetReq // { ID string `uri:"id" binding:"required,numeric"` }
+//	if !respond.BindUri(c, &req) {
+//	    return
+//	}
+func BindUri(c *gin.Context, req Validatable) bool {
+	return bind(c, req, c.ShouldBindUri)
+}
+
+// bind 是 BindJSON/BindQuery/BindUri 的共享实现：bindFn 做请求→结构体的绑定（含 binding tag 校验），
+// 随后跑跨字段 Validate()。失败统一写 400 + VALIDATION_FAILED；成功返回 true。
+// 三通道共用同一套错误格式——binding 失败带 details.fields 字段级错误，Validate 失败带其 message。
+func bind(c *gin.Context, req Validatable, bindFn func(any) error) bool {
+	if err := bindFn(req); err != nil {
 		msg, details := bindingDetails(err)
 		FailWithDetails(c, http.StatusBadRequest, errs.ErrValidationFailed.Error(), msg, details)
 		return false
