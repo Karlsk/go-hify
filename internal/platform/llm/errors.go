@@ -72,6 +72,8 @@ var (
 	ErrProviderBusy = errors.New("PROVIDER_BUSY")
 	// ErrProviderUnavailable 熔断打开 / ProviderDown（HTTP 503）。
 	ErrProviderUnavailable = errors.New("PROVIDER_UNAVAILABLE")
+	// ErrUnsupportedKind provider kind 不在 adapter 白名单内（factory 构造期拒绝）。
+	ErrUnsupportedKind = errors.New("llm: unsupported provider kind")
 )
 
 // 三层超时的 ctx cause 哨兵（CLAUDE.md：一律 WithTimeoutCause + context.Cause 区分，

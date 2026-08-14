@@ -20,6 +20,7 @@ import (
 	demostore "github.com/Karlsk/go-hify/internal/demo/store"
 	"github.com/Karlsk/go-hify/internal/platform/config"
 	"github.com/Karlsk/go-hify/internal/platform/db"
+	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
 	"github.com/Karlsk/go-hify/internal/platform/redisx"
 	"github.com/Karlsk/go-hify/internal/platform/respond"
@@ -53,7 +54,12 @@ func Run(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("init redis: %w", err)
 	}
-	// TODO: platform/llm（bulkhead 16/供应商 + 熔断 + 三层超时 + 重试）
+	// llm：共享 Transport + 流式 Client 壳注入 eino adapter（定制 transport 见 platform/llm/httpx.go）；
+	// Manager 按 provider 惰性创建受保护 Client（bulkhead → 熔断 → 重试 → 三层超时）。
+	llmTransport := llm.NewSharedTransport()
+	llmManager := llm.NewManager(llm.NewUpstreamFactory(llm.NewStreamClient(llmTransport)))
+	// TODO: 注入消费方——provider（连通性探测）/ chat（对话引擎）；建成前以 _ 保留引用。
+	_ = llmManager
 	// TODO: platform/budget（每用户限流 + 每日预算熔断，fail-open + 80% 告警）
 
 	// ── ③ 业务模块装配（store → service → handler，自下游而上游）─────
