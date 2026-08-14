@@ -85,10 +85,10 @@ func IncrWithExpire(ctx context.Context, rdb *redis.Client, key string, ttl time
 //
 // 注意（关注点分离）：语义缓存、限流是特定业务域的语义，其常量本应归对应模块所有。
 // 当前 chat/rag、platform/budget 模块尚未建，暂居本 infra 层；模块落地时迁回各自归属处。
+//
+// 配置类缓存 TTL 已移至 [github.com/Karlsk/go-hify/internal/platform/cache]
+// （DefaultTTL = 30 min，按缓存名可覆盖）——配置类缓存的 TTL 约定由 cache 包单一持有。
 const (
-	// ConfigCacheTTL 配置类 Cache-Aside 默认 TTL（CLAUDE.md：「TTL 5 分钟 + 写时删 key」），
-	// 跨模块通用的 infra 约定，留在本层合理。
-	ConfigCacheTTL = 5 * time.Minute
 	// SemanticCacheTTL 语义缓存答案 TTL（暂定 24h）→ 归属 chat/rag。
 	SemanticCacheTTL = 24 * time.Hour
 	// RateLimitWindow 限流计数固定窗口（暂定 60s）→ 归属 platform/budget。

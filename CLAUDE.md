@@ -52,7 +52,7 @@ Hify 是简化版 Dify 的 AI Agent 开发平台。约束（一切决策的前�
 
 - Docker Compose 本地一键部署，容器内存设上限（512m-1G）
 - 目标：20-50 人同时在线，峰值 3-5 QPS，瓶颈在 LLM 长连接；按 100 并发 SSE 流留余量，每提供商 bulkhead 16 级
-- 缓存只上三件：语义缓存（pgvector 相似度匹配 + Redis 存答案）、配置类 Cache-Aside（TTL 5 分钟 + 写时删 key）、静态资源长缓存；API 响应一律 `no-store`
+- 缓存只上三件：语义缓存（pgvector 相似度匹配 + Redis 存答案）、配置类 Cache-Aside（TTL 30 分钟 + 写时删 key）、静态资源长缓存；API 响应一律 `no-store`；全仓库 Redis key 统一 `hify:` 前缀（`redisx.Key` 拼接，命名空间隔离）
 - 监控：起步 `/health` + 结构化日志（持久化到卷 + rotation，LLM 调用记 provider / model / token / 耗时 / 错误类），后期 Prometheus + Grafana
 - 必做：PG 每日备份保留 7-14 天（唯一不可再生数据）；预算熔断 fail-open + 80% 告警；`restart: always` + healthcheck；磁盘告警与上线前泄漏 soak 测试
 - 约定：迁移用 goose/golang-migrate + SQL，禁止 GORM AutoMigrate 做表结构演进；API Key 走 `.env` / Docker secrets，禁止入 Git
@@ -107,7 +107,8 @@ internal/
     ├── authctx/              # 登录用户身份 ctx 注入/提取（业务模块不依赖 auth，身份类型下沉 platform）
     ├── respond/              # 统一 API 响应信封（success / data / error / meta）
     ├── page/                 # 统一分页：偏移分页（配置表）+ 游标分页（大列表 keyset，禁 OFFSET）
-    └── timex/                # 统一时间序列化：纯日期 Date（yyyy-MM-dd）；datetime 用 time.Time 默认 RFC 3339
+    ├── timex/                # 统一时间序列化：纯日期 Date（yyyy-MM-dd）；datetime 用 time.Time 默认 RFC 3339
+    └── cache/                # 配置类缓存管理器：按名 TTL + 写时删 key（Cache-Aside）；全仓库 key 经 redisx.Key 加 hify: 前缀
 web/                          # Vue 3 前端，独立构建（目录结构与约定见 web/README.md）
 deploy/                        # Docker Compose 部署：前后端 Dockerfile、nginx 配置、compose、备份脚本（用法见 deploy/README.md）
 migrations/                    # goose/golang-migrate SQL 文件（禁止 GORM AutoMigrate）
@@ -576,7 +577,7 @@ type Profile struct {
 | **nginx** | `nginx:alpine`（pinned） | ① TLS 终结 ② 服务 Vue 构建产物，`/assets` 长缓存、`index.html` no-cache ③ `/api/*` 反代到 `hify:8080` ④ SSE 透传：`proxy_buffering off` + `X-Accel-Buffering: no` + `proxy_read_timeout 300s`，SSE 路由绝不开 gzip ⑤ 请求体大小限制 | 不做负载均衡（单实例）；不做业务逻辑 |
 | **hify** | 多阶段构建，`golang:1.26-alpine` 编 → `alpine` 跑，非 root，`-ldflags="-s -w"` | ① 全部 API 与业务：auth（最简登录）、provider、agent、chat（SSE 流式）、rag、workflow、mcp ② `platform/llm` 统一 LLM 接入（bulkhead 16/供应商、熔断、三层超时、重试）③ `platform/budget` 每用户限流 + 每日预算熔断（fail-open + 80% 告警）④ `platform/logging` 结构化运行日志 ⑤ `/health` 健康检查（含 PG/Redis 连通性） | 不直接暴露端口；不托管静态文件（交给 nginx） |
 | **postgres** | `pgvector/pgvector:pg17` | ① 唯一事实源：provider / agent / chat / workflow / rag 等关系数据 ② pgvector HNSW 索引，向量召回走原生 SQL（`db.Raw`）③ 表结构演进走 goose/golang-migrate | 不做缓存；不做复杂视图/物化 |
-| **redis** | `redis:7-alpine` | ① 语义缓存（pgvector 相似度命中 → 直接回答案）② 配置类 Cache-Aside（TTL 5min + 写时删 key）③ 限流 / 预算计数器（`INCR` + 过期）④（可选）登录 session | 不做消息队列；不做主从 |
+| **redis** | `redis:7-alpine` | ① 语义缓存（pgvector 相似度命中 → 直接回答案）② 配置类 Cache-Aside（TTL 30min + 写时删 key）③ 限流 / 预算计数器（`INCR` + 过期）④（可选）登录 session；全仓库 key 统一 `hify:` 前缀 | 不做消息队列；不做主从 |
 | **backup** | `postgres:17-alpine` + cron | 每日 `pg_dump` 落 `backups` 卷，保留 7–14 天 | 只在 cron 时点跑，平时不占资源 |
 
 > 前端静态服务放 nginx 而非 `go:embed`：Vue 独立构建产物直接打进 nginx 镜像，前端改动只重建 web 镜像、后端零重启；长缓存控制也天然在 nginx。备选 `go:embed` 能合并成"真·单二进制"，但每次前端改动都要重建 Go 镜像，一人维护下不划算。
@@ -1119,7 +1120,7 @@ HTTP 状态映射：
 
 ### 认证
 
-- `POST /api/v1/auth/register` 开放注册（20-50 人内部工具，用户名唯一，密码 bcrypt 哈希）；`POST /api/v1/auth/login` 成功后下发 session（cookie 名 `hify_session`：HttpOnly + SameSite=Lax，Secure 由 `AUTH_COOKIE_SECURE` 控制——生产 HTTPS 开、本地 dev 关；session 本体存 Redis，256bit 随机 token，TTL 7 天）。
+- `POST /api/v1/auth/register` 开放注册（20-50 人内部工具，用户名唯一，密码 bcrypt 哈希）；`POST /api/v1/auth/login` 成功后下发 session（cookie 名 `hify_session`：HttpOnly + SameSite=Lax，Secure 由 `AUTH_COOKIE_SECURE` 控制——生产 HTTPS 开、本地 dev 关；session 本体存 Redis（key `hify:session:{token}`，只存最小身份 UserID/Username/CreatedAt，不含密码哈希），256bit 随机 token，TTL 7 天）。
 - 其余 `/api/v1/*` 除 `auth/login`、`auth/register` 外一律经 auth 中间件（gin 的 `Use` 只对之后注册的路由生效——组合根先挂中间件再 RegisterRoutes，login/register 由中间件内部白名单放行）。业务 API 一期不按用户隔离，但仍要求登录门槛；身份经 `platform/authctx` 注入 ctx，供 budget 计数与后续 `user_id` 落库。
 - SSE 用 `fetch` + `credentials: "include"`（带 cookie），**不用 `EventSource`**（不能自定义 header / 带鉴权）。
 - 用户身份随 `ctx` 注入下游，跨模块调用与 HTTP 复用同一套接口；限流 / 预算在 platform 层按 ctx 内用户计数（见《跨模块调用规则》）。
