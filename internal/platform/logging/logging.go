@@ -2,13 +2,13 @@
 //
 // 调用 [Init] 后：JSON（或 text）输出到 stdout + 可选文件（按大小 rotate，lumberjack），
 // 并 slog.SetDefault 全局生效——Recovery / gormLogger / 全仓 slog.* 调用统一走此句柄。
+// 句柄外层统一包一层 trace 提取（见 ctxhandler.go）：slog.*Context 调用自动从 ctx 提取
+// 请求级 trace_id（httpmw.RequestID 在请求入口注入）成为日志字段，调用方零感知。
 // 组合根（internal/app）把 [Init] 放在 platform 初始化第一步，其余一切（db/redis/业务）才都有日志可用。
 //
 // 本包不含（属业务 / 横切层，后续任务接）：
 //   - executions 表（LLM 调用审计：provider/model/token/耗时/错误类）—— 归 chat/llm 模块、落 DB，
-//     CLAUDE.md §677「执行日志在流结束后的短连接里写」；本包只提供 slog 句柄供其记录。
-//   - trace_id 请求级关联 —— 需 gin 中间件把 trace_id 注入 ctx、slog handler 从 ctx 提取，
-//     归 middleware 任务；落地后 slog.*Context 调用自动带上。
+//     CLAUDE.md「执行日志在流结束后的短连接里写」；本包只提供 slog 句柄供其记录。
 package logging
 
 import (
@@ -89,7 +89,8 @@ func Init(cfg Config) (*slog.Logger, error) {
 	} else {
 		h = slog.NewJSONHandler(w, opts) // 默认 json（生产可检索）
 	}
-	logger := slog.New(h)
+	// trace 包装在最外层：全仓 slog.*Context 调用自动带请求级 trace_id（见 ctxhandler.go）。
+	logger := slog.New(newTraceHandler(h))
 	slog.SetDefault(logger)
 	return logger, nil
 }
