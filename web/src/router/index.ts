@@ -17,6 +17,12 @@ const routes: RouteRecordRaw[] = [
     name: 'chat',
     component: () => import('@/views/chat/ChatView.vue'),
   },
+  {
+    // 设计系统 token 预览与验收页（不进侧边栏菜单，直接访问 URL）
+    path: '/design',
+    name: 'design',
+    component: () => import('@/views/design/DesignTokens.vue'),
+  },
 ]
 
 const router = createRouter({

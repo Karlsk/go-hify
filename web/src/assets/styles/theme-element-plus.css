@@ -1,0 +1,129 @@
+/* ============================================================
+ * Element Plus 主题映射层
+ * 规范文档：docs/design/design-system.md《Element Plus 映射》
+ *
+ * 职责：把 EP 的 --el-* 变量拉到 Hify 设计系统上，
+ * EP 组件自动继承主题。本文件只映射，不新增任何视觉决策；
+ * 改视觉值一律去 tokens.css。
+ *
+ * 派生色说明：EP 的 light-N 语义 = 基准色与白色混合 N×10%，
+ * dark-2 = 与黑色混合 20%。下方派生值按此计算。
+ * ============================================================ */
+
+:root {
+  /* ---------- 主色（品牌蓝紫 #5E6AD2） ---------- */
+  --el-color-primary: var(--hf-primary-500);
+  --el-color-primary-light-3: #8e97e0;
+  --el-color-primary-light-5: #afb5e9;
+  --el-color-primary-light-7: #cbd2f2;
+  --el-color-primary-light-8: #d9e1f6;
+  --el-color-primary-light-9: #eef0fb;
+  --el-color-primary-dark-2: #4b55a8;
+
+  /* ---------- 语义色 ---------- */
+  --el-color-success: var(--hf-success);
+  --el-color-success-light-3: #5cbf80;
+  --el-color-success-light-5: #8bd1a5;
+  --el-color-success-light-7: #b9e3c9;
+  --el-color-success-light-8: #d0eddb;
+  --el-color-success-light-9: #e8f6ed;
+  --el-color-success-dark-2: #12823b;
+
+  --el-color-warning: var(--hf-warning);
+  --el-color-warning-light-3: #f8bb54;
+  --el-color-warning-light-5: #facf85;
+  --el-color-warning-light-7: #fce2b5;
+  --el-color-warning-light-8: #fdeccd;
+  --el-color-warning-light-9: #fef5e5;
+  --el-color-warning-dark-2: #c47e09;
+
+  --el-color-danger: var(--hf-danger);
+  --el-color-danger-light-3: #f47c7c;
+  --el-color-danger-light-5: #f79a9a;
+  --el-color-danger-light-7: #fbbbbb;
+  --el-color-danger-light-8: #fccccc;
+  --el-color-danger-light-9: #fdecec;
+  --el-color-danger-dark-2: #bf3636;
+
+  /* EP 的 error 与 danger 同义，保持一致 */
+  --el-color-error: var(--hf-danger);
+  --el-color-error-light-3: #f47c7c;
+  --el-color-error-light-5: #f79a9a;
+  --el-color-error-light-7: #fbbbbb;
+  --el-color-error-light-8: #fccccc;
+  --el-color-error-light-9: #fdecec;
+  --el-color-error-dark-2: #bf3636;
+
+  --el-color-info: var(--hf-info);
+  --el-color-info-light-3: #939eae;
+  --el-color-info-light-5: #b2bac5;
+  --el-color-info-light-7: #d1d5dc;
+  --el-color-info-light-8: #e0e3e8;
+  --el-color-info-light-9: #f0f2f3;
+  --el-color-info-dark-2: #505d6f;
+
+  /* ---------- 文字 ---------- */
+  --el-text-color-primary: var(--hf-text-1);
+  --el-text-color-regular: var(--hf-text-2);
+  --el-text-color-secondary: var(--hf-text-3);
+  --el-text-color-placeholder: var(--hf-text-3);
+  --el-text-color-disabled: var(--hf-text-4);
+
+  /* ---------- 边框 ---------- */
+  --el-border-color: var(--hf-border-1);
+  --el-border-color-light: var(--hf-border-1);
+  --el-border-color-lighter: var(--hf-border-2);
+  --el-border-color-extra-light: var(--hf-border-2);
+  --el-border-color-dark: var(--hf-border-3);
+  --el-border-color-darker: var(--hf-border-3);
+  --el-border-color-hover: var(--hf-border-3);
+
+  /* ---------- 背景 / 填充 ---------- */
+  --el-bg-color: var(--hf-bg-container);
+  --el-bg-color-page: var(--hf-bg-page);
+  --el-bg-color-overlay: var(--hf-bg-container);
+  --el-fill-color: var(--hf-bg-muted);
+  --el-fill-color-light: var(--hf-bg-subtle);
+  --el-fill-color-lighter: var(--hf-bg-page);
+  --el-fill-color-extra-light: #fafbfc;
+  --el-fill-color-blank: var(--hf-bg-container);
+  --el-mask-color: var(--hf-bg-overlay);
+  --el-mask-color-extra-light: rgb(15 23 42 / 0.3);
+
+  /* ---------- 表格 ---------- */
+  --el-table-border-color: var(--hf-border-2);
+  --el-table-border: var(--hf-border-2);
+  --el-table-header-bg-color: var(--hf-bg-subtle);
+  --el-table-header-text-color: var(--hf-text-2);
+  --el-table-row-hover-bg-color: var(--hf-bg-subtle);
+  --el-table-tr-bg-color: var(--hf-bg-container);
+  --el-table-text-color: var(--hf-text-1);
+
+  /* ---------- 圆角 ---------- */
+  --el-border-radius-base: var(--hf-radius-sm);
+  --el-border-radius-small: var(--hf-radius-xs);
+  --el-border-radius-round: 20px;
+  --el-border-radius-circle: 50%;
+
+  /* ---------- 字体 ---------- */
+  --el-font-family: var(--hf-font-sans);
+  --el-font-size-extra-large: var(--hf-font-size-lg);
+  --el-font-size-large: var(--hf-font-size-md);
+  --el-font-size-medium: var(--hf-font-size-base);
+  --el-font-size-base: var(--hf-font-size-base);
+  --el-font-size-small: var(--hf-font-size-sm);
+  --el-font-size-extra-small: var(--hf-font-size-xs);
+  --el-font-line-height-primary: var(--hf-leading-normal);
+
+  /* ---------- 阴影 ---------- */
+  --el-box-shadow: var(--hf-shadow-lg);
+  --el-box-shadow-light: var(--hf-shadow-md);
+  --el-box-shadow-lighter: var(--hf-shadow-sm);
+  --el-box-shadow-dark: var(--hf-shadow-xl);
+
+  /* ---------- 动效 ---------- */
+  --el-transition-duration: var(--hf-duration-base);
+  --el-transition-duration-fast: var(--hf-duration-fast);
+  --el-ease-out-bezier: var(--hf-ease-out);
+  --el-ease-in-out-bezier: var(--hf-ease-in-out);
+}

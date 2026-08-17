@@ -30,9 +30,12 @@ web/
 ├── env.d.ts                # vite/client 类型引用（import.meta.env）
 └── src/
     ├── main.ts             # 挂载 Pinia + Router + ElementPlus + Icons
-    ├── App.vue             # 根布局：左侧 EP 菜单 + 右侧 <router-view />
+    ├── App.vue             # 根布局：深色侧边栏 + EP 菜单 + 右侧 <router-view />
     ├── assets/
-    │   └── styles/main.css # 全局 reset + 字体
+    │   └── styles/
+    │       ├── tokens.css             # 设计系统 --hf-* token（唯一事实源）
+    │       ├── theme-element-plus.css # EP --el-* 变量映射（只映射不新增）
+    │       └── main.css               # @import 上两者 + reset + body 基础样式
     ├── router/index.ts     # 路由表（三条扁平路由 /provider /agent /chat）
     ├── stores/             # Pinia 模块（user/session 等，按业务新增）
     ├── api/                # 各模块接口定义（axios 实例在 utils/request.ts）
@@ -44,8 +47,21 @@ web/
     └── views/
         ├── provider/ProviderList.vue
         ├── agent/AgentList.vue
-        └── chat/ChatView.vue
+        ├── chat/ChatView.vue
+        └── design/DesignTokens.vue   # 设计 token 预览页（/design，不进菜单）
 ```
+
+## 设计系统
+
+视觉规范的唯一事实源：[docs/design/design-system.md](../docs/design/design-system.md)（色值表、EP 映射策略、设计原则）。风格定位：**浅底 + 科技感点缀**——浅色主体保证表格可读性，深色侧边栏 + 亮色交互元素制造品牌感；主色 Linear 紫 `#5E6AD2`，辅色青色 `#06B6D4`（点缀/数据高亮，不兼语义状态）。
+
+文件与规则：
+
+- `assets/styles/tokens.css` —— `--hf-*` 语义 token（色彩色阶 / 背景 / 文字 / 边框 / 侧边栏 / 圆角 / 阴影 / 动效 / 字体 / 间距 / z-index）。**改视觉值只动这一个文件。**
+- `assets/styles/theme-element-plus.css` —— 把 `--el-*` 映射到 `--hf-*`（含 EP light-N 派生色），EP 组件自动继承主题；本文件不新增视觉决策。
+- 业务代码**只引用语义 token**（`var(--hf-bg-page)`），禁止硬编码色值 / 圆角 / 阴影；EP 组件默认即主题化，无需逐个覆盖。
+- token 按语义命名（非 `--hf-white` 式字面命名），为将来深色主题留扩展位：`html[data-theme="dark"]` 下覆盖 `--hf-*` 即可。
+- 验收：`npm run dev` 后访问 `/design` 预览页。
 
 ## 约定（与 CLAUDE.md 对齐）
 

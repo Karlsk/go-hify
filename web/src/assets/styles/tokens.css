@@ -1,0 +1,209 @@
+/* ============================================================
+ * Hify 设计系统（Design Tokens）—— 唯一事实源
+ * 规范文档：docs/design/design-system.md
+ *
+ * 命名约定：
+ *   --hf-*         语义 token（本文件），业务代码只引用语义名
+ *   --hf-primary-* 品牌主色色阶（Linear 紫）
+ *   --hf-accent-*  品牌辅色色阶（青色，点缀/数据高亮，不兼语义状态）
+ *   --hf-bg-* / --hf-text-* / --hf-border-*  背景/文字/边框色阶
+ *   --hf-sidebar-* 深色侧边栏专用
+ *
+ * 一期仅浅色主题；token 按语义命名，未来深色主题在
+ * html[data-theme="dark"] 下覆盖即可，不重命名。
+ * ============================================================ */
+
+:root {
+  /* ----------------------------------------------------------
+   * 主色：品牌蓝紫（Linear 紫 #5E6AD2）
+   * 500 为基准；主按钮底 500（白字对比度 4.67:1，WCAG AA），
+   * hover 600，按下 700；50/100 用于浅色选中底
+   * ---------------------------------------------------------- */
+  --hf-primary-50: #f1f2fb;
+  --hf-primary-100: #e4e7f9;
+  --hf-primary-200: #cbcff3;
+  --hf-primary-300: #a8aeea;
+  --hf-primary-400: #8189de;
+  --hf-primary-500: #5e6ad2;
+  --hf-primary-600: #4d57be;
+  --hf-primary-700: #40479c;
+  --hf-primary-800: #363c7d;
+  --hf-primary-900: #2f3364;
+  --hf-primary-950: #1b1d3c;
+  --hf-primary: var(--hf-primary-500);
+
+  /* ----------------------------------------------------------
+   * 辅色：青色 cyan（品牌点缀 / 数据高亮）
+   * 用于：在线状态点、数据可视化、数值高亮、工具调用标记。
+   * 不兼任语义状态色（success/warning/danger 用独立语义色）。
+   * ---------------------------------------------------------- */
+  --hf-accent-50: #ecfeff;
+  --hf-accent-100: #cffafe;
+  --hf-accent-200: #a5f3fc;
+  --hf-accent-300: #67e8f9;
+  --hf-accent-400: #22d3ee;
+  --hf-accent-500: #06b6d4;
+  --hf-accent-600: #0891b2;
+  --hf-accent-700: #0e7490;
+  --hf-accent-800: #155e75;
+  --hf-accent-900: #164e63;
+  --hf-accent: var(--hf-accent-500);
+
+  /* ----------------------------------------------------------
+   * 语义色（状态专用，每个四件套：基准 / hover / 浅底 / 边框）
+   * ---------------------------------------------------------- */
+  --hf-success: #16a34a;
+  --hf-success-hover: #15803d;
+  --hf-success-soft: #f0fdf4;
+  --hf-success-border: #bbf7d0;
+
+  --hf-warning: #f59e0b;
+  --hf-warning-hover: #d97706;
+  --hf-warning-soft: #fffbeb;
+  --hf-warning-border: #fde68a;
+
+  --hf-danger: #ef4444;
+  --hf-danger-hover: #dc2626;
+  --hf-danger-soft: #fef2f2;
+  --hf-danger-border: #fecaca;
+
+  --hf-info: #64748b;
+  --hf-info-hover: #475569;
+  --hf-info-soft: #f1f5f9;
+  --hf-info-border: #e2e8f0;
+
+  /* ----------------------------------------------------------
+   * 背景色阶（浅色主体）
+   * ---------------------------------------------------------- */
+  --hf-bg-page: #f7f8fa; /* 页面底 */
+  --hf-bg-container: #ffffff; /* 卡片 / 表格 / 面板 / 输入框 */
+  --hf-bg-subtle: #f3f5f8; /* hover 底 / 表头底 / 斑马纹 */
+  --hf-bg-muted: #eceff4; /* chip / 骨架屏 / 填充 */
+  --hf-bg-overlay: rgb(15 23 42 / 0.45); /* 弹窗遮罩（冷调，不用纯黑） */
+
+  /* ----------------------------------------------------------
+   * 文字色阶（冷灰 slate，与蓝紫主色同调）
+   * ---------------------------------------------------------- */
+  --hf-text-1: #1e293b; /* 主文字 / 标题 / 表格正文 */
+  --hf-text-2: #475569; /* 次要文字 / 描述 / 表头 */
+  --hf-text-3: #94a3b8; /* 弱化 / placeholder / 时间戳 */
+  --hf-text-4: #cbd5e1; /* 禁用 */
+  --hf-text-inverse: #ffffff; /* 深底上的文字 */
+  --hf-text-link: var(--hf-primary-600); /* 文字链接 */
+
+  /* ----------------------------------------------------------
+   * 边框
+   * ---------------------------------------------------------- */
+  --hf-border-1: #e2e8f0; /* 默认边框：输入框 / 卡片 / 表格线 */
+  --hf-border-2: #eef2f6; /* 浅分割线 */
+  --hf-border-3: #cbd5e1; /* hover / 强调边框 */
+
+  /* ----------------------------------------------------------
+   * 深色侧边栏
+   * ---------------------------------------------------------- */
+  --hf-sidebar-bg: #13151e; /* 侧边栏底（带微蓝紫调，非死黑） */
+  --hf-sidebar-bg-hover: rgb(255 255 255 / 0.06);
+  --hf-sidebar-bg-active: rgb(94 106 210 / 0.2); /* 主色 tint */
+  --hf-sidebar-text: #99a1b7;
+  --hf-sidebar-text-hover: #e4e8f1;
+  --hf-sidebar-text-active: #ffffff;
+  --hf-sidebar-border: rgb(255 255 255 / 0.08);
+
+  /* ----------------------------------------------------------
+   * 品牌渐变（克制使用：logo / 登录页 / 关键 CTA）
+   * ---------------------------------------------------------- */
+  --hf-gradient-brand: linear-gradient(
+    135deg,
+    var(--hf-primary-500) 0%,
+    var(--hf-accent-500) 100%
+  );
+  --hf-gradient-brand-hover: linear-gradient(
+    135deg,
+    var(--hf-primary-600) 0%,
+    var(--hf-accent-600) 100%
+  );
+
+  /* ----------------------------------------------------------
+   * 圆角
+   * ---------------------------------------------------------- */
+  --hf-radius-xs: 4px; /* 标签 / 复选框 */
+  --hf-radius-sm: 6px; /* 按钮 / 输入框 / 菜单项 */
+  --hf-radius-md: 8px; /* 卡片 / 下拉面板 */
+  --hf-radius-lg: 12px; /* 弹窗 / 大面板 */
+  --hf-radius-xl: 16px; /* 特大容器（登录卡片） */
+  --hf-radius-full: 9999px; /* 胶囊 / 头像 / 状态点 */
+
+  /* ----------------------------------------------------------
+   * 阴影（冷调投影，基于 slate-900 rgb(15 23 42)）
+   * ---------------------------------------------------------- */
+  --hf-shadow-xs: 0 1px 2px rgb(15 23 42 / 0.05);
+  --hf-shadow-sm:
+    0 1px 3px rgb(15 23 42 / 0.08), 0 1px 2px rgb(15 23 42 / 0.04);
+  --hf-shadow-md: 0 4px 12px rgb(15 23 42 / 0.08);
+  --hf-shadow-lg: 0 12px 32px rgb(15 23 42 / 0.12);
+  --hf-shadow-xl: 0 24px 64px rgb(15 23 42 / 0.16);
+  --hf-shadow-focus: 0 0 0 3px rgb(94 106 210 / 0.18); /* 聚焦环 */
+  --hf-shadow-focus-accent: 0 0 0 3px rgb(6 182 212 / 0.18);
+  --hf-shadow-glow-primary: 0 6px 16px rgb(94 106 210 / 0.28); /* 主按钮 hover 微光 */
+
+  /* ----------------------------------------------------------
+   * 动效：时长 + 曲线
+   * 纪律：只动 transform/opacity；表格行不做动画；
+   *       prefers-reduced-motion 下统一降为 1ms（见 main.css）
+   * ---------------------------------------------------------- */
+  --hf-duration-fast: 120ms; /* hover 变色 / 图标切换 */
+  --hf-duration-base: 200ms; /* 默认过渡 */
+  --hf-duration-slow: 300ms; /* 弹窗 / 折叠 / 抽屉 */
+  --hf-ease-out: cubic-bezier(0.16, 1, 0.3, 1); /* 入场 / 展开 */
+  --hf-ease-in-out: cubic-bezier(0.45, 0, 0.55, 1); /* 变色 / 小位移 */
+  --hf-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1); /* 小元素弹出（慎用） */
+
+  /* ----------------------------------------------------------
+   * 字体
+   * ---------------------------------------------------------- */
+  --hf-font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --hf-font-mono:
+    'JetBrains Mono', 'SF Mono', 'Fira Code', ui-monospace, 'Cascadia Code',
+    Consolas, monospace; /* API Key / token 数 / 代码片段 */
+
+  --hf-font-size-xs: 12px; /* 辅助说明 / 密集表格 */
+  --hf-font-size-sm: 13px; /* 表格 */
+  --hf-font-size-base: 14px; /* 正文 */
+  --hf-font-size-md: 16px; /* 小标题 */
+  --hf-font-size-lg: 18px; /* 页面标题 */
+  --hf-font-size-xl: 20px;
+  --hf-font-size-2xl: 24px;
+
+  --hf-font-weight-normal: 400;
+  --hf-font-weight-medium: 500;
+  --hf-font-weight-semibold: 600;
+
+  --hf-leading-tight: 1.3;
+  --hf-leading-normal: 1.5;
+  --hf-leading-relaxed: 1.7;
+
+  /* ----------------------------------------------------------
+   * 间距（4px 基数）
+   * ---------------------------------------------------------- */
+  --hf-space-1: 4px;
+  --hf-space-2: 8px;
+  --hf-space-3: 12px;
+  --hf-space-4: 16px;
+  --hf-space-5: 20px;
+  --hf-space-6: 24px;
+  --hf-space-8: 32px;
+  --hf-space-10: 40px;
+  --hf-space-12: 48px;
+
+  /* ----------------------------------------------------------
+   * 层级（EP 自带 2000+ 体系，自定义层用 1000 段，互不冲突）
+   * ---------------------------------------------------------- */
+  --hf-z-dropdown: 1000;
+  --hf-z-sticky: 1020;
+  --hf-z-overlay: 1050;
+  --hf-z-modal: 1060;
+  --hf-z-popover: 1070;
+  --hf-z-toast: 1090;
+}
