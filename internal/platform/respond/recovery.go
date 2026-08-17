@@ -21,8 +21,9 @@ import (
 // 已开始写响应（headers sent，如 SSE 流中途 panic）时无法改状态码，仅 abort；
 // SSE 的流内错误应由 chat handler 自身 defer/recover 发 event:error，本中间件是最后兜底。
 //
-// 日志走 slog（platform/logging.Init 已 slog.SetDefault）：记 panic 值 + 完整栈。
-// TODO: trace_id —— 待 gin 中间件把 trace_id 注入 ctx 后，slog handler 从 ctx 提取（见 platform/logging）。
+// 日志走 slog（platform/logging.Init 已 slog.SetDefault）：记 panic 值 + 完整栈，
+// 走 *Context 使 trace_id 由 logging trace handler 从 ctx 自动追加（httpmw.RequestID 注入）；
+// body 固定 INTERNAL_ERROR +（有 trace 时）trace 后缀，见 [internalMessage]。
 func Recovery() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
@@ -30,7 +31,8 @@ func Recovery() gin.HandlerFunc {
 				if r == http.ErrAbortHandler {
 					panic(r) // 保留 net/http 的中断语义，不记栈、不写响应
 				}
-				slog.Error("panic recovered",
+				ctx := c.Request.Context()
+				slog.ErrorContext(ctx, "panic recovered",
 					slog.Any("panic", r),
 					slog.String("stack", string(debug.Stack())),
 				)
@@ -44,7 +46,7 @@ func Recovery() gin.HandlerFunc {
 					Success: false,
 					Error: &ErrorBody{
 						Code:    errs.ErrInternal.Error(),
-						Message: "internal server error",
+						Message: internalMessage(ctx),
 					},
 				})
 			}

@@ -20,6 +20,7 @@ import (
 	demostore "github.com/Karlsk/go-hify/internal/demo/store"
 	"github.com/Karlsk/go-hify/internal/platform/config"
 	"github.com/Karlsk/go-hify/internal/platform/db"
+	"github.com/Karlsk/go-hify/internal/platform/httpmw"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
 	"github.com/Karlsk/go-hify/internal/platform/redisx"
@@ -94,6 +95,10 @@ func Run(cfg *config.Config) error {
 	}
 	// Recovery 必须最外层：兜底其后所有中间件 / handler 的 panic（业务错误走返回值，不到这层）。
 	r.Use(respond.Recovery())
+	// RequestID 紧随 Recovery：trace_id 注入 ctx + X-Request-ID 响应头（panic 路径同样可对账日志）；
+	// AccessLog 访问日志（method/path/status/耗时，慢请求 WARN、SSE 豁免），/health 被探活不记。
+	r.Use(httpmw.RequestID())
+	r.Use(httpmw.AccessLog(httpmw.AccessLogConfig{SkipPaths: []string{"/health"}}))
 
 	// /health 在 /api/v1 之外、不需鉴权（CLAUDE.md §路径与版本）。
 	// 一期返回静态就绪信号；最终形态探 PG + Redis 连通性、degraded 返回 503（§部署架构 healthcheck）。

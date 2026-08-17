@@ -239,7 +239,66 @@ docker exec hify-pg-test psql -U hify -d hify \
 
 **预期**：第二条报 `ERROR: new row for relation "demo_items" violates check constraint ...`。
 
-## 13. 清理
+## 13. 请求追踪与访问日志验证（platform/traceid + httpmw + logging）
+
+前置：服务仍在运行（第 14 步才停）。本地 dev `.env` 为 `LOG_FORMAT=text`、`LOG_FILE=` 空 → 日志只走 stdout（即运行 `./bin/hify` 的终端）。
+
+### 13.1 响应头 + 访问日志（任意请求）
+
+```bash
+# ① 任何响应都带 X-Request-ID（服务端生成、每请求唯一；连 /health 也有）
+curl -s -D - -o /dev/null http://localhost:8080/health | grep -i x-request-id
+curl -s -D - -o /dev/null http://localhost:8080/health | grep -i x-request-id   # 第二次 id 必须不同
+
+# ② 访问日志：发一个真实业务请求，观察服务端终端日志
+curl -s -b cookies.txt http://localhost:8080/api/v1/demo-items > /dev/null
+```
+
+**预期**：
+
+- ① 响应头含 `X-Request-ID: <32 位 hex>`，两次请求的 id 不同。
+- ② 服务端终端出现一行 `level=INFO msg="http request" method=GET path=/api/v1/demo-items status=200 duration_ms=… client_ip=… trace_id=…`，且 `trace_id` = 该响应头 `X-Request-ID` 的值。
+- `/health` 请求**不产生**访问日志（healthcheck 探活豁免），但响应头仍带 X-Request-ID。
+
+### 13.2 业务错误：只记访问日志、无 ERROR（复用第 6 / 7 步负例）
+
+```bash
+# 400 校验失败 / 404 不存在 / 401 未登录
+curl -s -b cookies.txt -X POST http://localhost:8080/api/v1/demo-items -H 'Content-Type: application/json' -d '{}'
+curl -s -b cookies.txt http://localhost:8080/api/v1/demo-items/999999
+curl -s http://localhost:8080/api/v1/demo-items          # 不带 cookie
+```
+
+**预期**：
+
+- 信封分别为 `VALIDATION_FAILED` / `DEMO_ITEM_NOT_FOUND` / `UNAUTHORIZED`，三个响应头仍各带 X-Request-ID。
+- 服务端对每条请求**只多一行**访问日志（`status=400/404/401`），**没有任何 ERROR 日志**——业务错误经哨兵映射、不进 500 兜底；ERROR 级只留给未预期错误（级别语义：WARN 可疑 / ERROR 失败）。
+
+### 13.3 慢请求 WARN（>1s）：docker pause 构造（无损）
+
+```bash
+# 终端 A：冻结 PG——请求会卡在查询上，duration 超阈值；pause 不删容器，解冻即复原
+docker pause hify-pg-test
+
+# 终端 B：发一个 CRUD 请求（阻塞直到解冻）
+curl -s -b cookies.txt http://localhost:8080/api/v1/demo-items > /dev/null
+
+# 终端 A：等 2–3 秒后解冻
+docker unpause hify-pg-test
+```
+
+**预期**：服务端终端出现 `level=WARN msg="slow http request" … duration_ms≥2000 trace_id=…`；解冻后该请求正常返回 200。
+⚠️ 勿用 `docker stop` 构造故障——测试容器带 `--rm`，停止即删除、数据全丢。
+
+### 13.4 CRUD 触发不了的项（自动化测试兜底）
+
+| 项 | 原因 | 覆盖 |
+|---|---|---|
+| 500 body 带 `(trace …)` + 原始 err 进 ERROR 日志 | demo handler 无自然 500 路径（错误全被哨兵映射） | `go test -race ./internal/platform/respond/` |
+| panic 兜底（Recovery） | 同上 | 同上（`TestRecovery_*`） |
+| SSE 流豁免慢判定 | 尚无 SSE 接口（chat 模块未建） | `go test -race ./internal/platform/httpmw/` |
+
+## 14. 清理
 
 ```bash
 # 停止服务（运行 ./bin/hify 的终端 Ctrl+C）
@@ -257,7 +316,8 @@ rm -f cookies.txt create.json
 
 | # | 请求 | 预期状态 | 信封关键字段 |
 |---|---|---|---|
-| 1 | `GET /health` | 200 | `data="Hify is running"` |
+| 0 | 任意请求 | — | 响应头 `X-Request-ID`（32 位 hex、每请求唯一） |
+| 1 | `GET /health` | 200 | `data="Hify is running"`（不产生访问日志） |
 | 2 | `POST /auth/register` | 201 | `data.id` 字符串 |
 | 3 | `POST /auth/login` | 200 | `Set-Cookie: hify_session` |
 | 4 | `GET /demo-items`（无 cookie） | 401 | `error.code=UNAUTHORIZED` |

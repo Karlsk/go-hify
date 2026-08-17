@@ -102,9 +102,11 @@ internal/
     ├── redisx/               # Redis 初始化与通用操作
     ├── llm/                  # eino 统一适配：provider 配置 → ChatModel 实例
     ├── budget/               # 每用户限流 + 每日预算熔断（fail-open + 80% 告警）
-    ├── logging/              # slog 结构化日志（stdout + 文件 rotate + SetDefault）；executions 表归 chat/llm 模块
+    ├── logging/              # slog 结构化日志（stdout + 文件 rotate + SetDefault + trace_id 从 ctx 自动追加）；executions 表归 chat/llm 模块
     ├── errs/                 # 跨业务域通用哨兵错误（gin 无关叶子包，供 respond/handler 用 errors.Is 映射）
     ├── authctx/              # 登录用户身份 ctx 注入/提取（业务模块不依赖 auth，身份类型下沉 platform）
+    ├── traceid/              # 请求级 trace_id 生成 + ctx 注入/提取（gin 无关叶子包，同 authctx 形态；X-Request-ID）
+    ├── httpmw/               # 全仓 gin 中间件：RequestID（trace_id 注入）/ AccessLog（访问日志、慢请求 WARN、SSE 豁免）
     ├── respond/              # 统一 API 响应信封（success / data / error / meta）
     ├── page/                 # 统一分页：偏移分页（配置表）+ 游标分页（大列表 keyset，禁 OFFSET）
     ├── timex/                # 统一时间序列化：纯日期 Date（yyyy-MM-dd）；datetime 用 time.Time 默认 RFC 3339

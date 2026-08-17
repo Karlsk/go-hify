@@ -3,11 +3,14 @@
 package respond
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/Karlsk/go-hify/internal/platform/errs"
+	"github.com/Karlsk/go-hify/internal/platform/traceid"
 )
 
 // Result 是所有 HTTP 接口返回的统一信封。
@@ -89,9 +92,22 @@ func NotFound(c *gin.Context, message string) {
 	Fail(c, http.StatusNotFound, CodeNotFound, message)
 }
 
-// Error 是未预期错误的统一兜底：写 500 + INTERNAL_ERROR，向前端隐藏细节。
-// TODO: 接入 platform/logging 后在此记录原始 err（含 trace_id、调用上下文）——
-// 当前 logging 模块尚未落地，先不引入其依赖。
+// Error 是未预期错误的统一兜底：写 500 + INTERNAL_ERROR，向前端隐藏细节；
+// 原始 err 以 ERROR 级进结构化日志（trace_id 由 logging trace handler 从 ctx 自动追加）——
+// 前端拿 INTERNAL_ERROR + trace_id，运维凭 trace_id 追到完整错误链
+// （CLAUDE.md §错误处理：500 类不回原始堆栈给前端，只回 INTERNAL_ERROR + trace_id）。
 func Error(c *gin.Context, err error) {
-	Fail(c, http.StatusInternalServerError, errs.ErrInternal.Error(), "internal server error")
+	ctx := c.Request.Context()
+	slog.ErrorContext(ctx, "internal server error", slog.Any("err", err))
+	Fail(c, http.StatusInternalServerError, errs.ErrInternal.Error(), internalMessage(ctx))
+}
+
+// internalMessage 组装 500 类 body message：固定文案 +（ctx 带 trace_id 时）trace 后缀，
+// 前端可复制给运维对账日志；错误细节永远只进日志、不进 body。
+func internalMessage(ctx context.Context) string {
+	msg := "internal server error"
+	if id, ok := traceid.From(ctx); ok {
+		msg += " (trace " + id + ")"
+	}
+	return msg
 }
