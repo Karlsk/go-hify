@@ -127,12 +127,50 @@ el-aside（220px ↔ 64px，width 过渡 300ms ease-out）
 - 折叠态：宽 64px；品牌区只留方块；菜单 icon-only（EP `collapse`，标题走 tooltip）；底部区只留按钮。
 - 版本号经 Vite `define` 从 package.json 构建期注入（`__APP_VERSION__`），起步 `v0.1.0`。
 
-### 品牌渐变（克制使用：logo、登录页、关键 CTA）
+### 品牌渐变（logo、登录页、关键 CTA、主操作按钮·v3 扩展）
 
 ```css
 --hf-gradient-brand: linear-gradient(135deg, var(--hf-primary-500) 0%, var(--hf-accent-500) 100%);
 --hf-gradient-brand-hover: linear-gradient(135deg, var(--hf-primary-600) 0%, var(--hf-accent-600) 100%);
 ```
+
+## 整体布局（v3）
+
+三层层次：**白顶栏 / 浅灰页面底（`--hf-bg-page`）/ 白卡片（`--hf-shadow-sm` 轻阴影）**。结构（`App.vue`）：
+
+```
+el-container（row）
+├── el-aside        深色侧边栏（见上节，冻结）
+└── el-container（column）
+    ├── header .app__header   56px（与侧边栏品牌区等高）：白底 + border-bottom（--hf-border-2）
+    │   ├── 左：el-breadcrumb「首页 / 当前页」——当前页 = route.meta.title（router 为唯一来源）
+    │   └── 右：用户区 = 28px 品牌渐变圆头像（用户名首字母）+ 用户名；auth 未接入为占位
+    └── el-main .app__main    padding 24px（--hf-space-6），底 --hf-bg-page
+        └── 每页 = PageHeader（标题 + 描述 + 右侧 actions）→ 内容卡片
+```
+
+### 页面标题区（`components/PageHeader.vue`）
+
+- 标题：18px（`--hf-font-size-lg`）/ 600 / `--hf-text-1`；描述：14px / `--hf-text-2`，标题下 4px。
+- `actions` 插槽在右侧，与标题顶对齐；按钮间距 8px。PageHeader 与内容间距 16px（`--hf-space-4`）。
+
+### 内容卡片（el-card + 映射）
+
+白底 + 轻阴影 + 圆角、无边框。EP 把 `--el-card-*` 定义在 `.el-card` 选择器自身（不在 `:root`），映射必须写在组件选择器上才打得过：theme-element-plus.css 末尾 `.el-card { --el-card-border-radius: --hf-radius-md; --el-card-padding: --hf-space-5（20px）; --el-card-border-color: transparent }`。阴影由 main.css `.el-card.is-always-shadow { box-shadow: var(--hf-shadow-sm) }` 提供（选择器必须带 `.is-always-shadow`，否则特异性打不过 EP 自身规则）。
+
+### 按钮三式
+
+| 类型 | 实现 | 备注 |
+|---|---|---|
+| 主要 | `.el-button--primary` 覆写为 `--hf-gradient-brand` + 透明边框；hover/focus → `--hf-gradient-brand-hover` + glow 微光；active → hover 渐变无 glow；disabled → 退回 EP 默认浅色不渐变 | v3 演进：渐变范围扩至所有主操作 |
+| 次要 | EP 默认按钮：白底 + `--hf-border-1` 边框 | 零改动 |
+| 危险 | EP `type="danger"`（映射 `--hf-danger`） | 零改动 |
+
+### 间距纪律
+
+页面边距 24px（`--hf-space-6`，el-main padding）/ 卡片内边距 20px（`--hf-space-5`，`--el-card-padding`）/ 元素间距 16px（`--hf-space-4`，PageHeader 下距、actions 组内 8px 例外）。
+
+> **v3 演进记录**（整体布局）：**0 个 `--hf-*` 改值、0 个新增语义 token**——顶栏 / 面包屑 / 用户区 / PageHeader / 卡片 / 按钮全部落到已有 token。新增仅限 EP 映射（`.el-card` 选择器上的 `--el-card-*` 覆盖；面包屑无需映射，EP 直接走已映射的 `--el-text-color-regular / -placeholder`）与 main.css 组件级覆写（渐变主按钮、卡片阴影、面包屑当前项）。唯一的原则级变化：品牌渐变使用范围由「logo / 登录页 / 关键 CTA」扩展至「所有主操作按钮」（用户显式决策）；渐变仍不用于背景铺色、文字（除 logo）、卡片装饰。
 
 ## 圆角
 
@@ -205,6 +243,7 @@ EP 官方支持 CSS 变量覆盖，映射层把 EP 拉到我们的主题上：
 | `--el-font-family / -size-*` | 字体族 + 12/13/14/16/18 |
 | `--el-transition-duration(-fast)` / `--el-ease-*` | `200ms / 120ms` + hf 曲线 |
 | `--el-box-shadow*` / `--el-mask-color` | 冷调阴影与遮罩 |
+| `--el-card-*`（v3） | 卡片圆角 / 内边距 / 边框——EP 定义在 `.el-card` 选择器上，映射须写在组件选择器（见《整体布局》） |
 
 ## 文件结构
 

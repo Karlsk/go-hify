@@ -24,6 +24,46 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* ============================================================
+ * 组件级覆写（v3 整体布局的视觉决策）
+ * 这些是「变量映射表达不了」的覆写：卡片阴影、渐变按钮、
+ * 面包屑当前项。规范见 docs/design/design-system.md《整体布局》。
+ * ============================================================ */
+
+/* 内容卡片：无边框（--el-card-border-color 已映射 transparent）+ 轻阴影，
+ * 白卡片浮在浅灰页面底上形成层次。
+ * 选择器必须带 .is-always-shadow：EP 的 .el-card.is-always-shadow
+ * 特异性更高，裸 .el-card 覆写打不过（shadow 默认值即 always）。 */
+.el-card.is-always-shadow {
+  box-shadow: var(--hf-shadow-sm);
+}
+
+/* 主操作按钮 = 品牌渐变（v3 演进：渐变范围由 logo/关键 CTA 扩至所有主操作，
+ * 用户显式决策）。hover 换深一档渐变 + glow 微光；disabled 退回 EP 默认浅色。 */
+.el-button--primary:not(.is-disabled):not(.is-loading) {
+  background: var(--hf-gradient-brand);
+  border-color: transparent;
+}
+
+.el-button--primary:not(.is-disabled):not(.is-loading):hover,
+.el-button--primary:not(.is-disabled):not(.is-loading):focus {
+  background: var(--hf-gradient-brand-hover);
+  border-color: transparent;
+  box-shadow: var(--hf-shadow-glow-primary);
+}
+
+.el-button--primary:not(.is-disabled):not(.is-loading):active {
+  background: var(--hf-gradient-brand-hover);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* 面包屑当前项比中间项深一档 + 中黑 */
+.el-breadcrumb__item:last-child .el-breadcrumb__inner {
+  color: var(--hf-text-1);
+  font-weight: var(--hf-font-weight-medium);
+}
+
 /* 无障碍：用户偏好减少动效时，所有过渡/动画降为瞬时 */
 @media (prefers-reduced-motion: reduce) {
   *,

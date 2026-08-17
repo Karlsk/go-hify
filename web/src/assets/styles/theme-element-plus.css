@@ -127,3 +127,15 @@
   --el-ease-out-bezier: var(--hf-ease-out);
   --el-ease-in-out-bezier: var(--hf-ease-in-out);
 }
+
+/* ---------- 卡片（v3 整体布局） ----------
+ * EP 把 --el-card-* 定义在 .el-card 选择器自身而非 :root，
+ * :root 映射特异性不够，必须在组件选择器上覆盖。
+ * 仍是变量映射，不是视觉决策。
+ * 面包屑无需映射：EP 直接走 --el-text-color-regular / -placeholder，
+ * 已映射到 --hf-text-2 / --hf-text-3。 */
+.el-card {
+  --el-card-border-radius: var(--hf-radius-md);
+  --el-card-padding: var(--hf-space-5);
+  --el-card-border-color: transparent;
+}

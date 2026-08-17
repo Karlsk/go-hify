@@ -30,13 +30,15 @@ web/
 ├── env.d.ts                # vite/client 类型引用（import.meta.env）
 └── src/
     ├── main.ts             # 挂载 Pinia + Router + ElementPlus + Icons
-    ├── App.vue             # 根布局：深色侧边栏 + EP 菜单 + 右侧 <router-view />
+    ├── App.vue             # 根布局：深色侧边栏 + 顶栏（面包屑/用户区）+ <router-view />
     ├── assets/
     │   └── styles/
     │       ├── tokens.css             # 设计系统 --hf-* token（唯一事实源）
     │       ├── theme-element-plus.css # EP --el-* 变量映射（只映射不新增）
-    │       └── main.css               # @import 上两者 + reset + body 基础样式
-    ├── router/index.ts     # 路由表（三条扁平路由 /provider /agent /chat）
+    │       └── main.css               # @import 上两者 + reset + 组件级覆写（渐变主按钮等）
+    ├── router/index.ts     # 路由表（meta.title = 面包屑/document.title 来源）
+    ├── components/
+    │   └── PageHeader.vue  # 页面标题区：标题 + 描述 + 右侧 actions 插槽
     ├── stores/             # Pinia 模块（user/session 等，按业务新增）
     ├── api/                # 各模块接口定义（axios 实例在 utils/request.ts）
     ├── utils/
@@ -53,7 +55,7 @@ web/
 
 ## 设计系统
 
-视觉规范的唯一事实源：[docs/design/design-system.md](../docs/design/design-system.md)（色值表、EP 映射策略、设计原则）。风格定位：**浅底 + 科技感点缀**——浅色主体保证表格可读性，深色侧边栏 + 亮色交互元素制造品牌感；主色 Linear 紫 `#5E6AD2`，辅色青色 `#06B6D4`（点缀/数据高亮，不兼语义状态）。
+视觉规范的唯一事实源：[docs/design/design-system.md](../docs/design/design-system.md)（色值表、EP 映射策略、整体布局、设计原则）。风格定位：**浅底 + 科技感点缀**——浅色主体保证表格可读性，深色侧边栏 + 亮色交互元素制造品牌感；主色 Linear 紫 `#5E6AD2`，辅色青色 `#06B6D4`（点缀/数据高亮，不兼语义状态）。整体布局：白顶栏（面包屑 + 用户区）/ 浅灰页面底 / 白卡片三层层次；间距纪律 24（页面边距）/ 20（卡片内边距）/ 16（元素间距）；按钮三式——主要=品牌渐变、次要=白底边框、危险=红。
 
 文件与规则：
 

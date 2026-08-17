@@ -46,9 +46,22 @@
         <span v-show="!collapsed" class="app__version">v{{ appVersion }}</span>
       </div>
     </el-aside>
-    <el-main class="app__main">
-      <router-view />
-    </el-main>
+    <el-container class="app__body" direction="vertical">
+      <header class="app__header">
+        <el-breadcrumb separator="/">
+          <el-breadcrumb-item :to="{ path: '/' }">首页</el-breadcrumb-item>
+          <el-breadcrumb-item>{{ pageTitle }}</el-breadcrumb-item>
+        </el-breadcrumb>
+        <!-- auth 接入前为占位；接入后换成真实用户（头像取用户名首字母） -->
+        <div class="app__user">
+          <div class="app__avatar" aria-hidden="true">{{ avatarLetter }}</div>
+          <span class="app__username">{{ username }}</span>
+        </div>
+      </header>
+      <el-main class="app__main">
+        <router-view />
+      </el-main>
+    </el-container>
   </el-container>
 </template>
 
@@ -67,6 +80,13 @@ const route = useRoute()
 const activeMenu = computed(() => route.path)
 const collapsed = ref(false)
 const appVersion = __APP_VERSION__
+
+// 面包屑当前项 = 路由 meta.title（router/index.ts 为唯一来源）
+const pageTitle = computed(() => route.meta.title)
+
+// auth 未接入的占位身份；接入后由 authctx/store 提供
+const username = ref('Admin')
+const avatarLetter = computed(() => username.value.charAt(0).toUpperCase())
 </script>
 
 <style scoped>
@@ -237,6 +257,52 @@ const appVersion = __APP_VERSION__
   color: var(--hf-sidebar-text-muted);
   font-family: var(--hf-font-mono);
   font-size: var(--hf-font-size-xs);
+}
+
+/* ---------- 顶栏（面包屑 + 用户区） ---------- */
+.app__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 56px 与侧边栏品牌区等高，顶部一条线对齐；
+ * 白底 + 底部浅分割线，与浅灰页面底、白卡片形成三层层次 */
+.app__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hf-space-4);
+  height: 56px;
+  padding: 0 var(--hf-space-6);
+  background-color: var(--hf-bg-container);
+  border-bottom: 1px solid var(--hf-border-2);
+  flex-shrink: 0;
+}
+
+.app__user {
+  display: flex;
+  align-items: center;
+  gap: var(--hf-space-2);
+}
+
+.app__avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--hf-radius-full);
+  background: var(--hf-gradient-brand);
+  color: var(--hf-text-inverse);
+  font-size: var(--hf-font-size-xs);
+  font-weight: var(--hf-font-weight-semibold);
+  flex-shrink: 0;
+}
+
+.app__username {
+  font-size: var(--hf-font-size-base);
+  color: var(--hf-text-2);
 }
 
 /* ---------- 主内容区 ---------- */
