@@ -81,15 +81,51 @@ AI/开发者工具的主流品牌色族。主按钮底用 500（白字对比度 
 
 ### 深色侧边栏
 
+定位：近纯黑深底，与浅色内容区形成对比；炫酷克制在"渐变文字 + 渐变方块 + 主色竖线"三处，不堆发光/入场动画/毛玻璃。
+
+Token：
+
 | Token | 值 | 用途 |
 |---|---|---|
-| `--hf-sidebar-bg` | `#13151E` | 侧边栏底（带微蓝紫调，非死黑） |
-| `--hf-sidebar-bg-hover` | `rgba(255, 255, 255, 0.06)` | 菜单 hover |
-| `--hf-sidebar-bg-active` | `rgba(94, 106, 210, 0.20)` | 菜单激活（主色 tint） |
-| `--hf-sidebar-text` | `#99A1B7` | 菜单默认文字 |
-| `--hf-sidebar-text-hover` | `#E4E8F1` | hover 文字 |
-| `--hf-sidebar-text-active` | `#FFFFFF` | 激活文字 |
-| `--hf-sidebar-border` | `rgba(255, 255, 255, 0.08)` | 侧边栏内分割线 |
+| `--hf-sidebar-bg` | `#13151E` | 侧边栏底（带微蓝紫调，非死黑）·冻结 |
+| `--hf-sidebar-bg-hover` | `rgba(255, 255, 255, 0.10)` | 菜单 hover ·v2 改值 |
+| `--hf-sidebar-bg-active` | `rgba(255, 255, 255, 0.12)` | 菜单选中背景（微亮）·v2 改值 |
+| `--hf-sidebar-indicator` | `var(--hf-primary-500)` | 选中态左侧 3px 主色竖线 ·v2 新增 |
+| `--hf-sidebar-text` | `rgba(255, 255, 255, 0.8)` | 菜单默认文字（80% 白）·v2 改值 |
+| `--hf-sidebar-text-hover` | `#E4E8F1` | hover 文字 ·冻结 |
+| `--hf-sidebar-text-active` | `#FFFFFF` | 选中文字 ·冻结 |
+| `--hf-sidebar-text-muted` | `rgba(255, 255, 255, 0.45)` | 副标题 / 版本号 ·v2 新增 |
+| `--hf-sidebar-border` | `rgba(255, 255, 255, 0.08)` | 侧边栏内分割线 ·冻结 |
+
+> **v2 演进记录**（侧边栏改造）：冻结 bg / border / hover 文字 / 选中文字四值；仅菜单三态相关 3 个 token 改值（`text` 灰白→80% 白、`bg-hover` 6%→10%、`bg-active` 主色 tint→白 12%）；新增 `indicator` / `text-muted`。除菜单三态外不产生视觉变化。
+
+结构（`App.vue`）：
+
+```
+el-aside（220px ↔ 64px，width 过渡 300ms ease-out）
+├── 品牌区（56px，border-bottom）
+│   ├── 渐变 "H" 圆角方块（26px，--hf-gradient-brand；折叠时独立成 logo 锚点）
+│   ├── 品牌名 "Hify" —— 主色渐变文字（background-clip: text）
+│   └── 副标题 "AI Agent Platform"（12px，text-muted；折叠隐藏）
+├── el-menu（collapse，透明底）
+│   模型管理 Setting / Agent 管理 User / 对话 ChatDotRound
+└── 底部区（border-top）
+    ├── 折叠 / 展开按钮（Fold / Expand 图标，hover 用 bg-hover）
+    └── 版本号 v{package.json}（text-muted；折叠隐藏）
+```
+
+菜单三态：
+
+| 状态 | 文字 | 背景 | 其他 |
+|---|---|---|---|
+| 默认 | 80% 白 | transparent | — |
+| hover | #E4E8F1（近纯白） | 白 10% | 变色 120ms |
+| active | 纯白 | 白 12% | 左 3px 主色竖线（圆角、垂直居中约 60% 高） |
+
+行为：
+
+- 折叠态：宽 64px；品牌区只留方块；菜单 icon-only（EP `collapse`，标题走 tooltip）；底部区只留按钮。
+- 版本号经 Vite `define` 从 package.json 构建期注入（`__APP_VERSION__`），起步 `v0.1.0`。
 
 ### 品牌渐变（克制使用：logo、登录页、关键 CTA）
 

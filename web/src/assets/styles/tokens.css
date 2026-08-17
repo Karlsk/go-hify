@@ -101,13 +101,15 @@
   /* ----------------------------------------------------------
    * 深色侧边栏
    * ---------------------------------------------------------- */
-  --hf-sidebar-bg: #13151e; /* 侧边栏底（带微蓝紫调，非死黑） */
-  --hf-sidebar-bg-hover: rgb(255 255 255 / 0.06);
-  --hf-sidebar-bg-active: rgb(94 106 210 / 0.2); /* 主色 tint */
-  --hf-sidebar-text: #99a1b7;
-  --hf-sidebar-text-hover: #e4e8f1;
-  --hf-sidebar-text-active: #ffffff;
-  --hf-sidebar-border: rgb(255 255 255 / 0.08);
+  --hf-sidebar-bg: #13151e; /* 侧边栏底（带微蓝紫调，非死黑）·冻结 */
+  --hf-sidebar-bg-hover: rgb(255 255 255 / 0.1); /* hover 微亮 ·v2 改值 */
+  --hf-sidebar-bg-active: rgb(255 255 255 / 0.12); /* 选中微亮 ·v2 改值 */
+  --hf-sidebar-indicator: var(--hf-primary-500); /* 选中左 3px 主色竖线 ·v2 新增 */
+  --hf-sidebar-text: rgb(255 255 255 / 0.8); /* 菜单默认 80% 白 ·v2 改值 */
+  --hf-sidebar-text-hover: #e4e8f1; /* 冻结 */
+  --hf-sidebar-text-active: #ffffff; /* 冻结 */
+  --hf-sidebar-text-muted: rgb(255 255 255 / 0.45); /* 副标题 / 版本号 ·v2 新增 */
+  --hf-sidebar-border: rgb(255 255 255 / 0.08); /* 冻结 */
 
   /* ----------------------------------------------------------
    * 品牌渐变（克制使用：logo / 登录页 / 关键 CTA）

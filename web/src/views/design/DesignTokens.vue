@@ -685,6 +685,7 @@ const moved = ref(false)
   border-radius: var(--hf-radius-md);
 }
 .dt__sidebar-item {
+  position: relative;
   padding: 10px var(--hf-space-3);
   margin-bottom: var(--hf-space-1);
   border-radius: var(--hf-radius-sm);
@@ -702,5 +703,17 @@ const moved = ref(false)
 .dt__sidebar-item--active {
   background: var(--hf-sidebar-bg-active);
   color: var(--hf-sidebar-text-active);
+}
+/* 选中态左 3px 主色竖线（与 App.vue .el-menu-item.is-active::before 一致） */
+.dt__sidebar-item--active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 60%;
+  border-radius: var(--hf-radius-full);
+  background-color: var(--hf-sidebar-indicator);
+  transform: translateY(-50%);
 }
 </style>
