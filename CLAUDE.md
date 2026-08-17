@@ -111,14 +111,14 @@ internal/
     ├── page/                 # 统一分页：偏移分页（配置表）+ 游标分页（大列表 keyset，禁 OFFSET）
     ├── timex/                # 统一时间序列化：纯日期 Date（yyyy-MM-dd）；datetime 用 time.Time 默认 RFC 3339
     └── cache/                # 配置类缓存管理器：按名 TTL + 写时删 key（Cache-Aside）；全仓库 key 经 redisx.Key 加 hify: 前缀
-web/                          # Vue 3 前端，独立构建（目录结构与约定见 web/README.md）
+web/                          # Vue 3 前端，独立构建（目录结构、设计系统与约定见 web/README.md）
 deploy/                        # Docker Compose 部署：前后端 Dockerfile、nginx 配置、compose、备份脚本（用法见 deploy/README.md）
 migrations/                    # goose/golang-migrate SQL 文件（禁止 GORM AutoMigrate）
 ```
 
 模块内部统一为四层子包：`api/`（契约层）/ `service/`（业务层）/ `store/`（数据层）/ `handler/`（HTTP 层），详见《模块内部结构》。
 
-前端骨架（目录结构、技术栈版本、请求 / SSE / 分页约定、开发命令）记录在 [web/README.md](web/README.md)；本节仅列顶层位置，前端规范以该文件为准。
+前端骨架（目录结构、技术栈版本、设计系统与视觉规范、请求 / SSE / 分页约定、开发命令）记录在 [web/README.md](web/README.md)；本节仅列顶层位置，前端规范以该文件为准。
 
 ### 依赖方向（单向，禁止循环）
 
