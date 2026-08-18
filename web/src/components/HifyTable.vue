@@ -4,7 +4,7 @@
   <el-card class="hify-table">
     <el-table v-loading="loading" :data="rows">
       <el-table-column
-        v-for="col in columns"
+        v-for="col in visibleColumns"
         :key="col.prop ?? col.slot ?? col.label"
         :label="col.label"
         :prop="col.prop"
@@ -44,12 +44,15 @@ export interface HifyTableColumn {
   width?: string | number
   align?: 'left' | 'center' | 'right'
   slot?: string
+  /** 视口 ≤ 此值（px）时隐藏该列——次要信息列专用；取 BREAKPOINTS 常量，勿写裸值 */
+  hideBelow?: number
 }
 </script>
 
 <script setup lang="ts" generic="T extends Record<string, any>">
-import { onMounted, ref, shallowRef } from 'vue'
+import { computed, onMounted, ref, shallowRef } from 'vue'
 import type { PageQuery, PageResult } from '@/types'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 
 // 具名插槽带行作用域（row 为泛型 T）；empty 可覆写空态
 defineSlots<
@@ -68,6 +71,12 @@ const props = withDefaults(
     pageSize?: number
   }>(),
   { pagination: true, pageSize: 20 },
+)
+
+// 窄屏隐藏次要列（hideBelow 标记）；固定宽容器内的表（如抽屉）不标记即不参与
+const { width } = useBreakpoint()
+const visibleColumns = computed(() =>
+  props.columns.filter((col) => !col.hideBelow || width.value > col.hideBelow),
 )
 
 // shallowRef：整表替换，避免 deep unwrap 破坏泛型行类型

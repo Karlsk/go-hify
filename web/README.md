@@ -44,7 +44,8 @@ web/
     │   └── ProviderModelsDrawer.vue   # 提供商模型列表抽屉（子资源形态：同步/手动增删）
     ├── composables/
     │   ├── useRequest.ts   # 请求三态 { data, loading, error, execute }
-    │   └── useConfirm.ts   # 删除确认全流程：调用即执行，返回 Promise<boolean>
+    │   ├── useConfirm.ts   # 删除确认全流程：调用即执行，返回 Promise<boolean>
+    │   └── useBreakpoint.ts # 响应式断点单例：BREAKPOINTS 常量 + isNarrow(≤1200)/isCompact(≤992)
     ├── stores/             # Pinia 模块（user/session 等，按业务新增）
     ├── utils/
     │   ├── request.ts      # axios 实例 + Result 信封拆包 + 错误统一处理 + getList
@@ -114,6 +115,7 @@ web/
 - `HifyFormDialog<T>`：`v-model` 显隐 + `open(data?)` 区分编辑/新增；内部持有表单副本，打开重建、关闭自动重置；提交事件 `(form, done)`，父组件调 API 后 `done(true)` 关弹窗 / `done(false)` 停 loading 保持打开。
 - `useConfirm({ message, api, ... })` 调用即执行：确认框（红色确认按钮）→ 调 api → `notifySuccess`；取消静默 `false`，api 失败 reject。
 - `useRequest(api)` → `{ data, loading, error, execute }`；错误只记状态不重复弹（拦截器已弹）。
+- `useBreakpoint()` → `{ width, isNarrow, isCompact }`：断点唯一事实源是 `BREAKPOINTS`（1200 / 992，见 design-system.md《响应式断点》）；`HifyTableColumn.hideBelow: BREAKPOINTS.md` 标记窄屏隐藏的次要列。
 - 组件视觉值全走 token；表格卡片 body padding 0 是内容卡片 20px 规则的唯一例外（见 design-system.md《整体布局》）。
 - 首个落地正式页：`provider/ProviderList.vue`（mock 数据源；`fetchList` / `onSubmit` 签名对齐 `getList` 形态，换真实 API 只动这两个函数）。
 

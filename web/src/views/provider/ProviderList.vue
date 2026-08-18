@@ -8,7 +8,10 @@
       description="多模型提供商统一接入，API Key 加密存储"
     >
       <template #actions>
-        <el-button type="primary" @click="openCreate">新增提供商</el-button>
+        <el-button type="primary" @click="openCreate">
+          <el-icon><Plus /></el-icon>
+          新增提供商
+        </el-button>
       </template>
     </PageHeader>
 
@@ -82,6 +85,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import HifyTable, { type HifyTableColumn } from '@/components/HifyTable.vue'
 import HifyFormDialog from '@/components/HifyFormDialog.vue'
 import ProviderModelsDrawer from '@/components/ProviderModelsDrawer.vue'
+import { BREAKPOINTS } from '@/composables/useBreakpoint'
 import { useConfirm } from '@/composables/useConfirm'
 import { notifySuccess } from '@/utils/notify'
 import type { PageQuery, PageResult, ProviderType } from '@/types'
@@ -189,9 +193,10 @@ const tableRef = ref<{ refresh: () => void }>()
 const columns: HifyTableColumn[] = [
   { label: '名称', prop: 'name' },
   { label: '类型', slot: 'type', width: 110 },
-  { label: 'Base URL', prop: 'baseUrl' },
+  // 次要列：窄屏（≤992）隐藏，保留 名称 / 类型 / 状态 / 操作 关键信息
+  { label: 'Base URL', prop: 'baseUrl', hideBelow: BREAKPOINTS.md },
   { label: '状态', slot: 'status', width: 90 },
-  { label: '创建时间', prop: 'createdAt', width: 130 },
+  { label: '创建时间', prop: 'createdAt', width: 130, hideBelow: BREAKPOINTS.md },
   { label: '操作', slot: 'actions', width: 180, align: 'right' },
 ]
 

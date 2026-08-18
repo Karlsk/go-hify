@@ -66,7 +66,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   ChatDotRound,
@@ -75,10 +75,17 @@ import {
   Setting,
   User,
 } from '@element-plus/icons-vue'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 
 const route = useRoute()
 const activeMenu = computed(() => route.path)
-const collapsed = ref(false)
+
+// 窄屏（≤1200）自动折叠：加载时定档；跨界瞬间自动同步，两次跨界之间手动自由
+const { isNarrow } = useBreakpoint()
+const collapsed = ref(isNarrow.value)
+watch(isNarrow, (narrow) => {
+  collapsed.value = narrow
+})
 const appVersion = __APP_VERSION__
 
 // 面包屑当前项 = 路由 meta.title（router/index.ts 为唯一来源）
