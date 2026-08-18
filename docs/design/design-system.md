@@ -162,7 +162,7 @@ el-container（row）
 
 | 类型 | 实现 | 备注 |
 |---|---|---|
-| 主要 | `.el-button--primary` 覆写为 `--hf-gradient-brand` + 透明边框；hover/focus → `--hf-gradient-brand-hover` + glow 微光；active → hover 渐变无 glow；disabled → 退回 EP 默认浅色不渐变 | v3 演进：渐变范围扩至所有主操作 |
+| 主要 | `.el-button--primary` 覆写为 `--hf-gradient-brand` + 透明边框；hover/focus → `--hf-gradient-brand-hover` + glow 微光；active → hover 渐变无 glow；disabled → 退回 EP 默认浅色不渐变；**选择器排除 `:not(.is-link):not(.is-text)`**——链接 / 文字按钮（表格行内操作）保持 EP 原生文字链，渐变只用于实心按钮 | v3 演进：渐变范围扩至所有主操作；v4 澄清 link/text 豁免 |
 | 次要 | EP 默认按钮：白底 + `--hf-border-1` 边框 | 零改动 |
 | 危险 | EP `type="danger"`（映射 `--hf-danger`） | 零改动 |
 
@@ -258,7 +258,7 @@ web/src/assets/styles/
 
 ## 验收
 
-`npm run dev` 后访问 `/design` 预览页：色阶板 / 按钮 / 表单 / 表格 / 状态标签 / 圆角阴影 / 动效演示全部可见即达标；侧边栏在任意页面可见深色效果。
+`npm run dev` 后访问 `/design` 预览页：色阶板 / 按钮 / 表单 / 表格 / 状态标签 / 圆角阴影 / 动效演示全部可见即达标；侧边栏在任意页面可见深色效果；末节《公共组件》演示区（HifyTable 分页/空态、HifyFormDialog 新增编辑、useConfirm 删除确认，mock 数据）全链路可点。
 
 ## 一期不做（留扩展位）
 

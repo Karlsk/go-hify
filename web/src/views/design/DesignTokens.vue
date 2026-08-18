@@ -253,11 +253,15 @@
         <div class="dt__sidebar-item">对话</div>
       </div>
     </section>
+
+    <!-- 公共组件演示（HifyTable / HifyFormDialog / useConfirm，mock 数据） -->
+    <ComponentsDemo />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import ComponentsDemo from './ComponentsDemo.vue'
 
 interface TokenSwatch {
   step: string

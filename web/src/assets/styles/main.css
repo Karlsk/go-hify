@@ -39,20 +39,22 @@ body {
 }
 
 /* 主操作按钮 = 品牌渐变（v3 演进：渐变范围由 logo/关键 CTA 扩至所有主操作，
- * 用户显式决策）。hover 换深一档渐变 + glow 微光；disabled 退回 EP 默认浅色。 */
-.el-button--primary:not(.is-disabled):not(.is-loading) {
+ * 用户显式决策）。hover 换深一档渐变 + glow 微光；disabled 退回 EP 默认浅色。
+ * 排除 is-link / is-text：链接 / 文字按钮保持 EP 原生文字链形态（表格行内操作），
+ * 否则渐变背景会把 link 按钮刷成实心胶囊。 */
+.el-button--primary:not(.is-disabled):not(.is-loading):not(.is-link):not(.is-text) {
   background: var(--hf-gradient-brand);
   border-color: transparent;
 }
 
-.el-button--primary:not(.is-disabled):not(.is-loading):hover,
-.el-button--primary:not(.is-disabled):not(.is-loading):focus {
+.el-button--primary:not(.is-disabled):not(.is-loading):not(.is-link):not(.is-text):hover,
+.el-button--primary:not(.is-disabled):not(.is-loading):not(.is-link):not(.is-text):focus {
   background: var(--hf-gradient-brand-hover);
   border-color: transparent;
   box-shadow: var(--hf-shadow-glow-primary);
 }
 
-.el-button--primary:not(.is-disabled):not(.is-loading):active {
+.el-button--primary:not(.is-disabled):not(.is-loading):not(.is-link):not(.is-text):active {
   background: var(--hf-gradient-brand-hover);
   border-color: transparent;
   box-shadow: none;

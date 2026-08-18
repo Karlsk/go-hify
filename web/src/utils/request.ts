@@ -1,6 +1,6 @@
 import axios, { type AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
-import type { Result } from '@/types'
+import type { PageQuery, PageResult, Result } from '@/types'
 
 // CLAUDE.md《统一响应信封》：{ success, data, error:{code,message,details}, meta }
 
@@ -16,7 +16,8 @@ request.interceptors.request.use((config) => config)
 // 响应拦截器：只做"信封校验 + 失败统一报错"，自动解包 data 交给下面的 helper。
 //   success=false → ElMessage.error(error.message) + reject(RequestError)
 //   success=true  / 非信封结构 → 原样放行
-// 注意：helper 解包 Result.data 后分页 meta 不再可见；需 meta 的列表端点将来用独立 getList 取 { data, meta }。
+// 注意：get/post/put/del 解包 Result.data 后分页 meta 不再可见；
+// 需 meta 的列表端点用 getList 取 { list, meta }（HifyTable 的数据源）。
 request.interceptors.response.use(
   (response) => {
     const result = response.data as Result<unknown>
@@ -84,6 +85,23 @@ export function put<T>(
 
 export function del<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
   return request.delete<Result<T>>(url, config).then((res) => res.data.data as T)
+}
+
+/** 偏移分页列表端点：解包 data + meta，返回 PageResult（HifyTable 数据源） */
+export async function getList<T>(
+  url: string,
+  params?: PageQuery,
+  config?: AxiosRequestConfig,
+): Promise<PageResult<T>> {
+  const res = await request.get<Result<T[]>>(url, { ...config, params })
+  const list = res.data.data ?? []
+  const meta = res.data.meta
+  return {
+    list,
+    total: meta?.total ?? list.length,
+    page: meta?.page ?? params?.page ?? 1,
+    pageSize: meta?.page_size ?? params?.page_size ?? 20,
+  }
 }
 
 export default request

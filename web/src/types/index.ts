@@ -39,3 +39,11 @@ export interface PageQuery {
   page?: number
   page_size?: number
 }
+
+/** 偏移分页列表结果（配置表，对齐后端 meta 的 page/page_size/total） */
+export interface PageResult<T> {
+  list: T[]
+  total: number
+  page: number
+  pageSize: number
+}

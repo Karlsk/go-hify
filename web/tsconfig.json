@@ -13,6 +13,8 @@
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,
     "noEmit": true,
+    // EP 官方 Volar 配置：注入 v-loading 等全局指令与 GlobalComponents 类型
+    "types": ["element-plus/global"],
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]

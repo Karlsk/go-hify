@@ -38,19 +38,27 @@ web/
     │       └── main.css               # @import 上两者 + reset + 组件级覆写（渐变主按钮等）
     ├── router/index.ts     # 路由表（meta.title = 面包屑/document.title 来源）
     ├── components/
-    │   └── PageHeader.vue  # 页面标题区：标题 + 描述 + 右侧 actions 插槽
+    │   ├── PageHeader.vue      # 页面标题区：标题 + 描述 + 右侧 actions 插槽
+    │   ├── HifyTable.vue       # 通用列表表格（泛型，偏移分页，refresh()）
+    │   └── HifyFormDialog.vue  # 通用表单弹窗（泛型，open(data?) 编辑/新增）
+    ├── composables/
+    │   ├── useRequest.ts   # 请求三态 { data, loading, error, execute }
+    │   └── useConfirm.ts   # 删除确认全流程：调用即执行，返回 Promise<boolean>
     ├── stores/             # Pinia 模块（user/session 等，按业务新增）
     ├── api/                # 各模块接口定义（axios 实例在 utils/request.ts）
     ├── utils/
-    │   ├── request.ts      # axios 实例 + Result 信封拆包 + 错误统一处理
+    │   ├── request.ts      # axios 实例 + Result 信封拆包 + 错误统一处理 + getList
+    │   ├── notify.ts       # notifySuccess/Error/Warning（duration 统一 3s）
     │   └── sse.ts          # fetch + ReadableStream（SSE 流式，不用 EventSource）
     ├── types/
-    │   └── index.ts        # Result / ResultError / ResultMeta / PageQuery
+    │   └── index.ts        # Result 信封 / PageQuery / PageResult 等公共类型
     └── views/
         ├── provider/ProviderList.vue
         ├── agent/AgentList.vue
         ├── chat/ChatView.vue
-        └── design/DesignTokens.vue   # 设计 token 预览页（/design，不进菜单）
+        └── design/
+            ├── DesignTokens.vue      # 设计 token 预览页（/design，不进菜单）
+            └── ComponentsDemo.vue    # 公共组件演示区（mock 数据，/design 末节）
 ```
 
 ## 设计系统
@@ -63,7 +71,7 @@ web/
 - `assets/styles/theme-element-plus.css` —— 把 `--el-*` 映射到 `--hf-*`（含 EP light-N 派生色），EP 组件自动继承主题；本文件不新增视觉决策。
 - 业务代码**只引用语义 token**（`var(--hf-bg-page)`），禁止硬编码色值 / 圆角 / 阴影；EP 组件默认即主题化，无需逐个覆盖。
 - token 按语义命名（非 `--hf-white` 式字面命名），为将来深色主题留扩展位：`html[data-theme="dark"]` 下覆盖 `--hf-*` 即可。
-- 验收：`npm run dev` 后访问 `/design` 预览页。
+- 验收：`npm run dev` 后访问 `/design` 预览页（含末节《公共组件》演示：HifyTable 分页 / 空态、HifyFormDialog 新增编辑、useConfirm 删除确认，mock 数据全链路可点）。
 
 ## 约定（与 CLAUDE.md 对齐）
 
@@ -72,7 +80,8 @@ web/
 - API 统一前缀 `/api/v1`（`request.ts` 的 `baseURL`）。
 - 所有响应走后端 `respond.Result` 信封：`{ success, data, error, meta }`。
 - `request.ts` 响应拦截器统一拆信封：`success === false` → 取 `error.code` / `error.message` → `ElMessage.error` 提示 + `reject(new RequestError(code, message))`，调用方按 `error.code` 分支。
-- `success === true` 自动解包：导出 `get` / `post` / `put` / `del` 四个泛型 helper（`get<T>(url)` 直接返回 `Promise<T>`，即业务 `data`）；解包后 `meta` 不可见，需分页 `meta` 的列表端点将来用独立 `getList` 取 `{ data, meta }`。
+- `success === true` 自动解包：导出 `get` / `post` / `put` / `del` 四个泛型 helper（`get<T>(url)` 直接返回 `Promise<T>`，即业务 `data`）；解包后 `meta` 不可见，需分页 `meta` 的列表端点用 `getList<T>(url, params)` 取 `PageResult<T>`（`{ list, total, page, pageSize }`，HifyTable 的数据源）。
+- 请求失败的 `ElMessage.error` 统一在拦截器弹，业务层 / composables **不重复弹**；`notify.ts` 只管成功 / 警告 / 业务显式错误。
 - HTTP 主信号（2xx/4xx/5xx）由 axios 错误分支兜底；401 预留跳登录钩子（auth 模块落地后接 `router.push('/login')`）。
 - 业务错误码（`PROVIDER_NOT_FOUND` / `BUDGET_EXHAUSTED` / …）见 CLAUDE.md《错误处理》表。
 
@@ -96,6 +105,16 @@ web/
 - 大列表（`conversations` / `messages` / `executions`）走**游标分页**：`limit` + `cursor`，禁用 OFFSET。
 - 极小静态表（`providers` / `agents` / `models` / `mcp_servers` / `knowledge_bases` / `workflows`）走**偏移分页**：`page` + `page_size`，原生适配 Element Plus 分页组件。
 - 两种 meta 字段均收敛在 `types/index.ts` 的 `ResultMeta`，对应查询参数在 `PageQuery`。
+
+### 公共组件与 composables
+
+列表页骨架 = `PageHeader` + `HifyTable`；新增/编辑配 `HifyFormDialog`；删除用 `useConfirm` 一行完成全流程；非分页请求用 `useRequest` 管三态。
+
+- `HifyTable<T>`：`columns`（label/prop/width/slot）+ `api` 返回 `PageResult<T>`（直接接 `getList`）；内部管 loading / 偏移分页；增删后 `refresh()`；空态 `el-empty`。定位配置表，游标列表不走它。
+- `HifyFormDialog<T>`：`v-model` 显隐 + `open(data?)` 区分编辑/新增；内部持有表单副本，打开重建、关闭自动重置；提交事件 `(form, done)`，父组件调 API 后 `done(true)` 关弹窗 / `done(false)` 停 loading 保持打开。
+- `useConfirm({ message, api, ... })` 调用即执行：确认框（红色确认按钮）→ 调 api → `notifySuccess`；取消静默 `false`，api 失败 reject。
+- `useRequest(api)` → `{ data, loading, error, execute }`；错误只记状态不重复弹（拦截器已弹）。
+- 组件视觉值全走 token；表格卡片 body padding 0 是内容卡片 20px 规则的唯一例外（见 design-system.md《整体布局》）。
 
 ### 路径别名
 
