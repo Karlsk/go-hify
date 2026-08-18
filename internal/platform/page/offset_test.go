@@ -1,6 +1,7 @@
 package page
 
 import (
+	"math"
 	"reflect"
 	"regexp"
 	"testing"
@@ -53,6 +54,22 @@ func TestOffsetMath(t *testing.T) {
 		}
 		if got := p.Limit(); got != tt.wantLimit {
 			t.Errorf("page %d size %d: Limit()=%d want %d", tt.page, tt.pageSize, got, tt.wantLimit)
+		}
+	}
+}
+
+// 超大 Page 的乘积在 int 上溢出为负（曾致切片 panic）；Offset() 必须夹进 [0, MaxInt]。
+func TestOffsetOverflowNeverNegative(t *testing.T) {
+	cases := []struct {
+		page, pageSize int
+	}{
+		{math.MaxInt, 20},
+		{math.MaxInt / 2, 100},
+		{1 << 62, 1 << 10},
+	}
+	for _, c := range cases {
+		if got := (OffsetParams{Page: c.page, PageSize: c.pageSize}).Offset(); got < 0 {
+			t.Errorf("page=%d size=%d: Offset()=%d, want >= 0", c.page, c.pageSize, got)
 		}
 	}
 }

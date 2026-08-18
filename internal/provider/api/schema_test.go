@@ -77,6 +77,46 @@ func TestValidateProvider_Update(t *testing.T) {
 	}
 }
 
+// ValidateWithKind 用真实 kind 补验：Validate 放行的请求在此被拒。
+func TestValidateProvider_UpdateWithKind(t *testing.T) {
+	cases := []struct {
+		name    string
+		req     UpdateProviderReq
+		kind    string
+		wantErr bool
+	}{
+		{"openai 合法", UpdateProviderReq{ID: 1, Name: "OpenAI"}, KindOpenAI, false},
+		{"openai_compatible 缺 base_url", UpdateProviderReq{ID: 1, Name: "vLLM"}, KindOpenAICompatible, true},
+		{"keep_alive 非 ollama 被拒", UpdateProviderReq{ID: 1, Name: "x", ExtraConfig: map[string]any{"keep_alive": "30m"}}, KindOpenAI, true},
+		{"keep_alive ollama 放行", UpdateProviderReq{ID: 1, Name: "x", ExtraConfig: map[string]any{"keep_alive": "30m"}}, KindOllama, false},
+		{"ID 缺失", UpdateProviderReq{Name: "x"}, KindOpenAI, true},
+	}
+	for _, c := range cases {
+		err := c.req.ValidateWithKind(c.kind)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err = %v, wantErr = %v", c.name, err, c.wantErr)
+		}
+	}
+}
+
+func TestValidateListProvidersReq(t *testing.T) {
+	cases := []struct {
+		name    string
+		req     ListProvidersReq
+		wantErr bool
+	}{
+		{"无筛选", ListProvidersReq{}, false},
+		{"kind 合法", ListProvidersReq{Kind: KindClaude}, false},
+		{"kind 非法", ListProvidersReq{Kind: "azure"}, true},
+	}
+	for _, c := range cases {
+		err := c.req.Validate()
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err = %v, wantErr = %v", c.name, err, c.wantErr)
+		}
+	}
+}
+
 func TestValidateExtraConfig(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -164,15 +204,42 @@ func TestProviderSchema_JSONNoSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	json := string(b)
+	body := string(b)
 	for _, want := range []string{`"id":"12345678901234567"`, `"has_api_key":true`} {
-		if !strings.Contains(json, want) {
-			t.Errorf("JSON 缺少 %s：%s", want, json)
+		if !strings.Contains(body, want) {
+			t.Errorf("JSON 缺少 %s：%s", want, body)
 		}
 	}
 	for _, banned := range []string{"api_key_encrypted", `"api_key":`, "sk-plaintext", "auth_config"} {
-		if strings.Contains(json, banned) {
-			t.Errorf("JSON 泄露敏感字段 %s：%s", banned, json)
+		if strings.Contains(body, banned) {
+			t.Errorf("JSON 泄露敏感字段 %s：%s", banned, body)
+		}
+	}
+}
+
+// 详情聚合 JSON 形态：provider 字段扁平展开（无嵌套 provider 对象）、models 空为 []、
+// health 缺省为 null（从未探测）；同样不出现密文。
+func TestProviderDetailSchema_JSON(t *testing.T) {
+	d := ProviderDetailSchema{Models: []ModelSchema{}, Health: nil}
+	d.ID = "1"
+	d.Name = "OpenAI"
+	d.Kind = KindOpenAI
+	d.HasAPIKey = true
+	d.ExtraConfig = map[string]any{}
+
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+	for _, want := range []string{`"name":"OpenAI"`, `"models":[]`, `"health":null`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("JSON 缺少 %s：%s", want, s)
+		}
+	}
+	for _, banned := range []string{"api_key_encrypted", `"api_key":`, "auth_config", `{"ProviderSchema"`} {
+		if strings.Contains(s, banned) {
+			t.Errorf("JSON 不应出现 %s：%s", banned, s)
 		}
 	}
 }

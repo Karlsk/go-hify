@@ -1,6 +1,10 @@
 package page
 
-import "gorm.io/gorm"
+import (
+	"math"
+
+	"gorm.io/gorm"
+)
 
 // OffsetParams 是偏移分页的查询参数（仅极小静态配置表用，见 CLAUDE.md《分页》）。
 // Page 从 1 起；PageSize 经 NewOffset 归一化为 [1, MaxPageSize]。
@@ -29,8 +33,17 @@ func NewOffset(page, pageSize int) OffsetParams {
 }
 
 // Offset 返回 db.Offset(n) 的 n：(Page-1) * PageSize。Page 从 1 起 → 第一页 offset=0。
+// 饱和乘法防溢出：超大 Page 的乘积在定宽整数上回绕（曾致负偏移切片 panic / 非法 SQL），
+// 超过 math.MaxInt 即封顶——越界页返回空结果，绝不产生负偏移。
 func (p OffsetParams) Offset() int {
-	return (p.Page - 1) * p.PageSize
+	if p.Page <= 1 || p.PageSize <= 0 {
+		return 0
+	}
+	pages, size := int64(p.Page)-1, int64(p.PageSize)
+	if pages > int64(math.MaxInt)/size {
+		return math.MaxInt
+	}
+	return int(pages * size)
 }
 
 // Limit 返回 db.Limit(n) 的 n，即 PageSize。

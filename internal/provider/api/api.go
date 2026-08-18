@@ -11,8 +11,8 @@ import "context"
 type ProviderService interface {
 	// Create 创建提供商；名称唯一冲突返回 ErrProviderNameConflict。
 	Create(ctx context.Context, req CreateProviderReq) (*ProviderSchema, error)
-	// Get 取单个（详情含 api_key_masked）；不存在返回 ErrProviderNotFound。
-	Get(ctx context.Context, req GetProviderReq) (*ProviderSchema, error)
+	// Get 取详情聚合（provider + models + health，含 api_key_masked）；不存在返回 ErrProviderNotFound。
+	Get(ctx context.Context, req GetProviderReq) (*ProviderDetailSchema, error)
 	// List 偏移分页列表。
 	List(ctx context.Context, req ListProvidersReq) (*ProviderListResult, error)
 	// Update 整体更新（kind 不可改；api_key 空串=不变，非空=轮换）；不存在返回 ErrProviderNotFound。
@@ -33,7 +33,7 @@ type ModelService interface {
 	List(ctx context.Context, req ListModelsReq) (*ModelListResult, error)
 	// Update 整体更新；不存在返回 ErrModelNotFound。
 	Update(ctx context.Context, req UpdateModelReq) (*ModelSchema, error)
-	// Delete 删除；被 agents / knowledge_bases 引用时返回 ErrModelInUse（store 层翻译）。
+	// Delete 删除；被 agents / knowledge_bases 引用时外键挡住，返回 ErrModelInUse（service 层翻译）。
 	Delete(ctx context.Context, req DeleteModelReq) error
 	// SyncModels 自动发现并 upsert（只增改不删；不覆盖价格 / enabled / display_name / extra_params）。
 	SyncModels(ctx context.Context, req SyncModelsReq) (*ModelSyncResultSchema, error)

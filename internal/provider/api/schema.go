@@ -202,6 +202,15 @@ func (r UpdateProviderReq) Validate() error {
 	return validateProvider(r.Name, "", r.BaseURL, r.APIKey, r.ExtraConfig, false)
 }
 
+// ValidateWithKind 用库内真实 kind 补全跨字段校验（service 取实体后调用，也保护绕过
+// handler 的跨模块调用方）：openai_compatible 必填 base_url、extra_config.keep_alive 仅 ollama。
+func (r UpdateProviderReq) ValidateWithKind(kind string) error {
+	if r.ID == 0 {
+		return fmt.Errorf("id 必填")
+	}
+	return validateProvider(r.Name, kind, r.BaseURL, r.APIKey, r.ExtraConfig, false)
+}
+
 // GetProviderReq / DeleteProviderReq 单条取 / 删请求（路径参数 id）。
 type GetProviderReq struct {
 	ID uint64 `uri:"id" binding:"required"`
@@ -220,13 +229,22 @@ type DeleteProviderReq struct {
 func (r DeleteProviderReq) Validate() error { return nil }
 
 // ListProvidersReq 偏移分页列表请求（配置表，按接口规范"极小静态表用偏移分页"）。
+// Kind / Enabled 可选筛选；Enabled 用指针区分「未传」与「显式 false」。
 type ListProvidersReq struct {
-	Page     int `form:"page" binding:"omitempty,min=1"`
-	PageSize int `form:"page_size" binding:"omitempty,min=1,max=100"`
+	Page     int    `form:"page" binding:"omitempty,min=1"`
+	PageSize int    `form:"page_size" binding:"omitempty,min=1,max=100"`
+	Kind     string `form:"kind" binding:"omitempty,max=32"`
+	Enabled  *bool  `form:"enabled"`
 }
 
-// Validate 跨字段校验；分页归一化由 platform/page 负责。
-func (r ListProvidersReq) Validate() error { return nil }
+// Validate 跨字段校验：kind 非空时必须是五类之一；分页归一化由 platform/page 负责。
+func (r ListProvidersReq) Validate() error {
+	if r.Kind != "" && !validKind[r.Kind] {
+		return fmt.Errorf("kind 必须是 %s / %s / %s / %s / %s 之一",
+			KindOpenAI, KindClaude, KindGemini, KindOllama, KindOpenAICompatible)
+	}
+	return nil
+}
 
 // TestConnectionReq 手动连通性探测请求（按 kind 选探测端点，写 provider_health 后回读）。
 type TestConnectionReq struct {
@@ -359,6 +377,14 @@ type ProviderHealthSchema struct {
 	LatencyMs     *int32     `json:"latency_ms"`
 	ErrorMessage  string     `json:"error_message"`
 	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+// ProviderDetailSchema 详情聚合：provider 本体（内嵌，JSON 扁平展开）+ 该提供商模型列表 + 健康状态。
+// 仅 Get 详情接口使用；列表不聚合（N+1 无意义）。health 无行（从未探测）为 null，models 空为 []。
+type ProviderDetailSchema struct {
+	ProviderSchema
+	Models []ModelSchema         `json:"models"`
+	Health *ProviderHealthSchema `json:"health"`
 }
 
 // ModelSyncResultSchema 模型自动发现结果。

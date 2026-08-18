@@ -1,6 +1,6 @@
 # Provider 模块数据模型（db_model）
 
-> 状态：**已落地数据层与契约层**（2026-08-18）：00002 已重写为最终态三张表，`provider/service/model.go` 与 `provider/api/`（schema / 接口 / 哨兵 / 测试）已就位。store / service 实现、handler、StartProber 见《落地顺序》后续批次。
+> 状态：**已落地数据层、契约层与 CRUD 全链路**（2026-08-18）：00002 最终态三张表 + `provider/api/`（schema / 接口 / 哨兵 / 测试）+ `service/crypto.go`（AES-256-GCM）+ `service/service.go`（ProviderService / ModelService CRUD、Cache-Aside 缓存、23505/23503 翻译，测试 -race 绿）+ `store/store.go`（GORM 14 方法，sqlmock 测试绿）均已就位；主密钥经 `config.ProviderCfg`（`PROVIDER_MASTER_KEY`，启动缺失 fail-fast）。剩余：handler 挂路由、TestConnection 状态机、StartProber、models sync（见《落地顺序》第 4 步后半 / 第 5 步）。
 > 本文记录 provider 模块数据模型的最终结论、决策理由与相关约定；表归属总览见 [docs/design/data-model.md](../../design/data-model.md)，建表通用规范见 CLAUDE.md《数据库规范》。
 
 ## 1. 实体关系
@@ -307,8 +307,8 @@ func (ProviderHealth) TableName() string { return "provider_health" }
 
 ## 6. 落地顺序
 
-1. 重写 `migrations/00002_provider.sql`（本文 §3）+ dev 库重置验证
-2. `service/model.go`（本文 §4）+ `service/crypto.go`（AES-256-GCM 加解密与打码）
-3. `api/`：接口、schema、哨兵
-4. `store/` + `service/`：CRUD、test-connection 状态机、StartProber、models sync
-5. `handler/` 挂路由；前端 ProviderList 对接
+1. 重写 `migrations/00002_provider.sql`（本文 §3）+ dev 库重置验证 ✅
+2. `service/model.go`（本文 §4）+ `service/crypto.go`（AES-256-GCM 加解密与打码）✅
+3. `api/`：接口、schema、哨兵 ✅
+4. `store/` + `service/`：CRUD（✅ 2026-08-18：缓存失效矩阵、加密落库、双服务）、test-connection 状态机、StartProber、models sync（未做）
+5. `handler/` 挂路由；前端 ProviderList 对接（未做）

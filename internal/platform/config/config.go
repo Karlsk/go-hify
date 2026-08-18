@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -14,13 +15,14 @@ import (
 
 // Config 是 Hify 全量配置，按子系统分组。组合根（internal/app）据此初始化 platform、注入业务模块。
 type Config struct {
-	Server  ServerCfg
-	PG      PGCfg
-	Redis   RedisCfg
-	Auth    AuthCfg
-	LLM     LLMCfg
-	Budget  BudgetCfg
-	Logging LoggingCfg
+	Server   ServerCfg
+	PG       PGCfg
+	Redis    RedisCfg
+	Auth     AuthCfg
+	LLM      LLMCfg
+	Provider ProviderCfg
+	Budget   BudgetCfg
+	Logging  LoggingCfg
 }
 
 // ServerCfg HTTP 服务监听。
@@ -47,12 +49,17 @@ type AuthCfg struct {
 }
 
 // LLMCfg 外部模型提供商 API Key（CLAUDE.md §密钥：禁止入 Git）。
-// DB 内 provider 加密 Key 的主密钥亦走 env，后续任务补 ENCRYPT_KEY。
+// 注意：这是进程直连 LLM 用的 env key；DB 内 provider 的 API Key 加密主密钥见 ProviderCfg。
 type LLMCfg struct {
 	OpenAIKey     string
 	ClaudeKey     string
 	GeminiKey     string
 	OllamaBaseURL string
+}
+
+// ProviderCfg provider 模块配置：DB 内 API Key 加密的主密钥（AES-256-GCM）。
+type ProviderCfg struct {
+	MasterKey []byte // PROVIDER_MASTER_KEY：base64 解码后须为 32 字节；缺失/非法启动即 panic
 }
 
 // BudgetCfg 预算护栏（CLAUDE.md §budget：每用户限流 + 每日预算熔断，fail-open + 80% 告警）。
@@ -92,6 +99,9 @@ func MustLoad() *Config {
 			GeminiKey:     envStr("GEMINI_API_KEY", ""),
 			OllamaBaseURL: envStr("OLLAMA_BASE_URL", "http://localhost:11434"),
 		},
+		Provider: ProviderCfg{
+			MasterKey: envMasterKey(),
+		},
 		Budget: BudgetCfg{
 			DailyBudgetUSDCents: envInt64("DAILY_BUDGET_USD_CENTS", 1000),
 			UserRPM:             envInt("USER_RPM", 60),
@@ -115,9 +125,27 @@ func (c *Config) mustValidate() {
 	if c.Auth.SessionSecret == "" {
 		missing = append(missing, "SESSION_SECRET")
 	}
+	if c.Provider.MasterKey == nil {
+		missing = append(missing, "PROVIDER_MASTER_KEY（32 字节 base64，openssl rand -base64 32 生成）")
+	}
 	if len(missing) > 0 {
 		panic(fmt.Sprintf("config: missing required env vars: %s", strings.Join(missing, ", ")))
 	}
+}
+
+// envMasterKey 读并解码 PROVIDER_MASTER_KEY。未设置返回 nil（由 mustValidate 报缺失）；
+// 设置但非法（非 base64，或解码后非 32 字节）直接 panic 并给生成命令提示——错误长度的主密钥
+// 只会在运行期加解密处爆，不如启动期拦截。
+func envMasterKey() []byte {
+	v, ok := os.LookupEnv("PROVIDER_MASTER_KEY")
+	if !ok || v == "" {
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(v)
+	if err != nil || len(raw) != 32 {
+		panic("config: PROVIDER_MASTER_KEY 必须是 32 字节 AES-256 主密钥的 base64（openssl rand -base64 32 生成）")
+	}
+	return raw
 }
 
 // envStr 读字符串环境变量，缺失返回 defaultValue。
