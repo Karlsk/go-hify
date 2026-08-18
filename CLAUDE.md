@@ -110,6 +110,7 @@ internal/
     ├── respond/              # 统一 API 响应信封（success / data / error / meta）
     ├── page/                 # 统一分页：偏移分页（配置表）+ 游标分页（大列表 keyset，禁 OFFSET）
     ├── timex/                # 统一时间序列化：纯日期 Date（yyyy-MM-dd）；datetime 用 time.Time 默认 RFC 3339
+    ├── schema/               # 各模块 api 契约共用响应基类 BaseSchema（id 字符串化 + 双时间戳；纯标准库，与 db mixin 对称）
     └── cache/                # 配置类缓存管理器：按名 TTL + 写时删 key（Cache-Aside）；全仓库 key 经 redisx.Key 加 hify: 前缀
 web/                          # Vue 3 前端，独立构建（目录结构、设计系统与约定见 web/README.md）
 deploy/                        # Docker Compose 部署：前后端 Dockerfile、nginx 配置、compose、备份脚本（用法见 deploy/README.md）
@@ -266,7 +267,7 @@ type ProviderSchema struct { ... }
 var ErrProviderNotFound = errors.New("provider not found")
 ```
 
-规则：`api/` 是叶子包，只 import 标准库；schema 上的 `binding:"..."` 是纯字符串 tag，不引入 gin 依赖。
+规则：`api/` 是叶子包，只 import 标准库与纯标准库的 platform 小包（`platform/schema` 的 `BaseSchema`：id 字符串化 + 双时间戳，主键非代理 id 或 append-only 的表自行声明）；不 import gin/gorm；schema 上的 `binding:"..."` 是纯字符串 tag，不引入 gin 依赖。
 
 **service/ —— 业务层模板：**
 
@@ -1101,6 +1102,10 @@ HTTP 状态映射：
 | `VALIDATION_FAILED` | 400 | `errs.ErrValidationFailed`（`details` 含字段级错误） |
 | `PROVIDER_NOT_FOUND` | 404 | `providerapi.ErrProviderNotFound` |
 | `PROVIDER_NAME_CONFLICT` | 409 | `providerapi.ErrProviderNameConflict`（唯一约束） |
+| `PROVIDER_DISABLED` | 503 | `providerapi.ErrProviderDisabled`（提供商已停用，拒绝新调用） |
+| `MODEL_NOT_FOUND` | 404 | `providerapi.ErrModelNotFound` |
+| `MODEL_ID_CONFLICT` | 409 | `providerapi.ErrModelIDConflict`（uq(provider_id, model_id)） |
+| `MODEL_IN_USE` | 409 | `providerapi.ErrModelInUse`（被 agents / knowledge_bases 引用，删除被挡） |
 | `PROVIDER_BUSY` | 503 | `llm.ErrProviderBusy`（bulkhead fail-fast） |
 | `PROVIDER_UNAVAILABLE` | 503 | `llm.ErrProviderUnavailable`（熔断打开 / `ProviderDown`） |
 | `RATE_LIMITED` | 429 | `errs.ErrRateLimited`（供应商 429 透传 / 用户限流） |

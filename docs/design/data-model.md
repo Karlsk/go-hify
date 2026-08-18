@@ -12,7 +12,8 @@
 
 ```mermaid
 erDiagram
-    providers ||--o{ models : ""
+    providers ||--o{ models : "删提供商级联删模型"
+    providers ||--o| provider_health : "1:1，首次探测才建行"
     mcp_servers ||--o{ mcp_tools : ""
     agents }o--|| models : "主/备用模型"
     agents }o--o{ mcp_tools : "agent_mcp_tools"
@@ -33,8 +34,10 @@ erDiagram
 - `users` — 最简登录账号（用户名 + 密码哈希）
 
 ### provider
-- `providers` — 提供商配置（OpenAI/Claude/Gemini/Ollama 实例：base_url、加密的 api_key）
-- `models` — 提供商下的模型（含 chat 与 embedding 两类能力）
+- `providers` — 提供商配置（五类：openai/claude/gemini/ollama/openai_compatible；base_url、`auth_config` jsonb 密钥值级加密、`extra_config` Profile 覆盖白名单、enabled）
+- `models` — 提供商下的模型（`name` 展示名 / `model_id` API 标识；chat 与 embedding 两类能力；价格、`source` 双源管理、`extra_params` 白名单）
+- `provider_health` — 探测结果（1:1，独立表隔离探测写与配置缓存；unknown/up/degraded/down 状态机；熔断等运行时状态不落库）
+- 决策与 DDL 详见 [docs/changelog/provider/db_model.md](../changelog/provider/db_model.md)
 
 ### mcp
 - `mcp_servers` — MCP 工具服务器配置（transport、command/url、env）
@@ -63,7 +66,8 @@ erDiagram
 ## 关系明细
 
 ```
-providers 1──N models                          # 一个提供商多个模型
+providers 1──N models                          # 一个提供商多个模型（ON DELETE CASCADE）
+providers 1──1 provider_health                 # 探测结果，惰性建行（ON DELETE CASCADE）
 
 mcp_servers 1──N mcp_tools                     # 一个 server 多个工具
 
@@ -97,7 +101,7 @@ workflows ──(LLM 节点调用)──▶ executions        # 工作流节点�
 | 表 | 所属模块 | model 位置 |
 |---|---|---|
 | users | auth | `auth/service/model.go` |
-| providers, models | provider | `provider/service/model.go` |
+| providers, models, provider_health | provider | `provider/service/model.go` |
 | mcp_servers, mcp_tools | mcp | `mcp/service/model.go` |
 | agents, agent_mcp_tools, agent_knowledge_bases | agent | `agent/service/model.go` |
 | knowledge_bases, documents, chunks | rag | `rag/service/model.go` |
