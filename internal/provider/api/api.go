@@ -19,8 +19,9 @@ type ProviderService interface {
 	Update(ctx context.Context, req UpdateProviderReq) (*ProviderSchema, error)
 	// Delete 删除（级联删 models 与 provider_health；被 agent 引用的模型会挡住并报错）。
 	Delete(ctx context.Context, req DeleteProviderReq) error
-	// TestConnection 手动连通性探测，按 DEGRADED 状态机写 provider_health 后回读。
-	TestConnection(ctx context.Context, req TestConnectionReq) (*ProviderHealthSchema, error)
+	// TestConnection 手动连通性探测（按 kind 分发端点）；按 DEGRADED 状态机写 provider_health，
+	// 返回探测结果本体（health 快照经 Get 现读，不缓存）。
+	TestConnection(ctx context.Context, req TestConnectionReq) (*ConnectionTestSchema, error)
 }
 
 // ModelService 模型目录契约（含自动发现同步）。

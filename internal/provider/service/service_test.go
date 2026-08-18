@@ -34,10 +34,12 @@ type memStore struct {
 	createModelErr    error
 	updateModelErr    error
 	deleteModelErr    error
+	upsertHealthErr   error
 
 	// 调用计数：缓存命中断言（二访不查 store）。
 	getProviderByIDCalls int
 	listProvidersCalls   int
+	upsertHealthCalls    int
 }
 
 func newMemStore() *memStore {
@@ -216,6 +218,26 @@ func (m *memStore) GetHealthByProviderID(_ context.Context, providerID uint64) (
 	return &cp, nil
 }
 
+func (m *memStore) GetHealthByProviderIDForUpdate(ctx context.Context, providerID uint64) (*ProviderHealth, error) {
+	return m.GetHealthByProviderID(ctx, providerID) // 内存 store 无并发写，锁定读与普通读等价
+}
+
+func (m *memStore) WithTx(_ context.Context, fn func(tx Store) error) error {
+	return fn(m) // 内存 store 无真实事务，直接同 store 回调（并发语义由 store 层 sqlmock 覆盖）
+}
+
+func (m *memStore) UpsertHealth(_ context.Context, h *ProviderHealth) error {
+	if m.upsertHealthErr != nil {
+		return m.upsertHealthErr
+	}
+	m.upsertHealthCalls++
+	if old, ok := m.healths[h.ProviderID]; ok {
+		h.CreatedAt = old.CreatedAt // 更新路径保留原 created_at（对齐 DO UPDATE 不碰该列）
+	}
+	m.healths[h.ProviderID] = h
+	return nil
+}
+
 // ---- 种子与构造 helper ----
 
 // seed 种子一条 provider（分配 id / 时间戳 / 归一 map）；与其他方法一致存副本，
@@ -288,7 +310,7 @@ func newTestService(t *testing.T) (*memStore, *miniredis.Miniredis, providerapi.
 
 // 缓存原始 key（与 cache 包的拼接约定一致，用于失效断言）。
 const (
-	listFullKey    = "hify:cache:provider-cache:list"
+	listFullKey      = "hify:cache:provider-cache:list"
 	detailFullKeyFmt = "hify:cache:provider-cache:detail:%d"
 )
 

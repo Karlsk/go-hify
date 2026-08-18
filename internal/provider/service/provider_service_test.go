@@ -2,8 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -328,8 +331,127 @@ func TestProviderDelete_FKViolation(t *testing.T) {
 	assert.ErrorIs(t, err, providerapi.ErrModelInUse)
 }
 
-func TestProviderTestConnection_NotImplemented(t *testing.T) {
-	_, _, ps, _ := newTestService(t)
-	_, err := ps.TestConnection(context.Background(), providerapi.TestConnectionReq{ID: 1})
-	assert.ErrorIs(t, err, errNotImplemented)
+// ---- TestConnection（手动连通性探测）----
+
+// newProbeService 建注入探测桩 client 的 providerService（探测打 httptest，不打真实外网）。
+func newProbeService(st *memStore, cm cacheManager, hc probeClient) providerapi.ProviderService {
+	return &providerService{store: st, cm: cm, master: testMaster, probe: hc}
+}
+
+// seedProbeProvider 建指向桩 server 的带 key provider，返回 id。
+func seedProbeProvider(st *memStore, kind, baseURL string) uint64 {
+	enc, _ := encryptAPIKey(testMaster, "sk-live-key")
+	return st.seed(&Provider{
+		Name: "探测对象", Kind: kind, BaseURL: baseURL, Enabled: true,
+		AuthConfig: map[string]string{apiKeyEncryptedKey: enc},
+	}).ID
+}
+
+// 探测成功：结果四字段、health 落库 up、detail 缓存不失效且命中缓存仍现读到新 health
+// （缓存剔除 health 的核心行为）、明文 key 只进请求头。
+func TestProviderTestConnection_OK(t *testing.T) {
+	st, mr, cm := newTestEnv(t)
+	ctx := context.Background()
+	var gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"}]}`))
+	}))
+	defer srv.Close()
+	ps := newProbeService(st, cm, srv.Client())
+	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	require.True(t, warmDetail(t, ctx, ps, mr, id), "预热 detail（此刻 health 为 nil）")
+
+	res, err := ps.TestConnection(ctx, providerapi.TestConnectionReq{ID: id})
+	require.NoError(t, err)
+	assert.True(t, res.Success)
+	assert.Empty(t, res.ErrorMessage)
+	assert.EqualValues(t, 2, res.ModelCount)
+	assert.GreaterOrEqual(t, res.LatencyMs, int32(0))
+	assert.Equal(t, "/models", gotPath)
+	assert.Equal(t, "Bearer sk-live-key", gotAuth, "解密后的明文只出现在请求头")
+
+	h := st.healths[id]
+	require.NotNil(t, h, "探测结果应落 provider_health")
+	assert.Equal(t, providerapi.HealthUp, h.Status)
+	assert.EqualValues(t, 0, h.FailCount)
+
+	// 探测不失效 detail 缓存；命中缓存仍现读到新 health
+	assert.True(t, mr.Exists(fmt.Sprintf(detailFullKeyFmt, id)), "探测写库无需失效 detail")
+	d, err := ps.Get(ctx, providerapi.GetProviderReq{ID: id})
+	require.NoError(t, err)
+	require.NotNil(t, d.Health, "缓存载荷无 health，由 Get 现读填充")
+	assert.Equal(t, providerapi.HealthUp, d.Health.Status)
+}
+
+// 连续三次 401：degraded → degraded → down，fail_count 递增，last_success_at 恒 nil。
+func TestProviderTestConnection_FailuresToDown(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"bad key"}`))
+	}))
+	defer srv.Close()
+	ps := newProbeService(st, cm, srv.Client())
+	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+
+	wantStatus := []string{providerapi.HealthDegraded, providerapi.HealthDegraded, providerapi.HealthDown}
+	for i, want := range wantStatus {
+		res, err := ps.TestConnection(ctx, providerapi.TestConnectionReq{ID: id})
+		require.NoError(t, err)
+		assert.False(t, res.Success)
+		assert.EqualValues(t, 0, res.ModelCount)
+		assert.Contains(t, res.ErrorMessage, "401")
+		h := st.healths[id]
+		require.NotNil(t, h)
+		assert.Equal(t, want, h.Status, "第 %d 次探测后的状态", i+1)
+		assert.EqualValues(t, i+1, h.FailCount)
+	}
+	assert.Nil(t, st.healths[id].LastSuccessAt)
+}
+
+func TestProviderTestConnection_NotFound(t *testing.T) {
+	_, _, cm := newTestEnv(t)
+	ps := newProbeService(newMemStore(), cm, http.DefaultClient)
+	_, err := ps.TestConnection(context.Background(), providerapi.TestConnectionReq{ID: 999})
+	assert.ErrorIs(t, err, providerapi.ErrProviderNotFound)
+}
+
+// 解密失败（主密钥轮换后的旧密文）：不发请求、不动 health，以失败结果返回。
+func TestProviderTestConnection_DecryptFailsSkipsProbe(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	ctx := context.Background()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+	wrong := &providerService{
+		store: st, cm: cm, master: []byte("99999999999999999999999999999999"), probe: srv.Client(),
+	}
+	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+
+	res, err := wrong.TestConnection(ctx, providerapi.TestConnectionReq{ID: id})
+	require.NoError(t, err, "解密失败是可预期的配置问题，返回失败结果而非 error")
+	assert.False(t, res.Success)
+	assert.Contains(t, res.ErrorMessage, "解密失败")
+	assert.Equal(t, 0, calls, "解密失败不发探测请求")
+	assert.NotContains(t, st.healths, id, "配置问题不写 health")
+}
+
+func TestProviderTestConnection_UpsertError(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+	ps := newProbeService(st, cm, srv.Client())
+	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	st.upsertHealthErr = errors.New("db down")
+
+	_, err := ps.TestConnection(context.Background(), providerapi.TestConnectionReq{ID: id})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "upsert health")
 }

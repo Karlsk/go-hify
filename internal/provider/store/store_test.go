@@ -302,7 +302,7 @@ func TestListModelsPageTwoHasOffset(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "models" WHERE provider_id = $1`)).
 		WithArgs(uint64(1)).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
-	mock.ExpectQuery(regexp.QuoteMeta(getModelPageSQL + ` OFFSET $3`)).
+	mock.ExpectQuery(regexp.QuoteMeta(getModelPageSQL+` OFFSET $3`)).
 		WithArgs(uint64(1), 2, 2).
 		WillReturnRows(modelRows(mvals(3, 1, "B", "m-b", time.Now())))
 
@@ -380,5 +380,101 @@ func TestGetHealthByProviderIDNotFound(t *testing.T) {
 
 	_, err := s.GetHealthByProviderID(context.Background(), 999)
 	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUpsertHealth(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	lat := int32(45)
+	h := &providersvc.ProviderHealth{
+		ProviderID: 7, Status: "up", LastCheckAt: &now, LastSuccessAt: &now,
+		LatencyMs: &lat, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO "provider_health".+ON CONFLICT \("provider_id"\) DO UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{"provider_id", "created_at", "updated_at"}).AddRow(uint64(7), now, now))
+	mock.ExpectCommit()
+
+	err := s.UpsertHealth(context.Background(), h)
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUpsertHealthError(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO "provider_health"`).
+		WillReturnError(errors.New("write failed"))
+	mock.ExpectRollback()
+
+	err := s.UpsertHealth(context.Background(), &providersvc.ProviderHealth{ProviderID: 1, Status: "up"})
+	assert.Error(t, err) // 原样上抛
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetHealthByProviderIDForUpdate(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	// FOR UPDATE 会追加 FOR UPDATE 子句
+	mock.ExpectQuery(regexp.QuoteMeta(getHealthSQL)+` FOR UPDATE`).
+		WithArgs(uint64(1), 1).
+		WillReturnRows(healthRows(1, "degraded", now))
+
+	h, err := s.GetHealthByProviderIDForUpdate(context.Background(), 1)
+	assert.NoError(t, err)
+	assert.Equal(t, "degraded", h.Status)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// WithTx：事务句柄内锁定读 + upsert，验证 BEGIN/COMMIT 与回调收到的是事务 Store。
+func TestWithTx(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(getHealthSQL)+` FOR UPDATE`).
+		WithArgs(uint64(2), 1).
+		WillReturnRows(healthRows(2, "up", now))
+	mock.ExpectQuery(`INSERT INTO "provider_health".+ON CONFLICT \("provider_id"\) DO UPDATE`).
+		WillReturnRows(sqlmock.NewRows([]string{"provider_id", "created_at", "updated_at"}).AddRow(uint64(2), now, now))
+	mock.ExpectCommit()
+
+	err := s.WithTx(context.Background(), func(tx providersvc.Store) error {
+		h, err := tx.GetHealthByProviderIDForUpdate(context.Background(), 2)
+		if err != nil {
+			return err
+		}
+		if h.Status != "up" {
+			t.Fatalf("unexpected status %s", h.Status)
+		}
+		lat := int32(40)
+		return tx.UpsertHealth(context.Background(), &providersvc.ProviderHealth{
+			ProviderID: 2, Status: "up", LastCheckAt: &now, LastSuccessAt: &now,
+			LatencyMs: &lat, CreatedAt: now, UpdatedAt: now,
+		})
+	})
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// WithTx 回调出错回滚。
+func TestWithTxRollback(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(getHealthSQL)+` FOR UPDATE`).
+		WithArgs(uint64(3), 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectRollback()
+
+	err := s.WithTx(context.Background(), func(tx providersvc.Store) error {
+		_, err := tx.GetHealthByProviderIDForUpdate(context.Background(), 3)
+		return err
+	})
+	assert.Error(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

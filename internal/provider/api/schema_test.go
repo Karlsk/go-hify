@@ -245,3 +245,27 @@ func TestProviderDetailSchema_JSON(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// ConnectionTestSchema JSON 形态：失败四字段全出；成功省略 error_message。
+func TestConnectionTestSchemaJSON(t *testing.T) {
+	b, err := json.Marshal(ConnectionTestSchema{Success: false, LatencyMs: 120, ErrorMessage: "鉴权失败（HTTP 401）"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(b)
+	for _, want := range []string{
+		`"success":false`, `"latency_ms":120`, `"model_count":0`, `"error_message":"鉴权失败（HTTP 401）"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("失败响应缺字段 %s：body=%s", want, body)
+		}
+	}
+
+	b2, err := json.Marshal(ConnectionTestSchema{Success: true, LatencyMs: 50, ModelCount: 7})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b2), "error_message") {
+		t.Errorf("成功响应应省略 error_message：body=%s", b2)
+	}
+}

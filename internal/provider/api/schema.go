@@ -246,13 +246,23 @@ func (r ListProvidersReq) Validate() error {
 	return nil
 }
 
-// TestConnectionReq 手动连通性探测请求（按 kind 选探测端点，写 provider_health 后回读）。
+// TestConnectionReq 手动连通性探测请求（按 kind 选探测端点，写 provider_health 后返回结果本体）。
 type TestConnectionReq struct {
 	ID uint64 `uri:"id" binding:"required"`
 }
 
 // Validate 跨字段校验；当前无跨字段规则。
 func (r TestConnectionReq) Validate() error { return nil }
+
+// ConnectionTestSchema 连通性测试结果（HTTP 探测的响应视图；状态机转移后的 health 快照另经 Get 现读）。
+// ErrorMessage 只含 HTTP 状态码 / 网络错误类与截断的响应摘要（响应体片段）。探测请求头从不回显到本字段，
+// 故不含 API Key；唯一例外是错配网关把请求头反射进错误页体——属运维配置问题，非本契约可防御。
+type ConnectionTestSchema struct {
+	Success      bool   `json:"success"`
+	LatencyMs    int32  `json:"latency_ms"`
+	ModelCount   int32  `json:"model_count"`             // 响应可解析的模型数；不可解析（如 429）为 0
+	ErrorMessage string `json:"error_message,omitempty"` // 失败时非空；截断 200 字符
+}
 
 // ---- Model Req ----
 
@@ -339,15 +349,15 @@ func (r SyncModelsReq) Validate() error { return nil }
 
 // ProviderSchema 提供商响应：列表给 HasAPIKey，详情另填 APIKeyMasked（解密后打码）。
 type ProviderSchema struct {
-	schema.BaseSchema // id 字符串化 + created_at / updated_at
-	Name            string         `json:"name"`
-	Kind            string         `json:"kind"`
-	BaseURL         string         `json:"base_url"`
-	HasAPIKey       bool           `json:"has_api_key"`
-	APIKeyMasked    string         `json:"api_key_masked,omitempty"` // 仅详情接口填充
-	APIKeyRotatedAt *time.Time     `json:"api_key_rotated_at"`
-	ExtraConfig     map[string]any `json:"extra_config"`
-	Enabled         bool           `json:"enabled"`
+	schema.BaseSchema                // id 字符串化 + created_at / updated_at
+	Name              string         `json:"name"`
+	Kind              string         `json:"kind"`
+	BaseURL           string         `json:"base_url"`
+	HasAPIKey         bool           `json:"has_api_key"`
+	APIKeyMasked      string         `json:"api_key_masked,omitempty"` // 仅详情接口填充
+	APIKeyRotatedAt   *time.Time     `json:"api_key_rotated_at"`
+	ExtraConfig       map[string]any `json:"extra_config"`
+	Enabled           bool           `json:"enabled"`
 }
 
 // ModelSchema 模型响应。
@@ -359,7 +369,7 @@ type ModelSchema struct {
 	Capability      string         `json:"capability"`
 	ContextWindow   *int64         `json:"context_window"`
 	MaxOutputTokens *int64         `json:"max_output_tokens"`
-	InputPrice      *string        `json:"input_price"`  // USD/百万 token，字符串金额（JS 浮点安全）
+	InputPrice      *string        `json:"input_price"` // USD/百万 token，字符串金额（JS 浮点安全）
 	OutputPrice     *string        `json:"output_price"`
 	EmbeddingDim    *int32         `json:"embedding_dim"`
 	Enabled         bool           `json:"enabled"`

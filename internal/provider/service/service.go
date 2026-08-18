@@ -43,6 +43,12 @@ type Store interface {
 
 	// health
 	GetHealthByProviderID(ctx context.Context, providerID uint64) (*ProviderHealth, error) // 无行 → gorm.ErrRecordNotFound（service 归 nil）
+	// GetHealthByProviderIDForUpdate 探测状态机事务内的锁定读（FOR UPDATE），串行化并发探测的读-改-写。
+	GetHealthByProviderIDForUpdate(ctx context.Context, providerID uint64) (*ProviderHealth, error)
+	UpsertHealth(ctx context.Context, h *ProviderHealth) error // 探测写入：无行插入、有行更新
+	// WithTx 探测读-算-写事务：锁住 provider_health 行防并发探测的 fail_count 计数竞态
+	// （两个并发探测都读到 n、都写 n+1，真实值应为 n+2——连续失败阈值被延迟）。fn 只操作本模块表。
+	WithTx(ctx context.Context, fn func(tx Store) error) error
 }
 
 // cacheManager 收窄的缓存接口（小接口惯例）：*cache.Cache 凭结构化类型满足；service 持
@@ -55,7 +61,8 @@ type cacheManager interface {
 
 // provider-cache 的 key 形态（全键 = hify:cache:provider-cache:{以下}，前缀由 cache 包拼接）。
 // 失效矩阵：list 只被 provider 写操作失效；detail:{id} 被 provider 更新 / 删除、model 增删改
-// （换绑时新旧两处）、health 写入（探测批次）失效。缓存里只存 schema——密文 / 明文 key 永不进缓存。
+// （换绑时新旧两处）失效。health 不在缓存载荷里（探测写库无需失效，Get 现读单行主键查询）。
+// 缓存里只存 schema——密文 / 明文 key 永不进缓存。
 const (
 	cacheKeyList   = "list"      // 全表快照（[]ProviderSchema）
 	cacheKeyDetail = "detail:%d" // 详情聚合（ProviderDetailSchema）
@@ -67,24 +74,26 @@ const (
 	pgCodeFKViolation     = "23503" // 外键违例：删除被引用行（RESTRICT）
 )
 
-// errNotImplemented 本批未实现的接口方法（TestConnection / SyncModels）占位；
-// 探测状态机与模型自动发现批次落地后移除（db_model.md §6 落地顺序）。
+// errNotImplemented 本批未实现的接口方法（SyncModels）占位；
+// 模型自动发现批次落地后移除（db_model.md §6 落地顺序）。
 var errNotImplemented = errors.New("not implemented in this batch (see docs/changelog/provider/db_model.md)")
 
 // providerService 实现 providerapi.ProviderService。
 type providerService struct {
 	store  Store
 	cm     cacheManager
-	master []byte // API Key 加密主密钥（32B，来自 config.Provider.MasterKey）
+	master []byte      // API Key 加密主密钥（32B，来自 config.Provider.MasterKey）
+	probe  probeClient // 连通性探测 HTTP client（NewProbeClient；测试注入 httptest 桩）
 }
 
 // NewProviderService 构造提供商服务；cm 由组合根传 *cache.Cache，单测可 stub cacheManager。
 // masterKey 必须 32 字节（组合根在启动期调用，非法即 panic fail-fast，与 config 层双重保险）。
+// 探测 client 在此内部组装（共享 LLM transport + 10s 超时），无需组合根关心。
 func NewProviderService(store Store, cm cacheManager, masterKey []byte) providerapi.ProviderService {
 	if len(masterKey) != 32 {
 		panic("service: provider master key must be 32 bytes (config PROVIDER_MASTER_KEY)")
 	}
-	return &providerService{store: store, cm: cm, master: masterKey}
+	return &providerService{store: store, cm: cm, master: masterKey, probe: NewProbeClient()}
 }
 
 // modelService 实现 providerapi.ModelService。
@@ -140,7 +149,8 @@ func (s *providerService) Create(ctx context.Context, req providerapi.CreateProv
 }
 
 // Get 取详情聚合（provider + models + health），仅此接口填 api_key_masked（解密 → 打码；
-// 解密失败降级为只给 has_api_key）。命中缓存直接返回。
+// 解密失败降级为只给 has_api_key）。缓存载荷不含 health（探测随时写库，进缓存就会读到旧值），
+// 命中缓存后仍现读 provider_health 单行（主键查询，代价可忽略）填充。
 func (s *providerService) Get(ctx context.Context, req providerapi.GetProviderReq) (*providerapi.ProviderDetailSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate get provider: %w", err)
@@ -150,6 +160,9 @@ func (s *providerService) Get(ctx context.Context, req providerapi.GetProviderRe
 	if found, err := s.cm.Get(ctx, cache.NameProvider, key, &cached); err != nil {
 		slog.WarnContext(ctx, "read provider cache failed; fallback to db", "key", key, "err", err)
 	} else if found {
+		if err := s.fillHealth(ctx, req.ID, &cached); err != nil {
+			return nil, err
+		}
 		return &cached, nil
 	}
 
@@ -167,10 +180,14 @@ func (s *providerService) Get(ctx context.Context, req providerapi.GetProviderRe
 	if err := s.cm.Set(ctx, cache.NameProvider, key, detail); err != nil {
 		slog.WarnContext(ctx, "set provider cache failed", "key", key, "err", err)
 	}
+	if err := s.fillHealth(ctx, p.ID, detail); err != nil {
+		return nil, err
+	}
 	return detail, nil
 }
 
-// assembleDetail 组装详情：模型列表 + 健康状态（无行为 nil）+ 打码 key。
+// assembleDetail 组装详情：模型列表 + 打码 key。不含 health——那是探测的高频写路径，
+// 从缓存载荷剔除后探测写库无需失效 detail（写时删 key 的失效矩阵少一条边）。
 func (s *providerService) assembleDetail(ctx context.Context, p *Provider) (*providerapi.ProviderDetailSchema, error) {
 	ms, err := s.store.ListModelsByProvider(ctx, p.ID)
 	if err != nil {
@@ -191,12 +208,21 @@ func (s *providerService) assembleDetail(ctx context.Context, p *Provider) (*pro
 			slog.WarnContext(ctx, "decrypt api key failed; skip mask", "provider_id", p.ID, "err", err)
 		}
 	}
-	if h, err := s.store.GetHealthByProviderID(ctx, p.ID); err == nil {
-		detail.Health = toHealthSchema(h)
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("get health of provider %d: %w", p.ID, err)
-	}
 	return detail, nil
+}
+
+// fillHealth 现读 provider_health 填充详情的 Health（无行为 nil，保持 schema 约定）。
+func (s *providerService) fillHealth(ctx context.Context, providerID uint64, d *providerapi.ProviderDetailSchema) error {
+	h, err := s.store.GetHealthByProviderID(ctx, providerID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			d.Health = nil
+			return nil
+		}
+		return fmt.Errorf("get health of provider %d: %w", providerID, err)
+	}
+	d.Health = toHealthSchema(h)
+	return nil
 }
 
 // List 偏移分页列表：整表快照缓存（list）命中后在内存做 kind / enabled 筛选与分页。
@@ -320,13 +346,52 @@ func (s *providerService) Delete(ctx context.Context, req providerapi.DeleteProv
 	return nil
 }
 
-// TestConnection 手动连通性探测：DEGRADED 状态机与 platform/llm Manager 对接属后续批次
-// （db_model.md §6），当前返回未实现错误，防止调用方误以为探测已生效。
-func (s *providerService) TestConnection(ctx context.Context, req providerapi.TestConnectionReq) (*providerapi.ProviderHealthSchema, error) {
+// TestConnection 手动连通性探测：解密 key → probe（kind 分发端点，10s 超时）→ DEGRADED
+// 状态机转移 → UpsertHealth 落库。返回探测结果本体四字段；状态机转移后的 health 快照经
+// Get 现读（不在缓存载荷里，无需失效）。明文 key 只出现在解密后到请求头之间。
+func (s *providerService) TestConnection(ctx context.Context, req providerapi.TestConnectionReq) (*providerapi.ConnectionTestSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate test connection: %w", err)
 	}
-	return nil, errNotImplemented
+	p, err := s.store.GetProviderByID(ctx, req.ID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, providerapi.ErrProviderNotFound
+		}
+		return nil, fmt.Errorf("get provider %d: %w", req.ID, err)
+	}
+
+	// 解密失败（主密钥轮换后的旧密文）是本地配置问题而非供应商故障：不发请求、不动 health，
+	// 以失败结果返回并提示重新录入——避免把配置错误记成供应商 down。
+	key := ""
+	if enc := p.AuthConfig[apiKeyEncryptedKey]; enc != "" {
+		pt, err := decryptAPIKey(s.master, enc)
+		if err != nil {
+			slog.WarnContext(ctx, "decrypt api key failed; abort probe", "provider_id", p.ID, "err", err)
+			return &providerapi.ConnectionTestSchema{ErrorMessage: "API Key 解密失败（主密钥可能已轮换，请重新录入）"}, nil
+		}
+		key = pt
+	}
+
+	res := probe(ctx, s.probe, p.Kind, p.BaseURL, key)
+	now := time.Now()
+	// 事务内锁定读 → 状态机转移 → 写回：把"读 fail_count + 算 +1 + 写"做成原子，否则并发探测
+	// 都读到同一个 fail_count，连续失败阈值（≥3 → down）被延迟，破坏"连续失败≥3"契约。
+	if err := s.store.WithTx(ctx, func(tx Store) error {
+		old, err := tx.GetHealthByProviderIDForUpdate(ctx, p.ID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("get health of provider %d: %w", p.ID, err)
+		}
+		return tx.UpsertHealth(ctx, applyProbeResult(p.ID, old, res, now))
+	}); err != nil {
+		return nil, fmt.Errorf("upsert health of provider %d: %w", p.ID, err)
+	}
+	return &providerapi.ConnectionTestSchema{
+		Success:      res.success,
+		LatencyMs:    int32(res.latency.Milliseconds()),
+		ModelCount:   res.modelCount,
+		ErrorMessage: res.errMsg,
+	}, nil
 }
 
 // ---- ModelService ----

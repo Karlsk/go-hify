@@ -9,14 +9,14 @@ import (
 // Provider 提供商配置（GORM 实体，模块私有，禁止跨模块）；表结构见 migrations/00002_provider.sql。
 // 唯一约束（uq_providers_name）与 CHECK 由迁移 SQL 持有，model 不重复声明。
 type Provider struct {
-	db.BaseMutable // id + created_at + updated_at
-	Name            string            `gorm:"not null"`                      // 展示名，唯一
-	Kind            string            `gorm:"not null"`                      // openai/claude/gemini/ollama/openai_compatible
+	db.BaseMutable                    // id + created_at + updated_at
+	Name            string            `gorm:"not null"` // 展示名，唯一
+	Kind            string            `gorm:"not null"` // openai/claude/gemini/ollama/openai_compatible
 	BaseURL         string            // 空串 = kind 默认地址（默认值常量表在 service 层）
-	AuthConfig      map[string]string `gorm:"type:jsonb;serializer:json"`    // 鉴权材料；密文只出现在 api_key_encrypted 键
+	AuthConfig      map[string]string `gorm:"type:jsonb;serializer:json"` // 鉴权材料；密文只出现在 api_key_encrypted 键
 	APIKeyRotatedAt *time.Time        // 密钥最近一次轮换时间
-	ExtraConfig     map[string]any    `gorm:"type:jsonb;serializer:json"`    // 白名单：bulkhead / ttft_seconds / keep_alive
-	Enabled         bool              `gorm:"not null;default:true"`         // 停用后不发新请求
+	ExtraConfig     map[string]any    `gorm:"type:jsonb;serializer:json"` // 白名单：bulkhead / ttft_seconds / keep_alive
+	Enabled         bool              `gorm:"not null;default:true"`      // 停用后不发新请求
 }
 
 func (Provider) TableName() string { return "providers" }
@@ -34,8 +34,8 @@ type Model struct {
 	InputPrice      *string        `gorm:"type:numeric(12,4)"` // USD/百万 token；nil = 不计费
 	OutputPrice     *string        `gorm:"type:numeric(12,4)"`
 	EmbeddingDim    *int32         // 仅 capability=embedding；建 KB 时校验，vector(维度) 不可改
-	Enabled         bool           `gorm:"not null;default:true"` // 模型级停用；sync 不覆盖
-	Source          string         `gorm:"not null;default:'manual'"` // discovered / manual
+	Enabled         bool           `gorm:"not null;default:true"`      // 模型级停用；sync 不覆盖
+	Source          string         `gorm:"not null;default:'manual'"`  // discovered / manual
 	ExtraParams     map[string]any `gorm:"type:jsonb;serializer:json"` // 白名单：think_level 等
 }
 
@@ -44,15 +44,15 @@ func (Model) TableName() string { return "models" }
 // ProviderHealth 供应商健康（1:1，GORM 实体）。无代理主键，不能 embed 带 id 的 mixin，自声明表头。
 // 只记录探测结果（定时 + 手动）；熔断/槽位等运行时状态在 platform/llm 内存，不落库。
 type ProviderHealth struct {
-	ProviderID    uint64     `gorm:"primaryKey"`
-	Status        string     `gorm:"not null;default:'unknown'"` // unknown / up / degraded / down
+	ProviderID    uint64 `gorm:"primaryKey"`
+	Status        string `gorm:"not null;default:'unknown'"` // unknown / up / degraded / down
 	LastCheckAt   *time.Time
 	LastSuccessAt *time.Time
-	FailCount     int32      `gorm:"not null;default:0"` // 连续失败次数，成功清零
-	LatencyMs     *int32     // 最近探测往返延迟
-	ErrorMessage  string     // 最近失败原因（截断，不含敏感信息）
-	CreatedAt     time.Time  `gorm:"type:timestamptz;not null;default:now()"`
-	UpdatedAt     time.Time  `gorm:"type:timestamptz;not null;default:now();autoUpdateTime"`
+	FailCount     int32     `gorm:"not null;default:0"` // 连续失败次数，成功清零
+	LatencyMs     *int32    // 最近探测往返延迟
+	ErrorMessage  string    // 最近失败原因（截断，不含敏感信息）
+	CreatedAt     time.Time `gorm:"type:timestamptz;not null;default:now()"`
+	UpdatedAt     time.Time `gorm:"type:timestamptz;not null;default:now();autoUpdateTime"`
 }
 
 func (ProviderHealth) TableName() string { return "provider_health" }

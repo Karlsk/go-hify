@@ -6,6 +6,7 @@ import (
 	"context"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/Karlsk/go-hify/internal/platform/page"
 	providersvc "github.com/Karlsk/go-hify/internal/provider/service"
@@ -185,4 +186,36 @@ func (s *Store) GetHealthByProviderID(ctx context.Context, providerID uint64) (*
 		return nil, err
 	}
 	return &h, nil
+}
+
+// GetHealthByProviderIDForUpdate 事务内锁定读（SELECT ... FOR UPDATE）：串行化并发探测对同一
+// provider_health 行的读-改-写，防 fail_count 计数竞态。仅在 WithTx 回调内调用才有意义。
+func (s *Store) GetHealthByProviderIDForUpdate(ctx context.Context, providerID uint64) (*providersvc.ProviderHealth, error) {
+	var h providersvc.ProviderHealth
+	err := s.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Select(selectHealth).
+		First(&h, "provider_id = ?", providerID).Error
+	if err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+// WithTx 事务：fn 拿到包装了 tx 句柄的 Store（仍以 service.Store 接口身份传入）。
+func (s *Store) WithTx(ctx context.Context, fn func(tx providersvc.Store) error) error {
+	return s.db.WithContext(ctx).Transaction(func(gtx *gorm.DB) error {
+		return fn(&Store{db: gtx})
+	})
+}
+
+// UpsertHealth 写入探测结果：无行插入、有行更新（ON CONFLICT (provider_id) DO UPDATE）。
+// 探测可能高频写，upsert 免去先读后写的竞态窗口。
+func (s *Store) UpsertHealth(ctx context.Context, h *providersvc.ProviderHealth) error {
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "provider_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"status", "last_check_at", "last_success_at", "fail_count", "latency_ms", "error_message", "updated_at",
+		}),
+	}).Create(h).Error
 }
