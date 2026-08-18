@@ -20,7 +20,7 @@
       >
         <el-menu-item index="/provider">
           <el-icon><Setting /></el-icon>
-          <template #title>模型管理</template>
+          <template #title>提供商管理</template>
         </el-menu-item>
         <el-menu-item index="/agent">
           <el-icon><User /></el-icon>

@@ -38,14 +38,14 @@ web/
     │       └── main.css               # @import 上两者 + reset + 组件级覆写（渐变主按钮等）
     ├── router/index.ts     # 路由表（meta.title = 面包屑/document.title 来源）
     ├── components/
-    │   ├── PageHeader.vue      # 页面标题区：标题 + 描述 + 右侧 actions 插槽
-    │   ├── HifyTable.vue       # 通用列表表格（泛型，偏移分页，refresh()）
-    │   └── HifyFormDialog.vue  # 通用表单弹窗（泛型，open(data?) 编辑/新增）
+    │   ├── PageHeader.vue             # 页面标题区：标题 + 描述 + 右侧 actions 插槽
+    │   ├── HifyTable.vue              # 通用列表表格（泛型，偏移分页，refresh()）
+    │   ├── HifyFormDialog.vue         # 通用表单弹窗（泛型，open(data?) 编辑/新增）
+    │   └── ProviderModelsDrawer.vue   # 提供商模型列表抽屉（子资源形态：同步/手动增删）
     ├── composables/
     │   ├── useRequest.ts   # 请求三态 { data, loading, error, execute }
     │   └── useConfirm.ts   # 删除确认全流程：调用即执行，返回 Promise<boolean>
     ├── stores/             # Pinia 模块（user/session 等，按业务新增）
-    ├── api/                # 各模块接口定义（axios 实例在 utils/request.ts）
     ├── utils/
     │   ├── request.ts      # axios 实例 + Result 信封拆包 + 错误统一处理 + getList
     │   ├── notify.ts       # notifySuccess/Error/Warning（duration 统一 3s）
@@ -115,6 +115,7 @@ web/
 - `useConfirm({ message, api, ... })` 调用即执行：确认框（红色确认按钮）→ 调 api → `notifySuccess`；取消静默 `false`，api 失败 reject。
 - `useRequest(api)` → `{ data, loading, error, execute }`；错误只记状态不重复弹（拦截器已弹）。
 - 组件视觉值全走 token；表格卡片 body padding 0 是内容卡片 20px 规则的唯一例外（见 design-system.md《整体布局》）。
+- 首个落地正式页：`provider/ProviderList.vue`（mock 数据源；`fetchList` / `onSubmit` 签名对齐 `getList` 形态，换真实 API 只动这两个函数）。
 
 ### 路径别名
 

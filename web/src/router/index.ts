@@ -13,7 +13,7 @@ const routes: RouteRecordRaw[] = [
     path: '/provider',
     name: 'provider',
     component: () => import('@/views/provider/ProviderList.vue'),
-    meta: { title: '模型管理' },
+    meta: { title: '提供商管理' },
   },
   {
     path: '/agent',
