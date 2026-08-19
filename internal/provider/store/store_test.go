@@ -217,6 +217,51 @@ func TestCreateModel(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+// 批量插入 = 单条多 VALUES INSERT，RETURNING 按行回填 id / 时间戳。
+func TestCreateModels(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "models"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
+			AddRow(2, now, now).AddRow(3, now, now))
+	mock.ExpectCommit()
+
+	ms := []*providersvc.Model{
+		{ProviderID: 1, Name: "GPT-4o", ModelID: "gpt-4o", Capability: "chat", Enabled: true},
+		{ProviderID: 1, Name: "GPT-4o mini", ModelID: "gpt-4o-mini", Capability: "chat", Enabled: true},
+	}
+	err := s.CreateModels(context.Background(), ms)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(2), ms[0].ID)
+	assert.Equal(t, uint64(3), ms[1].ID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 空切片直接返回，不发 SQL。
+func TestCreateModelsEmpty(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	err := s.CreateModels(context.Background(), nil)
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateModelsError(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "models"`)).
+		WillReturnError(errors.New("unique violation"))
+	mock.ExpectRollback()
+
+	ms := []*providersvc.Model{{ProviderID: 1, Name: "GPT-4o", ModelID: "gpt-4o"}}
+	err := s.CreateModels(context.Background(), ms)
+	assert.Error(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestGetModelByID(t *testing.T) {
 	db, mock := newMockDB(t)
 	s := New(db)
@@ -335,6 +380,37 @@ func TestUpdateModel(t *testing.T) {
 	m := &providersvc.Model{ProviderID: 1, Name: "GPT-4o mini", ModelID: "gpt-4o", Capability: "chat", Enabled: true}
 	m.ID = 2
 	err := s.UpdateModel(context.Background(), m)
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 列级更新：只写 name / updated_at（区别于全列 Save），WHERE 带 source 守卫；
+// updated_at 由 Go 侧 time.Now 生成，参数用 AnyArg。
+func TestUpdateModelName(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "models" SET "name"`)).
+		WithArgs("GPT-4o 改名", sqlmock.AnyArg(), uint64(2), "discovered").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err := s.UpdateModelName(context.Background(), 2, "GPT-4o 改名")
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 行不存在或非 discovered（manual / 并发删除）→ RowsAffected=0，按"跳过"返回 nil 不报错。
+func TestUpdateModelNameNoop(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "models" SET "name"`)).
+		WithArgs("改名", sqlmock.AnyArg(), uint64(9), "discovered").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err := s.UpdateModelName(context.Background(), 9, "改名")
 	assert.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

@@ -156,7 +156,7 @@ func (h *Handler) listModels(c *gin.Context) {
 	respond.OKWithOffset(c, res.Items, res.Page, res.PageSize, res.Total)
 }
 
-// syncModels 模型自动发现（service 占位期返回 503，模型发现批次落地后自然变 200）。
+// syncModels 模型自动发现：直连上游拉目录落库（上游不可用 503，见 service/sync.go）。
 func (h *Handler) syncModels(c *gin.Context) {
 	var req providerapi.SyncModelsReq
 	if !respond.BindUri(c, &req) {

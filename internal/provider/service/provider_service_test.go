@@ -138,7 +138,7 @@ func TestProviderGet_NotFound(t *testing.T) {
 func TestProviderGet_DecryptFailsSkipMask(t *testing.T) {
 	st, _, cm := newTestEnv(t)
 	id := seedProviderWithKey(st)
-	wrong := NewProviderService(st, cm, []byte("99999999999999999999999999999999"))
+	wrong, _ := NewProviderService(st, cm, []byte("99999999999999999999999999999999"))
 
 	d, err := wrong.Get(context.Background(), providerapi.GetProviderReq{ID: id})
 	require.NoError(t, err)
@@ -217,7 +217,7 @@ func TestProviderList_HugePageNoPanic(t *testing.T) {
 func TestNewProviderService_BadMasterKeyPanics(t *testing.T) {
 	st, _, cm := newTestEnv(t)
 	assert.Panics(t, func() {
-		NewProviderService(st, cm, []byte("too-short"))
+		_, _ = NewProviderService(st, cm, []byte("too-short"))
 	})
 }
 

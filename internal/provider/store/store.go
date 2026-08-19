@@ -4,11 +4,13 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
 	"github.com/Karlsk/go-hify/internal/platform/page"
+	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	providersvc "github.com/Karlsk/go-hify/internal/provider/service"
 )
 
@@ -96,6 +98,15 @@ func (s *Store) CreateModel(ctx context.Context, m *providersvc.Model) error {
 	return s.db.WithContext(ctx).Create(m).Error
 }
 
+// CreateModels 批量插入（GORM 切片插入 = 单条多 VALUES INSERT）；空切片直接返回。
+// 撞唯一约束整批失败，由 service 层退回逐条插入并跳过冲突行（与手工创建的竞态兜底）。
+func (s *Store) CreateModels(ctx context.Context, ms []*providersvc.Model) error {
+	if len(ms) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).Create(&ms).Error
+}
+
 // GetModelByID 按主键查；未找到返回 gorm.ErrRecordNotFound。
 func (s *Store) GetModelByID(ctx context.Context, id uint64) (*providersvc.Model, error) {
 	var m providersvc.Model
@@ -160,6 +171,15 @@ func (s *Store) ListModels(ctx context.Context, providerID uint64, p page.Offset
 // 前置：m.ID 必须有效（service 层先 GetModelByID 取得）。
 func (s *Store) UpdateModel(ctx context.Context, m *providersvc.Model) error {
 	return s.db.WithContext(ctx).Save(m).Error
+}
+
+// UpdateModelName sync 专用列级更新：只写 name / updated_at，WHERE 限定 source='discovered'。
+// 与全列 Save 的区别：并发的手工编辑（价格 / enabled / extra_params）不会被 sync 的旧快照覆盖；
+// 行不存在或非 discovered 时 RowsAffected=0，按"跳过"返回 nil（调用方已按内存 diff 决定要更新）。
+func (s *Store) UpdateModelName(ctx context.Context, id uint64, name string) error {
+	return s.db.WithContext(ctx).Model(&providersvc.Model{}).
+		Where("id = ? AND source = ?", id, providerapi.SourceDiscovered).
+		Updates(map[string]any{"name": name, "updated_at": time.Now()}).Error
 }
 
 // DeleteModel 删除模型；RowsAffected=0 返回 gorm.ErrRecordNotFound。

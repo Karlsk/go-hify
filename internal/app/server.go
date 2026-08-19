@@ -7,8 +7,14 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -18,6 +24,7 @@ import (
 	demohandler "github.com/Karlsk/go-hify/internal/demo/handler"
 	demosvc "github.com/Karlsk/go-hify/internal/demo/service"
 	demostore "github.com/Karlsk/go-hify/internal/demo/store"
+	"github.com/Karlsk/go-hify/internal/platform/cache"
 	"github.com/Karlsk/go-hify/internal/platform/config"
 	"github.com/Karlsk/go-hify/internal/platform/db"
 	"github.com/Karlsk/go-hify/internal/platform/httpmw"
@@ -25,6 +32,9 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/logging"
 	"github.com/Karlsk/go-hify/internal/platform/redisx"
 	"github.com/Karlsk/go-hify/internal/platform/respond"
+	providerhandler "github.com/Karlsk/go-hify/internal/provider/handler"
+	providersvc "github.com/Karlsk/go-hify/internal/provider/service"
+	providerstore "github.com/Karlsk/go-hify/internal/provider/store"
 )
 
 // Run 是组合根装配入口，返回非 nil error 表示启动失败（由 main.go 决定退出码）。
@@ -59,9 +69,15 @@ func Run(cfg *config.Config) error {
 	// Manager 按 provider 惰性创建受保护 Client（bulkhead → 熔断 → 重试 → 三层超时）。
 	llmTransport := llm.NewSharedTransport()
 	llmManager := llm.NewManager(llm.NewUpstreamFactory(llm.NewStreamClient(llmTransport)))
-	// TODO: 注入消费方——provider（连通性探测）/ chat（对话引擎）；建成前以 _ 保留引用。
+	// TODO: 注入消费方——chat（对话引擎）。provider 的探测 / 模型同步走直连轻量 GET（NewJSONClient
+	// + 共享 transport），不经 Manager——元数据请求不产生 token 消费，不占 bulkhead / 熔断。
 	_ = llmManager
+	_ = llmTransport
 	// TODO: platform/budget（每用户限流 + 每日预算熔断，fail-open + 80% 告警）
+
+	// appCtx：随 SIGINT / SIGTERM 取消，喂给长生命周期 goroutine（provider 定时探测）与关停流程。
+	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	// ── ③ 业务模块装配（store → service → handler，自下游而上游）─────
 	// auth 最先：其 handler 提供登录中间件，挂 v1 后其余模块路由受保护。
@@ -74,20 +90,17 @@ func Run(cfg *config.Config) error {
 	demoStore := demostore.New(gormDB)
 	demoSvc := demosvc.New(demoStore) // 返回 demoapi.DemoService
 
+	// provider：双 service 共享一个 store 与 cache（wiring_sync_spec.md §2.1）。
+	// NewProviderService 返回 (api, Prober)：业务面注入 handler / 上游模块，Prober 由组合根起 goroutine。
+	providerStore := providerstore.New(gormDB)
+	providerCache := cache.New(rdb, cache.DefaultConfig()) // provider-cache：TTL 30min + 写时删 key
+	providerSvc, prober := providersvc.NewProviderService(providerStore, providerCache, cfg.Provider.MasterKey)
+	modelSvc := providersvc.NewModelService(providerStore, providerCache, cfg.Provider.MasterKey)
+	go prober.StartProber(appCtx) // 定时健康探测：60s 一轮，随 appCtx 取消退出（db_model §2.3.1）
+
 	// 其余模块当前为空壳，构造函数待业务实现后按下序填入：
-	// 顺序：provider → mcp → agent → rag → workflow → chat（chat 最后，依赖图最外层、零被依赖）。
-	//
-	//   providerStore := providerstore.New(gormDB)
-	//   providerSvc   := providersvc.New(providerStore)                  // 返回 providerapi.ProviderService
-	//   go providerSvc.StartProber(appCtx)                                // 定时健康探测（spec 见 db_model §2.3.1；StartProber 在 concrete 类型，
-	//                                                                    // 需先定义 Prober 窄接口或让 New 返回 (api, Prober)；appCtx 依赖 signal graceful shutdown）
-	//   mcpStore      := mcpstore.New(gormDB)
-	//   mcpSvc        := mcpsvc.New(mcpStore)
-	//   agentStore    := agentstore.New(gormDB)
-	//   agentSvc      := agentsvc.New(agentStore, providerSvc, mcpSvc)   // 下游 api 接口注入
-	//   ... rag / workflow / chat 同理，chat 最后 ...
-	//   providerhandler.New(providerSvc).RegisterRoutes(v1)
-	//   ...
+	// 顺序：mcp → agent → rag → workflow → chat（chat 最后，依赖图最外层、零被依赖）；
+	// 上游模块 service.New 的入参直接传 providerSvc（api.ProviderService 接口注入）。
 
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()
@@ -111,13 +124,39 @@ func Run(cfg *config.Config) error {
 	// login/register 由中间件内部白名单放行。业务 API 一期不按用户隔离，但仍要求登录门槛。
 	v1.Use(authH.Middleware())
 	authH.RegisterRoutes(v1)
-	demohandler.New(demoSvc).RegisterRoutes(v1) // demo 参照实现（受登录中间件保护）
-	// TODO: 各模块 handler.RegisterRoutes(v1)（provider / mcp / agent / rag / workflow / chat）
+	demohandler.New(demoSvc).RegisterRoutes(v1)                   // demo 参照实现（受登录中间件保护）
+	providerhandler.New(providerSvc, modelSvc).RegisterRoutes(v1) // provider：providers + models 双组 12 端点
+	// TODO: 各模块 handler.RegisterRoutes(v1)（mcp / agent / rag / workflow / chat）
 
 	// ── ⑤ 启动（§组合根步骤 5）──────────────────────────────────────
 	slog.Info("hify ready", slog.String("addr", ":"+cfg.Server.Port), slog.String("version", version))
-	// TODO: 接 signal 做 graceful shutdown（关 gormDB / rdb 连接池、在途 SSE 收尾）。
-	return r.Run(":" + cfg.Server.Port)
+	// graceful shutdown（wiring_sync_spec.md §2.2）：SIGINT/SIGTERM → http.Server.Shutdown（5s
+	// 等在途请求收尾）→ 关 db / redis 连接池 → defer 链关日志。ErrServerCanceled 不上抛。
+	srv := &http.Server{Addr: ":" + cfg.Server.Port, Handler: r, ReadHeaderTimeout: 10 * time.Second}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh: // 启动即失败（端口占用等），未进入服务态
+		return fmt.Errorf("http server: %w", err)
+	case <-appCtx.Done():
+		slog.Info("hify shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil { // 在途请求超 5s 强制返回
+			slog.Warn("http shutdown incomplete", "err", err)
+		}
+	}
+	// prober 随 appCtx 退出（在途探测单轮 ≤10s，极端未收尾只记一条错误日志，不阻断关停）。
+	if sqlDB, err := gormDB.DB(); err != nil {
+		slog.Warn("get sql db handle", "err", err)
+	} else if err := sqlDB.Close(); err != nil {
+		slog.Warn("close db", "err", err)
+	}
+	if err := rdb.Close(); err != nil {
+		slog.Warn("close redis", "err", err)
+	}
+	return nil
 }
 
 // version 由构建期 -ldflags 注入（如 -X 'github.com/Karlsk/go-hify/internal/app.version=v1.0.0'），默认 dev。

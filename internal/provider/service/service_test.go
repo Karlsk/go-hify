@@ -149,6 +149,20 @@ func (m *memStore) CreateModel(_ context.Context, mo *Model) error {
 	return nil
 }
 
+// CreateModels 批量插入（真实现是单条多 VALUES INSERT；内存版逐条等价）。createModelErr
+// 整批失败，模拟唯一约束让 service 走逐条退回路径。
+func (m *memStore) CreateModels(ctx context.Context, ms []*Model) error {
+	if m.createModelErr != nil {
+		return m.createModelErr
+	}
+	for _, mo := range ms {
+		if err := m.CreateModel(ctx, mo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *memStore) GetModelByID(_ context.Context, id uint64) (*Model, error) {
 	mo, ok := m.models[id]
 	if !ok {
@@ -203,6 +217,23 @@ func (m *memStore) UpdateModel(_ context.Context, mo *Model) error {
 	mo.UpdatedAt = time.Now()
 	cp := *mo
 	m.models[mo.ID] = &cp
+	return nil
+}
+
+// UpdateModelName sync 专用列级改名：仅 discovered 行生效，manual / 不存在按跳过返回 nil
+// （对齐真实现的 WHERE source = 'discovered' + RowsAffected=0 不报错语义）。
+func (m *memStore) UpdateModelName(_ context.Context, id uint64, name string) error {
+	if m.updateModelErr != nil {
+		return m.updateModelErr
+	}
+	mo, ok := m.models[id]
+	if !ok || mo.Source != providerapi.SourceDiscovered {
+		return nil
+	}
+	cp := *mo
+	cp.Name = name
+	cp.UpdatedAt = time.Now()
+	m.models[id] = &cp
 	return nil
 }
 
@@ -314,11 +345,12 @@ func newTestEnv(t *testing.T) (*memStore, *miniredis.Miniredis, cacheManager) {
 	return newMemStore(), mr, cm
 }
 
-// newTestService 建 st + 标准主密钥的两服务。
+// newTestService 建 st + 标准主密钥的两服务（Prober 视角由 StartProber 既有测试覆盖）。
 func newTestService(t *testing.T) (*memStore, *miniredis.Miniredis, providerapi.ProviderService, providerapi.ModelService) {
 	t.Helper()
 	st, mr, cm := newTestEnv(t)
-	return st, mr, NewProviderService(st, cm, testMaster), NewModelService(st, cm)
+	ps, _ := NewProviderService(st, cm, testMaster)
+	return st, mr, ps, NewModelService(st, cm, testMaster)
 }
 
 // 缓存原始 key（与 cache 包的拼接约定一致，用于失效断言）。

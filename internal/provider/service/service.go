@@ -36,11 +36,16 @@ type Store interface {
 
 	// model
 	CreateModel(ctx context.Context, m *Model) error
+	// CreateModels 批量插入（单条多 VALUES INSERT，CLAUDE.md《事务规范》：批量写禁循环单行）；sync 专用。
+	CreateModels(ctx context.Context, ms []*Model) error
 	GetModelByID(ctx context.Context, id uint64) (*Model, error)
 	GetModelByProviderAndModelID(ctx context.Context, providerID uint64, modelID string) (*Model, error)
 	ListModelsByProvider(ctx context.Context, providerID uint64) ([]Model, error) // 详情聚合用，id 升序
 	ListModels(ctx context.Context, providerID uint64, p page.OffsetParams) (page.OffsetResult[Model], error)
 	UpdateModel(ctx context.Context, m *Model) error
+	// UpdateModelName sync 专用列级更新：只写 name / updated_at（WHERE 限定 source='discovered'），
+	// 防止 Save 全列回写覆盖并发的手工编辑（价格 / enabled / extra_params）。
+	UpdateModelName(ctx context.Context, id uint64, name string) error
 	DeleteModel(ctx context.Context, id uint64) error // RowsAffected=0 → gorm.ErrRecordNotFound
 
 	// health
@@ -93,22 +98,39 @@ type providerService struct {
 // NewProviderService 构造提供商服务；cm 由组合根传 *cache.Cache，单测可 stub cacheManager。
 // masterKey 必须 32 字节（组合根在启动期调用，非法即 panic fail-fast，与 config 层双重保险）。
 // 探测 client 在此内部组装（共享 LLM transport + 10s 超时），无需组合根关心。
-func NewProviderService(store Store, cm cacheManager, masterKey []byte) providerapi.ProviderService {
+// 返回二元组：业务消费方用 api.ProviderService（注入 handler / 上游模块）；组合根另拿
+// Prober 起定时探测 goroutine（wiring_sync_spec.md §1.1，澄清 2A）。
+func NewProviderService(store Store, cm cacheManager, masterKey []byte) (providerapi.ProviderService, Prober) {
 	if len(masterKey) != 32 {
 		panic("service: provider master key must be 32 bytes (config PROVIDER_MASTER_KEY)")
 	}
-	return &providerService{store: store, cm: cm, master: masterKey, probe: NewProbeClient(), interval: probeInterval}
+	svc := &providerService{store: store, cm: cm, master: masterKey, probe: NewProbeClient(), interval: probeInterval}
+	return svc, svc
 }
+
+// Prober 定时健康探测窄接口（单方法）：仅组合根使用（go prober.StartProber(appCtx)，随
+// appCtx 取消退出）；业务消费方一律用 api.ProviderService，不需要本接口。
+type Prober interface {
+	StartProber(ctx context.Context)
+}
+
+var _ Prober = (*providerService)(nil) // 编译期断言
 
 // modelService 实现 providerapi.ModelService。
 type modelService struct {
-	store Store
-	cm    cacheManager
+	store  Store
+	cm     cacheManager
+	master []byte      // API Key 解密主密钥（SyncModels 拉取上游列表要用；32B，构造期校验）
+	probe  probeClient // 模型列表 GET client（复用探测 client：共享 LLM transport + 10s 超时）
 }
 
-// NewModelService 构造模型服务。
-func NewModelService(store Store, cm cacheManager) providerapi.ModelService {
-	return &modelService{store: store, cm: cm}
+// NewModelService 构造模型服务；masterKey 供 SyncModels 解密 API Key（32B 校验同上）。
+// 模型列表 client 在此内部组装，无需组合根关心。
+func NewModelService(store Store, cm cacheManager, masterKey []byte) providerapi.ModelService {
+	if len(masterKey) != 32 {
+		panic("service: provider master key must be 32 bytes (config PROVIDER_MASTER_KEY)")
+	}
+	return &modelService{store: store, cm: cm, master: masterKey, probe: NewProbeClient()}
 }
 
 // ---- ProviderService ----
@@ -528,16 +550,6 @@ func (s *modelService) Delete(ctx context.Context, req providerapi.DeleteModelRe
 	}
 	evict(ctx, s.cm, fmt.Sprintf(cacheKeyDetail, m.ProviderID))
 	return nil
-}
-
-// SyncModels 自动发现并同步模型列表（只增改不删）：依赖 platform/llm 的模型发现能力，属后续批次。
-// 路由已挂（POST /providers/:id/models/sync）；占位期返回 ErrServiceUnavailable（503，
-// handler_spec.md §5-2）而非误导性的 500 + ERROR 日志噪音。
-func (s *modelService) SyncModels(ctx context.Context, req providerapi.SyncModelsReq) (*providerapi.ModelSyncResultSchema, error) {
-	if err := req.Validate(); err != nil {
-		return nil, fmt.Errorf("validate sync models: %w", err)
-	}
-	return nil, fmt.Errorf("%w: sync models pending (see docs/changelog/provider/db_model.md)", errs.ErrServiceUnavailable)
 }
 
 // ---- 共用工具 ----

@@ -194,12 +194,12 @@ func (f fakeModelSvc) Delete(_ context.Context, req providerapi.DeleteModelReq) 
 	return nil
 }
 
-// SyncModels 镜像真实 service 占位行为：ErrServiceUnavailable → 503。
+// SyncModels 镜像真实 service 行为：返回 {added, updated} 计数。
 func (f fakeModelSvc) SyncModels(_ context.Context, _ providerapi.SyncModelsReq) (*providerapi.ModelSyncResultSchema, error) {
 	if f.injected != nil {
 		return nil, f.injected
 	}
-	return nil, fmt.Errorf("%w: sync models pending", errs.ErrServiceUnavailable)
+	return &providerapi.ModelSyncResultSchema{Added: 2, Updated: 1}, nil
 }
 
 // 编译期钉住：包装类型各自满足接口。
@@ -479,13 +479,15 @@ func TestListModels_BadProviderID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestSyncModels_Pending503(t *testing.T) {
+func TestSyncModels(t *testing.T) {
 	r := newTestRouter(newFakeSvc())
 	w := doReq(t, r, http.MethodPost, "/api/v1/providers/1/models/sync", "")
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	e := parseEnvelope(t, w.Body.Bytes())
-	require.NotNil(t, e.Error)
-	assert.Equal(t, "SERVICE_UNAVAILABLE", e.Error.Code)
+	require.True(t, e.Success)
+	d := decodeData[providerapi.ModelSyncResultSchema](t, e)
+	assert.Equal(t, 2, d.Added)
+	assert.Equal(t, 1, d.Updated)
 }
 
 func TestCreateModel(t *testing.T) {
