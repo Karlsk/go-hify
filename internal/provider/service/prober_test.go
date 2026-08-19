@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -322,3 +323,127 @@ func TestNewProbeClient(t *testing.T) {
 }
 
 var _ probeClient = (*http.Client)(nil) // 编译期钉住窄接口形态
+
+// ---- 定时探测（runProbeRound / StartProber）----
+
+// newSchedulerService 建带注入探测桩 client 与可配轮询间隔的 providerService（定时探测测试用）。
+func newSchedulerService(st *memStore, cm cacheManager, hc probeClient, interval time.Duration) *providerService {
+	return &providerService{store: st, cm: cm, master: testMaster, probe: hc, interval: interval}
+}
+
+// TestRunProbeRound_OnlyEnabled 单轮只探 enabled=true，disabled 跳过不写 health。
+func TestRunProbeRound_OnlyEnabled(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+	svc := newSchedulerService(st, cm, srv.Client(), time.Minute)
+
+	enabled1 := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	enabled2 := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	disabled := seedProbeProvider(st, providerapi.KindClaude, srv.URL)
+	st.providers[disabled].Enabled = false
+
+	svc.runProbeRound(context.Background())
+
+	assert.Equal(t, 2, st.upsertHealthCalls, "只探 2 个 enabled")
+	assert.Contains(t, st.healths, enabled1)
+	assert.Contains(t, st.healths, enabled2)
+	assert.NotContains(t, st.healths, disabled, "disabled 不写 health")
+}
+
+// TestRunProbeRound_ProbeUpdatesHealth 单轮探测成功后 provider_health 落库 up。
+func TestRunProbeRound_ProbeUpdatesHealth(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4o"}]}`))
+	}))
+	defer srv.Close()
+	svc := newSchedulerService(st, cm, srv.Client(), time.Minute)
+	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+
+	svc.runProbeRound(context.Background())
+
+	h, ok := st.healths[id]
+	require.True(t, ok, "探测结果应落 provider_health")
+	assert.Equal(t, providerapi.HealthUp, h.Status)
+	assert.EqualValues(t, 0, h.FailCount)
+	require.NotNil(t, h.LastCheckAt)
+}
+
+// TestRunProbeRound_ListError 列表查询失败时单轮安静返回（记日志），不 panic、不写 health。
+func TestRunProbeRound_ListError(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	svc := newSchedulerService(st, cm, http.DefaultClient, time.Minute)
+	st.listProvidersErr = errors.New("db down")
+
+	svc.runProbeRound(context.Background())
+	assert.Empty(t, st.healths, "列表失败不应写任何 health")
+}
+
+// TestRunProbeRound_DecryptFailure_NoHealthWrite 密文解密失败（主密钥轮换后的旧密文）：
+// 不发请求、不动 health，且按 provider 去重只记一次（防每轮刷屏）。
+func TestRunProbeRound_DecryptFailure_NoHealthWrite(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	svc := newSchedulerService(st, cm, http.DefaultClient, time.Minute)
+	bad := st.seed(&Provider{
+		Name: "坏密文", Kind: providerapi.KindOpenAI, BaseURL: "http://unused", Enabled: true,
+		AuthConfig: map[string]string{apiKeyEncryptedKey: "!!!not-valid-ciphertext!!!"},
+	}).ID
+
+	svc.runProbeRound(context.Background())
+	svc.runProbeRound(context.Background())
+
+	assert.Equal(t, 0, st.upsertHealthCalls, "解密失败不动 provider_health")
+	assert.NotContains(t, st.healths, bad)
+	_, dup := svc.decryptFailWarned.Load(bad)
+	assert.True(t, dup, "解密失败按 provider 去重只记一次")
+}
+
+// TestStartProber_ExitsOnCancel 预取消 ctx：StartProber 立即返回（优雅关闭路径，不依赖真实 ticker）。
+func TestStartProber_ExitsOnCancel(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	svc := newSchedulerService(st, cm, http.DefaultClient, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() { svc.StartProber(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("StartProber 应在 ctx 已取消时立即返回")
+	}
+}
+
+// TestStartProber_TicksThenCancel 短间隔触发至少一轮探测后取消：探测被驱动、health 落库、优雅退出。
+func TestStartProber_TicksThenCancel(t *testing.T) {
+	st, _, cm := newTestEnv(t)
+	called := make(chan struct{}, 8) // 每轮每 enabled provider 一次，缓冲避免 handler 阻塞探测
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called <- struct{}{}
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+	svc := newSchedulerService(st, cm, srv.Client(), 10*time.Millisecond)
+	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { svc.StartProber(ctx); close(done) }()
+
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("StartProber 未在短间隔内触发探测")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("StartProber 未随 ctx 取消退出")
+	}
+
+	require.Contains(t, st.healths, id, "探测应写 provider_health")
+}

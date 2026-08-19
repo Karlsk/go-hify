@@ -79,6 +79,8 @@ func Run(cfg *config.Config) error {
 	//
 	//   providerStore := providerstore.New(gormDB)
 	//   providerSvc   := providersvc.New(providerStore)                  // 返回 providerapi.ProviderService
+	//   go providerSvc.StartProber(appCtx)                                // 定时健康探测（spec 见 db_model §2.3.1；StartProber 在 concrete 类型，
+	//                                                                    // 需先定义 Prober 窄接口或让 New 返回 (api, Prober)；appCtx 依赖 signal graceful shutdown）
 	//   mcpStore      := mcpstore.New(gormDB)
 	//   mcpSvc        := mcpsvc.New(mcpStore)
 	//   agentStore    := agentstore.New(gormDB)

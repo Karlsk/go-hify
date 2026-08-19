@@ -6,11 +6,16 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"gorm.io/gorm"
 
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
@@ -25,6 +30,7 @@ const (
 	probeBodyLimit     = 4 << 10          // 错误页摘要读取上限（排障线索，无需完整 body）
 	probeModelLimit    = 1 << 20          // 模型列表读取上限（/v1/models 可达百条、Ollama tags 更多，1MB 足够）
 	anthropicVersion   = "2023-06-01"     // claude 探测必带的协议版本头
+	probeInterval      = time.Minute      // 定时探测轮询间隔（db_model §2.3.1：默认 60s，包内常量）
 )
 
 // kindDefaultBase 各 kind 的默认 base URL（providers.base_url 空串时使用）。
@@ -205,4 +211,100 @@ func applyProbeResult(providerID uint64, old *ProviderHealth, r probeResult, now
 		h.LastSuccessAt = &successAt
 	}
 	return h
+}
+
+// probeOne 单 provider 探测写库核心（手动 TestConnection 与定时 runProbeRound 共用）：
+// 解密 key → probe（kind 分发端点，10s 超时）→ 事务内锁定读 → DEGRADED 状态机转移 →
+// UpsertHealth；状态翻转为 down 时打 WARN。返回探测结果本体四字段。
+// 解密失败（主密钥轮换后的旧密文）是本地配置问题而非供应商故障：不发请求、不动 health，
+// 以失败结果返回——避免把配置错误记成供应商 down。
+func (s *providerService) probeOne(ctx context.Context, p *Provider) (*providerapi.ConnectionTestSchema, error) {
+	key := ""
+	if enc := p.AuthConfig[apiKeyEncryptedKey]; enc != "" {
+		pt, err := decryptAPIKey(s.master, enc)
+		if err != nil {
+			// 主密钥轮换后的旧密文每次探测都失败：按 provider 去重只 WARN 一次，避免定时探测每 60s 刷屏。
+			if _, dup := s.decryptFailWarned.LoadOrStore(p.ID, struct{}{}); !dup {
+				slog.WarnContext(ctx, "decrypt api key failed; abort probe (logged once per provider)", "provider_id", p.ID, "err", err)
+			}
+			return &providerapi.ConnectionTestSchema{ErrorMessage: "API Key 解密失败（主密钥可能已轮换，请重新录入）"}, nil
+		}
+		key = pt
+	}
+
+	res := probe(ctx, s.probe, p.Kind, p.BaseURL, key)
+	now := time.Now()
+	flippedToDown := false
+	// 事务内锁定读 → 状态机转移 → 写回：把"读 fail_count + 算 +1 + 写"做成原子，否则并发探测
+	// 都读到同一个 fail_count，连续失败阈值（≥3 → down）被延迟，破坏"连续失败≥3"契约。
+	if err := s.store.WithTx(ctx, func(tx Store) error {
+		old, err := tx.GetHealthByProviderIDForUpdate(ctx, p.ID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("get health of provider %d: %w", p.ID, err)
+		}
+		nh := applyProbeResult(p.ID, old, res, now)
+		if (old == nil || old.Status != providerapi.HealthDown) && nh.Status == providerapi.HealthDown {
+			flippedToDown = true
+		}
+		return tx.UpsertHealth(ctx, nh)
+	}); err != nil {
+		return nil, fmt.Errorf("upsert health of provider %d: %w", p.ID, err)
+	}
+	if flippedToDown {
+		slog.WarnContext(ctx, "provider flipped to down", "provider_id", p.ID, "kind", p.Kind,
+			"latency_ms", res.latency.Milliseconds(), "err", res.errMsg)
+	}
+	return &providerapi.ConnectionTestSchema{
+		Success:      res.success,
+		LatencyMs:    int32(res.latency.Milliseconds()),
+		ModelCount:   res.modelCount,
+		ErrorMessage: res.errMsg,
+	}, nil
+}
+
+// StartProber 启动定时健康探测循环：每 interval 轮询一轮，随 ctx 取消退出（优雅关闭）。
+// 由组合根 go func 启动（接线见 db_model §2.3.1）；只探 enabled=true；探测走直连 HTTP，
+// 不占 bulkhead、不触发熔断。time.Ticker 消费端忙时丢 tick（channel 缓冲 1），单轮 10s 上界
+// << 60s 间隔，无重叠。
+func (s *providerService) StartProber(ctx context.Context) {
+	interval := s.interval
+	if interval <= 0 { // 防御：非 NewProviderService 构造的零值 interval 会令 NewTicker panic
+		interval = probeInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.runProbeRound(ctx)
+		}
+	}
+}
+
+// runProbeRound 单轮定时探测：ListProviders → 过滤 enabled → 每 provider 一个 goroutine 并发
+// probeOne（个位数量级；goroutine 代价≈0，无需线程池）。同步方法（WaitGroup 等全部探测收尾），
+// 供 StartProber 每轮调用、也供测试直调（不依赖真实 ticker）。
+func (s *providerService) runProbeRound(ctx context.Context) {
+	ps, err := s.store.ListProviders(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "prober: list providers failed; retry next round", "err", err)
+		return
+	}
+	var wg sync.WaitGroup
+	for i := range ps {
+		p := &ps[i]
+		if !p.Enabled {
+			continue
+		}
+		wg.Add(1)
+		go func(p *Provider) {
+			defer wg.Done()
+			if _, err := s.probeOne(ctx, p); err != nil {
+				slog.ErrorContext(ctx, "prober: probe provider failed", "provider_id", p.ID, "err", err)
+			}
+		}(p)
+	}
+	wg.Wait()
 }

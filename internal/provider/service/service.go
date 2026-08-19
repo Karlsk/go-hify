@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/Karlsk/go-hify/internal/platform/cache"
+	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/page"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 )
@@ -74,16 +76,18 @@ const (
 	pgCodeFKViolation     = "23503" // 外键违例：删除被引用行（RESTRICT）
 )
 
-// errNotImplemented 本批未实现的接口方法（SyncModels）占位；
-// 模型自动发现批次落地后移除（db_model.md §6 落地顺序）。
-var errNotImplemented = errors.New("not implemented in this batch (see docs/changelog/provider/db_model.md)")
-
 // providerService 实现 providerapi.ProviderService。
 type providerService struct {
-	store  Store
-	cm     cacheManager
-	master []byte      // API Key 加密主密钥（32B，来自 config.Provider.MasterKey）
-	probe  probeClient // 连通性探测 HTTP client（NewProbeClient；测试注入 httptest 桩）
+	store    Store
+	cm       cacheManager
+	master   []byte        // API Key 加密主密钥（32B，来自 config.Provider.MasterKey）
+	probe    probeClient   // 连通性探测 HTTP client（NewProbeClient；测试注入 httptest 桩）
+	interval time.Duration // 定时探测轮询间隔（默认 probeInterval；测试注入短间隔）
+
+	// decryptFailWarned 已打「解密失败」WARN 的 provider id 集合：定时探测每分钟一轮，主密钥轮换后的
+	// 旧密文会永久解密失败，不去重则每 60s 刷一条 WARN。once-per-provider 去重；重新录入 key 产生
+	// 可解密密文后不再命中。sync.Map 零值即用，无需构造。
+	decryptFailWarned sync.Map // key: providerID(uint64)
 }
 
 // NewProviderService 构造提供商服务；cm 由组合根传 *cache.Cache，单测可 stub cacheManager。
@@ -93,7 +97,7 @@ func NewProviderService(store Store, cm cacheManager, masterKey []byte) provider
 	if len(masterKey) != 32 {
 		panic("service: provider master key must be 32 bytes (config PROVIDER_MASTER_KEY)")
 	}
-	return &providerService{store: store, cm: cm, master: masterKey, probe: NewProbeClient()}
+	return &providerService{store: store, cm: cm, master: masterKey, probe: NewProbeClient(), interval: probeInterval}
 }
 
 // modelService 实现 providerapi.ModelService。
@@ -288,7 +292,9 @@ func (s *providerService) Update(ctx context.Context, req providerapi.UpdateProv
 		return nil, fmt.Errorf("get provider %d: %w", req.ID, err)
 	}
 	if err := req.ValidateWithKind(p.Kind); err != nil {
-		return nil, fmt.Errorf("validate update provider (kind %s): %w", p.Kind, err)
+		// 包 ErrValidationFailed（而非裸 Validate 错误）：kind 规则只有取到库内 kind 才能验
+		//（handler 预校验做不到），经 FailFromSentinel 映射 400 而非误报 500。
+		return nil, fmt.Errorf("%w: %s", errs.ErrValidationFailed, err)
 	}
 	if p.Name != req.Name {
 		if _, err := s.store.GetProviderByName(ctx, req.Name); err == nil {
@@ -346,9 +352,7 @@ func (s *providerService) Delete(ctx context.Context, req providerapi.DeleteProv
 	return nil
 }
 
-// TestConnection 手动连通性探测：解密 key → probe（kind 分发端点，10s 超时）→ DEGRADED
-// 状态机转移 → UpsertHealth 落库。返回探测结果本体四字段；状态机转移后的 health 快照经
-// Get 现读（不在缓存载荷里，无需失效）。明文 key 只出现在解密后到请求头之间。
+// TestConnection 手动连通性探测：校验 + 取实体后委托 probeOne（与定时探测共用同一探测写库逻辑）。
 func (s *providerService) TestConnection(ctx context.Context, req providerapi.TestConnectionReq) (*providerapi.ConnectionTestSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate test connection: %w", err)
@@ -360,38 +364,7 @@ func (s *providerService) TestConnection(ctx context.Context, req providerapi.Te
 		}
 		return nil, fmt.Errorf("get provider %d: %w", req.ID, err)
 	}
-
-	// 解密失败（主密钥轮换后的旧密文）是本地配置问题而非供应商故障：不发请求、不动 health，
-	// 以失败结果返回并提示重新录入——避免把配置错误记成供应商 down。
-	key := ""
-	if enc := p.AuthConfig[apiKeyEncryptedKey]; enc != "" {
-		pt, err := decryptAPIKey(s.master, enc)
-		if err != nil {
-			slog.WarnContext(ctx, "decrypt api key failed; abort probe", "provider_id", p.ID, "err", err)
-			return &providerapi.ConnectionTestSchema{ErrorMessage: "API Key 解密失败（主密钥可能已轮换，请重新录入）"}, nil
-		}
-		key = pt
-	}
-
-	res := probe(ctx, s.probe, p.Kind, p.BaseURL, key)
-	now := time.Now()
-	// 事务内锁定读 → 状态机转移 → 写回：把"读 fail_count + 算 +1 + 写"做成原子，否则并发探测
-	// 都读到同一个 fail_count，连续失败阈值（≥3 → down）被延迟，破坏"连续失败≥3"契约。
-	if err := s.store.WithTx(ctx, func(tx Store) error {
-		old, err := tx.GetHealthByProviderIDForUpdate(ctx, p.ID)
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("get health of provider %d: %w", p.ID, err)
-		}
-		return tx.UpsertHealth(ctx, applyProbeResult(p.ID, old, res, now))
-	}); err != nil {
-		return nil, fmt.Errorf("upsert health of provider %d: %w", p.ID, err)
-	}
-	return &providerapi.ConnectionTestSchema{
-		Success:      res.success,
-		LatencyMs:    int32(res.latency.Milliseconds()),
-		ModelCount:   res.modelCount,
-		ErrorMessage: res.errMsg,
-	}, nil
+	return s.probeOne(ctx, p)
 }
 
 // ---- ModelService ----
@@ -558,11 +531,13 @@ func (s *modelService) Delete(ctx context.Context, req providerapi.DeleteModelRe
 }
 
 // SyncModels 自动发现并同步模型列表（只增改不删）：依赖 platform/llm 的模型发现能力，属后续批次。
+// 路由已挂（POST /providers/:id/models/sync）；占位期返回 ErrServiceUnavailable（503，
+// handler_spec.md §5-2）而非误导性的 500 + ERROR 日志噪音。
 func (s *modelService) SyncModels(ctx context.Context, req providerapi.SyncModelsReq) (*providerapi.ModelSyncResultSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate sync models: %w", err)
 	}
-	return nil, errNotImplemented
+	return nil, fmt.Errorf("%w: sync models pending (see docs/changelog/provider/db_model.md)", errs.ErrServiceUnavailable)
 }
 
 // ---- 共用工具 ----

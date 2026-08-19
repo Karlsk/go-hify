@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Karlsk/go-hify/internal/platform/errs"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 )
 
@@ -252,10 +253,11 @@ func TestModelDelete_FKViolation(t *testing.T) {
 	assert.ErrorIs(t, err, providerapi.ErrModelInUse)
 }
 
-func TestModelSyncModels_NotImplemented(t *testing.T) {
+// 占位期返回 ErrServiceUnavailable（503，handler_spec.md §5-2）；真实实现待模型发现批次。
+func TestModelSyncModels_Pending503(t *testing.T) {
 	_, _, _, ms := newTestService(t)
 	_, err := ms.SyncModels(context.Background(), providerapi.SyncModelsReq{ID: 1})
-	assert.ErrorIs(t, err, errNotImplemented)
+	assert.ErrorIs(t, err, errs.ErrServiceUnavailable)
 }
 
 // warmDetail 经 providerService.Get 预热某 provider 的详情缓存，返回是否成功落 key。

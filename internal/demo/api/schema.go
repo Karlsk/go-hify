@@ -43,10 +43,12 @@ type CreateReq struct {
 func (r CreateReq) Validate() error { return validateNameStatus(r.Name, r.Status) }
 
 // UpdateReq 整体更新请求（PUT：name + status 均必填）。
-// ID 无 binding tag：gin 的 BindUri 会校验整个结构体，与 json 字段两步绑定会互相干扰，
-// 故 handler 先用 GetReq 绑路径 id 再赋值给 ID（见 handler.update）；ID>0 由 Validate 兜底。
+// ID 带 json:"-" 且无 binding tag：gin 的 BindUri 会校验整个结构体，与 json 字段两步绑定会
+// 互相干扰，故 handler 先用 GetReq 绑路径 id 再赋值给 ID（见 handler.update）。json:"-" 阻止
+// body 的 id 键覆盖路径值（encoding/json 对无 tag 字段按字段名大小写不敏感匹配，裸 ID 会被
+// {"id":999} 悄悄改写）；ID>0 由 Validate 兜底。
 type UpdateReq struct {
-	ID     uint64
+	ID     uint64 `json:"-"`
 	Name   string `json:"name" binding:"required,min=1,max=128"`
 	Status string `json:"status" binding:"required"`
 }

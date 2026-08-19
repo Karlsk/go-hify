@@ -184,9 +184,11 @@ func (r CreateProviderReq) Validate() error {
 
 // UpdateProviderReq 整体更新请求。Kind 不可改（改 kind 会使已存 models / auth_config 语义错位）；
 // APIKey 空串 = 保持不变，非空 = 轮换并刷新 rotated_at；Enabled 全量提交（PUT 语义）。
-// ID 无 binding tag：handler 先用 GetProviderReq 绑路径 id 再赋值（同 demo 模式），ID>0 由 Validate 兜底。
+// ID 带 json:"-"：handler 先用 GetProviderReq 绑路径 id 再赋值（同 demo 模式）。json:"-" 是防覆盖
+// 关键——encoding/json 对无 tag 字段按字段名大小写不敏感匹配，裸 ID 会被 body 的 {"id":999} 悄悄
+// 改写、令路径失效；ID>0 由 Validate 兜底。
 type UpdateProviderReq struct {
-	ID          uint64
+	ID          uint64         `json:"-"`
 	Name        string         `json:"name" binding:"required,min=1,max=128"`
 	BaseURL     string         `json:"base_url" binding:"omitempty,max=512"`
 	APIKey      string         `json:"api_key" binding:"omitempty,max=512"`
@@ -287,9 +289,10 @@ func (r CreateModelReq) Validate() error {
 	return validateModel(r.Capability, r.EmbeddingDim, r.InputPrice, r.OutputPrice, r.ExtraParams)
 }
 
-// UpdateModelReq 整体更新请求。ID 无 binding tag：handler 先用 GetModelReq 绑路径 id 再赋值。
+// UpdateModelReq 整体更新请求。ID 带 json:"-"：handler 先用 GetModelReq 绑路径 id 再赋值；
+// json:"-" 阻止 body 的 id 键覆盖路径值（同 UpdateProviderReq.ID 的防覆盖说明）。
 type UpdateModelReq struct {
-	ID              uint64
+	ID              uint64         `json:"-"`
 	ProviderID      uint64         `json:"provider_id" binding:"required"`
 	Name            string         `json:"name" binding:"required,min=1,max=128"`
 	ModelID         string         `json:"model_id" binding:"required,min=1,max=128"`

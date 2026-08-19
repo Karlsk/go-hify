@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,11 +36,15 @@ type memStore struct {
 	updateModelErr    error
 	deleteModelErr    error
 	upsertHealthErr   error
+	listProvidersErr  error
 
 	// 调用计数：缓存命中断言（二访不查 store）。
 	getProviderByIDCalls int
 	listProvidersCalls   int
 	upsertHealthCalls    int
+
+	// mu 保护 healths map 与 upsertHealthCalls：定时探测并发写 health 时防 data race / map 并发写 panic。
+	mu sync.Mutex
 }
 
 func newMemStore() *memStore {
@@ -84,6 +89,9 @@ func (m *memStore) GetProviderByName(_ context.Context, name string) (*Provider,
 }
 
 func (m *memStore) ListProviders(_ context.Context) ([]Provider, error) {
+	if m.listProvidersErr != nil {
+		return nil, m.listProvidersErr
+	}
 	m.listProvidersCalls++
 	ids := make([]uint64, 0, len(m.providers))
 	for id := range m.providers {
@@ -210,6 +218,8 @@ func (m *memStore) DeleteModel(_ context.Context, id uint64) error {
 }
 
 func (m *memStore) GetHealthByProviderID(_ context.Context, providerID uint64) (*ProviderHealth, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	h, ok := m.healths[providerID]
 	if !ok {
 		return nil, gorm.ErrRecordNotFound
@@ -219,7 +229,8 @@ func (m *memStore) GetHealthByProviderID(_ context.Context, providerID uint64) (
 }
 
 func (m *memStore) GetHealthByProviderIDForUpdate(ctx context.Context, providerID uint64) (*ProviderHealth, error) {
-	return m.GetHealthByProviderID(ctx, providerID) // 内存 store 无并发写，锁定读与普通读等价
+	// 定时探测并发写 healths（map 由 mu 保护）；无行级锁语义，锁定读退化为普通读（并发语义由 store 层 sqlmock 覆盖）
+	return m.GetHealthByProviderID(ctx, providerID)
 }
 
 func (m *memStore) WithTx(_ context.Context, fn func(tx Store) error) error {
@@ -227,6 +238,8 @@ func (m *memStore) WithTx(_ context.Context, fn func(tx Store) error) error {
 }
 
 func (m *memStore) UpsertHealth(_ context.Context, h *ProviderHealth) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.upsertHealthErr != nil {
 		return m.upsertHealthErr
 	}
