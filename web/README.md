@@ -41,19 +41,27 @@ web/
     │   ├── PageHeader.vue             # 页面标题区：标题 + 描述 + 右侧 actions 插槽
     │   ├── HifyTable.vue              # 通用列表表格（泛型，偏移分页，refresh()）
     │   ├── HifyFormDialog.vue         # 通用表单弹窗（泛型，open(data?) 编辑/新增）
-    │   └── ProviderModelsDrawer.vue   # 提供商模型列表抽屉（子资源形态：同步/手动增删）
+    │   ├── AuthShell.vue              # 登录/注册分栏壳（左品牌深底面板 + 右表单卡片）
+    │   └── ProviderModelsDrawer.vue   # 提供商模型列表抽屉（子资源形态：同步/勾选启用/手动增删）
     ├── composables/
     │   ├── useRequest.ts   # 请求三态 { data, loading, error, execute }
     │   ├── useConfirm.ts   # 删除确认全流程：调用即执行，返回 Promise<boolean>
     │   └── useBreakpoint.ts # 响应式断点单例：BREAKPOINTS 常量 + isNarrow(≤1200)/isCompact(≤992)
-    ├── stores/             # Pinia 模块（user/session 等，按业务新增）
+    ├── stores/
+    │   └── auth.ts          # 会话 store：登录用户唯一事实源（fetchMe 引导 / 401 清理 / 注销）
     ├── utils/
     │   ├── request.ts      # axios 实例 + Result 信封拆包 + 错误统一处理 + getList
     │   ├── notify.ts       # notifySuccess/Error/Warning（duration 统一 3s）
     │   └── sse.ts          # fetch + ReadableStream（SSE 流式，不用 EventSource）
     ├── types/
     │   └── index.ts        # Result 信封 / PageQuery / PageResult 等公共类型
+    ├── api/
+    │   ├── auth.ts          # Auth 模块 API 层：登录/注册/注销/me（cookie 会话，token 不经前端）
+    │   └── provider.ts     # Provider 模块 API 层：类型 + 请求方法（对齐后端 api 契约，唯一事实源）
     └── views/
+        ├── auth/
+        │   ├── LoginView.vue     # 登录页（bare：无 chrome 分栏布局，回跳 redirect）
+        │   └── RegisterView.vue  # 注册页（注册成功即自动登录进入）
         ├── provider/ProviderList.vue
         ├── agent/AgentList.vue
         ├── chat/ChatView.vue
@@ -83,8 +91,16 @@ web/
 - `request.ts` 响应拦截器统一拆信封：`success === false` → 取 `error.code` / `error.message` → `ElMessage.error` 提示 + `reject(new RequestError(code, message))`，调用方按 `error.code` 分支。
 - `success === true` 自动解包：导出 `get` / `post` / `put` / `del` 四个泛型 helper（`get<T>(url)` 直接返回 `Promise<T>`，即业务 `data`）；解包后 `meta` 不可见，需分页 `meta` 的列表端点用 `getList<T>(url, params)` 取 `PageResult<T>`（`{ list, total, page, pageSize }`，HifyTable 的数据源）。
 - 请求失败的 `ElMessage.error` 统一在拦截器弹，业务层 / composables **不重复弹**；`notify.ts` 只管成功 / 警告 / 业务显式错误。
-- HTTP 主信号（2xx/4xx/5xx）由 axios 错误分支兜底；401 预留跳登录钩子（auth 模块落地后接 `router.push('/login')`）。
-- 业务错误码（`PROVIDER_NOT_FOUND` / `BUDGET_EXHAUSTED` / …）见 CLAUDE.md《错误处理》表。
+- HTTP 主信号（2xx/4xx/5xx）由 axios 错误分支兜底；业务错误码（`PROVIDER_NOT_FOUND` / `BUDGET_EXHAUSTED` / …）见 CLAUDE.md《错误处理》表。
+
+### 认证与会话
+
+- 会话走 HttpOnly cookie（`hify_session`，7 天）：axios 已配 `withCredentials`，token 不经前端代码；登录 / 注册 / 注销 / me 走 `api/auth.ts`。
+- 身份唯一事实源 = `stores/auth.ts`（Pinia）：路由守卫首次导航调 `ensureReady()`（`fetchMe`，401 静默归 null——未登录是正常态不是错误）。
+- 路由守卫（`router/index.ts`）：`meta.bare` = 登录 / 注册（无 chrome + 免登录，已登录访问直接进系统）；`meta.public` = 免登录保留 chrome（现仅 `/design`）；其余路由未登录 → `/login?redirect=<来源页>`（回跳仅接受 `/` 开头站内路径，防 open-redirect）。
+- 401 钩子在 `request.ts` 拦截器：清 authStore + 跳登录（带 redirect）；auth 引导 / 登录调用传 `skipAuthHandler` 跳过，冷启动 `fetchMe` 另传 `skipErrorToast` 静默（两个标记经 `declare module 'axios'` 扩展 config 类型）。
+- 顶栏用户区：登录后 `el-dropdown`（注销 = best-effort 调后端 + 清本地 + 跳登录，不加确认框）；未登录（免登录页访客）降级为「登录」按钮。
+- 依赖方向：`stores → api → request`；router 对 store 只做守卫内**动态** import，模块顶层零业务依赖（避免静态环）。
 
 ### SSE 流式（对话核心，错一步流式就废）
 
@@ -97,7 +113,8 @@ web/
 ### 字段命名与类型（与后端一致）
 
 - JSON 字段 **snake_case**（与 Go schema 的 `json` tag、DB 列名一致）。
-- bigint 主键/外键 JSON 里**序列化为字符串**（Go `json:"id,string"`），避免 JS 超过 `2^53` 丢精度。
+- bigint 主键/外键 JSON 里**序列化为字符串**（Go `json:"id,string"`），避免 JS 超过 `2^53` 丢精度；但**请求 body 的外键是数值**（Go uint64 无 `,string` tag，传字符串会 400）——行数据回传时用 `Number()` 转换（先例：`api/provider.ts`）。
+- 时间 RFC 3339 / UTC，带 `Z`。
 - 时间 RFC 3339 / UTC，带 `Z`。
 - 空值：列表空 → `[]`，字符串空 → `""`，对象未加载 → `null`（前端免空判断）。
 
@@ -117,7 +134,7 @@ web/
 - `useRequest(api)` → `{ data, loading, error, execute }`；错误只记状态不重复弹（拦截器已弹）。
 - `useBreakpoint()` → `{ width, isNarrow, isCompact }`：断点唯一事实源是 `BREAKPOINTS`（1200 / 992，见 design-system.md《响应式断点》）；`HifyTableColumn.hideBelow: BREAKPOINTS.md` 标记窄屏隐藏的次要列。
 - 组件视觉值全走 token；表格卡片 body padding 0 是内容卡片 20px 规则的唯一例外（见 design-system.md《整体布局》）。
-- 首个落地正式页：`provider/ProviderList.vue`（mock 数据源；`fetchList` / `onSubmit` 签名对齐 `getList` 形态，换真实 API 只动这两个函数）。
+- 首个落地正式页：`provider/ProviderList.vue`（已接真实 API，`api/provider.ts` 是类型与请求方法的唯一事实源）；列表带健康状态 / 模型数聚合列，模型管理走 `ProviderModelsDrawer` 抽屉（同步导入默认停用，勾选列 = 启用，PUT 全量回传 + 失败回滚视觉态）。
 
 ### 路径别名
 

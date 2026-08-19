@@ -47,6 +47,3 @@ export interface PageResult<T> {
   page: number
   pageSize: number
 }
-
-/** 模型提供商类型（mock 阶段公共定义，provider 列表与模型抽屉共用） */
-export type ProviderType = 'OpenAI' | 'Claude' | 'Gemini' | 'Ollama'

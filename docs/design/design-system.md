@@ -172,6 +172,26 @@ el-container（row）
 
 > **v3 演进记录**（整体布局）：**0 个 `--hf-*` 改值、0 个新增语义 token**——顶栏 / 面包屑 / 用户区 / PageHeader / 卡片 / 按钮全部落到已有 token。新增仅限 EP 映射（`.el-card` 选择器上的 `--el-card-*` 覆盖；面包屑无需映射，EP 直接走已映射的 `--el-text-color-regular / -placeholder`）与 main.css 组件级覆写（渐变主按钮、卡片阴影、面包屑当前项）。唯一的原则级变化：品牌渐变使用范围由「logo / 登录页 / 关键 CTA」扩展至「所有主操作按钮」（用户显式决策）；渐变仍不用于背景铺色、文字（除 logo）、卡片装饰。
 
+### 登录 / 注册页（`components/AuthShell.vue`，v4 新增）
+
+bare 路由（`meta.bare`）：App.vue 不渲染侧边栏 / 顶栏，整页交给视图自身的分栏布局。
+
+```
+AuthShell（flex，100vh）
+├── aside 品牌面板 42%（≤992 隐藏）
+│   ├── 垂直居中品牌块：渐变 H 方块 48px（--hf-radius-md）+「Hify」渐变字 24px
+│   │   + tagline「AI Agent Platform」（--hf-sidebar-text-muted）
+│   └── 左下版本号 v{x}（mono / xs / text-muted）
+└── main 表单区（flex 1，--hf-bg-page）
+    └── 白卡片 400px：padding 40px/32px（--hf-space-10/8）、--hf-radius-xl（该 token 注释
+        的既定用途「登录卡片」）、--hf-shadow-lg、--hf-border-2；标题 18px/600 + 副文
+        text-3 + el-form（label-position="top"）+ 全宽渐变主按钮
+```
+
+- 品牌面板 = `--hf-sidebar-bg` 深底，复刻应用侧边栏语言——登录后进入应用视觉无缝衔接；渐变仍只出现在 logo 方块与品牌字，不铺底。
+- ≤992（isCompact）隐藏品牌面板，表单全宽居中。**0 个新增 token**，全部复用既有侧边栏 / 卡片 / 字号 / 间距 token。
+- 行为：登录成功回跳 `?redirect=` 来源页（仅接受 `/` 开头站内路径，防 open-redirect）；注册成功自动登录进入。
+
 ## 响应式断点
 
 管理台以桌面为主（内部工具），只定义两档宽度断点。CSS 变量不能用于 `@media`（CSS 规范限制），断点值做不成 `--hf-*` token——代码侧唯一事实源是 `web/src/composables/useBreakpoint.ts` 的 `BREAKPOINTS` 常量，本表与其保持同步。

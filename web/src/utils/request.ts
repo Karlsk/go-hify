@@ -4,6 +4,16 @@ import type { PageQuery, PageResult, Result } from '@/types'
 
 // CLAUDE.md《统一响应信封》：{ success, data, error:{code,message,details}, meta }
 
+// 内部标记（auth 引导类调用专用）：随 config 传入，拦截器按标记降级处理
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /** 401 不触发「清身份 + 跳登录」（fetchMe 引导 / login 自身的 401 是业务结果） */
+    skipAuthHandler?: boolean
+    /** 失败不弹 ElMessage（冷启动身份引导静默——未登录是正常态不是错误） */
+    skipErrorToast?: boolean
+  }
+}
+
 const request = axios.create({
   baseURL: '/api/v1',
   timeout: 30_000,
@@ -36,12 +46,25 @@ request.interceptors.response.use(
   },
   (error) => {
     // HTTP 层错误（4xx / 5xx），axios 已抛出；error.response.data 为 Result 信封
+    const config = error.config
     const message: string =
       error.response?.data?.error?.message ?? error.message ?? '网络错误'
-    if (error.response?.status === 401) {
-      // 未登录 / session 失效 → 跳登录（auth 模块落地后接 router.push('/login')）
+    if (error.response?.status === 401 && !config?.skipAuthHandler) {
+      // session 失效 → 清身份 + 跳登录（带 redirect 回跳）。
+      // 动态 import：避免 request → stores/router 静态环（stores/auth → api/auth → 本文件）。
+      void import('@/stores/auth').then(({ useAuthStore }) => useAuthStore().clear())
+      void import('@/router').then(({ default: router }) => {
+        if (router.currentRoute.value.name !== 'login') {
+          void router.push({
+            name: 'login',
+            query: { redirect: router.currentRoute.value.fullPath },
+          })
+        }
+      })
     }
-    ElMessage.error(message)
+    if (!config?.skipErrorToast) {
+      ElMessage.error(message)
+    }
     return Promise.reject(error)
   },
 )

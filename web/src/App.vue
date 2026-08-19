@@ -1,5 +1,6 @@
 <template>
-  <el-container class="app">
+  <!-- bare 路由（登录 / 注册）不渲染 chrome，整页交给视图自身的分栏布局 -->
+  <el-container v-if="!route.meta.bare" class="app">
     <el-aside
       :width="collapsed ? '64px' : '220px'"
       class="app__aside"
@@ -52,32 +53,57 @@
           <el-breadcrumb-item :to="{ path: '/' }">首页</el-breadcrumb-item>
           <el-breadcrumb-item>{{ pageTitle }}</el-breadcrumb-item>
         </el-breadcrumb>
-        <!-- auth 接入前为占位；接入后换成真实用户（头像取用户名首字母） -->
-        <div class="app__user">
-          <div class="app__avatar" aria-hidden="true">{{ avatarLetter }}</div>
-          <span class="app__username">{{ username }}</span>
-        </div>
+        <!-- 用户区：登录后为身份 + 下拉菜单（注销）；未登录（免登录页访客）降级为登录入口 -->
+        <el-dropdown v-if="auth.user" trigger="click" @command="onUserCommand">
+          <div class="app__user app__user--dropdown">
+            <div class="app__avatar" aria-hidden="true">{{ auth.avatarLetter }}</div>
+            <span class="app__username">{{ auth.username }}</span>
+            <el-icon class="app__user-caret"><ArrowDown /></el-icon>
+          </div>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="logout">
+                <el-icon><SwitchButton /></el-icon>退出登录
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button
+          v-else
+          link
+          type="primary"
+          @click="router.push({ name: 'login' })"
+        >
+          登录
+        </el-button>
       </header>
       <el-main class="app__main">
         <router-view />
       </el-main>
     </el-container>
   </el-container>
+  <router-view v-else />
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
+  ArrowDown,
   ChatDotRound,
   Expand,
   Fold,
   Setting,
+  SwitchButton,
   User,
 } from '@element-plus/icons-vue'
 import { useBreakpoint } from '@/composables/useBreakpoint'
+import { useAuthStore } from '@/stores/auth'
+import { notifySuccess } from '@/utils/notify'
 
 const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
 const activeMenu = computed(() => route.path)
 
 // 窄屏（≤1200）自动折叠：加载时定档；跨界瞬间自动同步，两次跨界之间手动自由
@@ -91,9 +117,13 @@ const appVersion = __APP_VERSION__
 // 面包屑当前项 = 路由 meta.title（router/index.ts 为唯一来源）
 const pageTitle = computed(() => route.meta.title)
 
-// auth 未接入的占位身份；接入后由 authctx/store 提供
-const username = ref('Admin')
-const avatarLetter = computed(() => username.value.charAt(0).toUpperCase())
+// 注销：不加确认框（低风险幂等操作）；best-effort 调后端，失败也清本地
+async function onUserCommand(command: string): Promise<void> {
+  if (command !== 'logout') return
+  await auth.logout()
+  notifySuccess('已退出登录')
+  void router.push({ name: 'login' })
+}
 </script>
 
 <style scoped>
@@ -291,6 +321,15 @@ const avatarLetter = computed(() => username.value.charAt(0).toUpperCase())
   display: flex;
   align-items: center;
   gap: var(--hf-space-2);
+}
+
+/* 下拉触发态：头像 + 用户名 + 箭头整体可点 */
+.app__user--dropdown {
+  cursor: pointer;
+}
+
+.app__user-caret {
+  color: var(--hf-text-3);
 }
 
 .app__avatar {
