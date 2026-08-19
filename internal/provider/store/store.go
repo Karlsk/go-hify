@@ -208,6 +208,46 @@ func (s *Store) GetHealthByProviderID(ctx context.Context, providerID uint64) (*
 	return &h, nil
 }
 
+// ListHealthByProviderIDs 列表聚合用批量读：按当页 id 集合 IN 查询，只回存在的行
+// （无行 provider 的 health 由 service 归 nil）。主键 IN，页大小 ≤100。
+func (s *Store) ListHealthByProviderIDs(ctx context.Context, ids []uint64) ([]providersvc.ProviderHealth, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var hs []providersvc.ProviderHealth
+	err := s.db.WithContext(ctx).
+		Select(selectHealth).
+		Where("provider_id IN ?", ids).
+		Find(&hs).Error
+	return hs, err
+}
+
+// CountEnabledModelsByProviderIDs 列表聚合用批量计数：已启用模型按提供商分组
+// （GROUP BY + 聚合，一条查询覆盖当页全部 id）。map 无键 = 0。
+func (s *Store) CountEnabledModelsByProviderIDs(ctx context.Context, ids []uint64) (map[uint64]int32, error) {
+	counts := make(map[uint64]int32, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	var rows []struct {
+		ProviderID uint64
+		Cnt        int32
+	}
+	err := s.db.WithContext(ctx).
+		Model(&providersvc.Model{}).
+		Select("provider_id, COUNT(*) AS cnt").
+		Where("provider_id IN ? AND enabled = ?", ids, true).
+		Group("provider_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		counts[r.ProviderID] = r.Cnt
+	}
+	return counts, nil
+}
+
 // GetHealthByProviderIDForUpdate 事务内锁定读（SELECT ... FOR UPDATE）：串行化并发探测对同一
 // provider_health 行的读-改-写，防 fail_count 计数竞态。仅在 WithTx 回调内调用才有意义。
 func (s *Store) GetHealthByProviderIDForUpdate(ctx context.Context, providerID uint64) (*providersvc.ProviderHealth, error) {

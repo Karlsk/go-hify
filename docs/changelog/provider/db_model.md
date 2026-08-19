@@ -1,6 +1,6 @@
 # Provider 模块数据模型（db_model）
 
-> 状态：**已落地数据层、契约层、CRUD 全链路、连通性探测、定时探测、handler 路由、组合根接线与模型同步**（2026-08-19）：00002 最终态三张表 + `provider/api/`（schema / 接口 / 哨兵 / 测试）+ `service/crypto.go`（AES-256-GCM）+ `service/service.go`（ProviderService / ModelService CRUD、Cache-Aside 缓存、23505/23503 翻译）+ `service/prober.go`（kind 分发探测 + DEGRADED 状态机 + StartProber 定时轮）+ `service/sync.go`（SyncModels 真实实现：5 kind 直连解析 + 只增改不删 upsert）+ `store/store.go`（GORM 15 方法含 UpsertHealth，sqlmock 测试绿）+ handler 12 端点 + 组合根接线（graceful shutdown + `go prober.StartProber(appCtx)`）均已就位；主密钥经 `config.ProviderCfg`（`PROVIDER_MASTER_KEY`，启动缺失 fail-fast）。探测设计要点：detail 缓存载荷**剔除 health**（探测写库不失效缓存，Get 现读 provider_health 单行填充）；解密失败（主密钥轮换后旧密文）不发请求、不动 health，以失败结果返回。接线与 sync 设计见 [wiring_sync_spec.md](wiring_sync_spec.md)，人工冒烟步骤见 [docs/testing/provider-manual-test.md](../../testing/provider-manual-test.md)。
+> 状态：**已落地数据层、契约层、CRUD 全链路、连通性探测、定时探测、handler 路由、组合根接线与模型同步**（2026-08-19）：00002 最终态三张表 + `provider/api/`（schema / 接口 / 哨兵 / 测试）+ `service/crypto.go`（AES-256-GCM）+ `service/service.go`（ProviderService / ModelService CRUD、Cache-Aside 缓存、23505/23503 翻译）+ `service/prober.go`（kind 分发探测 + DEGRADED 状态机 + StartProber 定时轮）+ `service/sync.go`（SyncModels 真实实现：5 kind 直连解析 + 只增改不删 upsert）+ `store/store.go`（GORM 15 方法含 UpsertHealth，sqlmock 测试绿）+ handler 12 端点 + 组合根接线（graceful shutdown + `go prober.StartProber(appCtx)`）+ 列表聚合列（`ProviderListItemSchema`：health / enabled_model_count 分页窗口批量现读）+ 前端真实 API 对接（`web/src/api/provider.ts` + ProviderList + 模型抽屉）均已就位；主密钥经 `config.ProviderCfg`（`PROVIDER_MASTER_KEY`，启动缺失 fail-fast）。探测设计要点：detail 缓存载荷**剔除 health**（探测写库不失效缓存，Get 现读 provider_health 单行填充）；解密失败（主密钥轮换后旧密文）不发请求、不动 health，以失败结果返回。接线与 sync 设计见 [wiring_sync_spec.md](wiring_sync_spec.md)，列表聚合与前端对接见 [list_aggregate_frontend_spec.md](list_aggregate_frontend_spec.md)，人工冒烟步骤见 [docs/testing/provider-manual-test.md](../../testing/provider-manual-test.md)（§9 为前端联调走查）。
 > 本文记录 provider 模块数据模型的最终结论、决策理由与相关约定；表归属总览见 [docs/design/data-model.md](../../design/data-model.md)，建表通用规范见 CLAUDE.md《数据库规范》。
 
 ## 1. 实体关系
@@ -300,7 +300,7 @@ type Provider struct {
 	AuthConfig      map[string]string `gorm:"type:jsonb;serializer:json"` // 密文只出现在 api_key_encrypted 键
 	APIKeyRotatedAt *time.Time
 	ExtraConfig     map[string]any `gorm:"type:jsonb;serializer:json"` // bulkhead / ttft_seconds / keep_alive
-	Enabled         bool           `gorm:"not null;default:true"`
+	Enabled         bool           `gorm:"not null"` // 无 default tag——见 Model.Enabled 注释
 }
 func (Provider) TableName() string { return "providers" }
 
@@ -315,7 +315,7 @@ type Model struct {
 	InputPrice      *string        `gorm:"type:numeric(12,4)"` // 字符串金额经 pgx 文本协议直通 numeric，不引入 decimal 库
 	OutputPrice     *string        `gorm:"type:numeric(12,4)"`
 	EmbeddingDim    *int32
-	Enabled         bool   `gorm:"not null;default:true"`
+	Enabled         bool   `gorm:"not null"` // 无 default tag——带 default:true 时 GORM 会把零值替换成解析出的默认值 true（create.go 默认值写回），sync 导入的 Enabled=false "默认停用"会静默失效、全部变启用；所有创建路径显式设值，DB 列默认 true 兜底直插 SQL
 	Source          string `gorm:"not null;default:'manual'"`
 	ExtraParams     map[string]any `gorm:"type:jsonb;serializer:json"` // think_level 等
 }

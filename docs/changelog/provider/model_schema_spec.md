@@ -60,7 +60,7 @@ type Provider struct {
 	AuthConfig      map[string]string `gorm:"type:jsonb;serializer:json"` // 密文只在 api_key_encrypted 键
 	APIKeyRotatedAt *time.Time
 	ExtraConfig     map[string]any `gorm:"type:jsonb;serializer:json"`   // bulkhead/ttft_seconds/keep_alive
-	Enabled         bool           `gorm:"not null;default:true"`
+	Enabled         bool           `gorm:"not null"` // 无 default tag——见 Model.Enabled 注释
 }
 func (Provider) TableName() string { return "providers" }
 
@@ -76,7 +76,7 @@ type Model struct {
 	InputPrice      *string `gorm:"type:numeric(12,4)"` // USD/1M token；nil = 不计费
 	OutputPrice     *string `gorm:"type:numeric(12,4)"`
 	EmbeddingDim    *int32  // 仅 capability=embedding
-	Enabled         bool    `gorm:"not null;default:true"`
+	Enabled         bool    `gorm:"not null"` // 无 default tag——带 default:true 时 GORM 会把零值替换成解析出的默认值 true（create.go 默认值写回），sync 导入的 Enabled=false "默认停用"会静默失效、全部变启用；所有创建路径显式设值，DB 列默认 true 兜底直插 SQL
 	Source          string  `gorm:"not null;default:'manual'"`
 	ExtraParams     map[string]any `gorm:"type:jsonb;serializer:json"` // think_level 等
 }

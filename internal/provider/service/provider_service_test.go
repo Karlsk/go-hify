@@ -192,7 +192,57 @@ func TestProviderList_CachedSecondCall(t *testing.T) {
 
 	_, err = ps.List(ctx, providerapi.ListProvidersReq{})
 	require.NoError(t, err)
-	assert.Equal(t, calls, st.listProvidersCalls, "二访命中整表快照，不再查 store")
+	assert.Equal(t, calls, st.listProvidersCalls, "二访命中整表快照，不再查 ListProviders（聚合列另走批量现读）")
+}
+
+// TestProviderList_FillsAggregates 列表聚合（list_aggregate_frontend_spec）：当页批量现读
+// health 与已启用模型数——有 health 行的填充、从未探测的为 nil；计数只数 enabled=true；
+// 缓存命中路径（二访）同样填充聚合列。
+func TestProviderList_FillsAggregates(t *testing.T) {
+	st, _, ps, _ := newTestService(t)
+	ctx := context.Background()
+	a := st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAI, Enabled: true})
+	st.seed(&Provider{Name: "Ollama", Kind: providerapi.KindOllama, Enabled: true})
+	lat := int32(87)
+	st.seedHealth(&ProviderHealth{ProviderID: a.ID, Status: providerapi.HealthUp, LatencyMs: &lat})
+	st.seedModel(&Model{ProviderID: a.ID, Name: "m1", ModelID: "m1", Capability: providerapi.CapabilityChat, Enabled: true})
+	st.seedModel(&Model{ProviderID: a.ID, Name: "m2", ModelID: "m2", Capability: providerapi.CapabilityChat, Enabled: true})
+	st.seedModel(&Model{ProviderID: a.ID, Name: "m3", ModelID: "m3", Capability: providerapi.CapabilityChat, Enabled: false})
+
+	res, err := ps.List(ctx, providerapi.ListProvidersReq{})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 2)
+
+	byName := map[string]providerapi.ProviderListItemSchema{}
+	for _, it := range res.Items {
+		byName[it.Name] = it
+	}
+	oa, ok := byName["OpenAI"]
+	require.True(t, ok)
+	require.NotNil(t, oa.Health, "有 health 行的填充")
+	assert.Equal(t, providerapi.HealthUp, oa.Health.Status)
+	require.NotNil(t, oa.Health.LatencyMs)
+	assert.EqualValues(t, 87, *oa.Health.LatencyMs)
+	assert.EqualValues(t, 2, oa.EnabledModelCount, "只数 enabled=true")
+
+	ol, ok := byName["Ollama"]
+	require.True(t, ok)
+	assert.Nil(t, ol.Health, "从未探测的为 nil")
+	assert.EqualValues(t, 0, ol.EnabledModelCount, "无模型计 0")
+
+	// 二访走缓存命中分支，聚合列仍现读填充
+	res, err = ps.List(ctx, providerapi.ListProvidersReq{})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 2)
+	found := false
+	for _, it := range res.Items {
+		if it.Name == "OpenAI" {
+			found = true
+			assert.NotNil(t, it.Health, "缓存命中路径也填充聚合列")
+			assert.EqualValues(t, 2, it.EnabledModelCount)
+		}
+	}
+	assert.True(t, found)
 }
 
 func TestProviderList_KindInvalid(t *testing.T) {

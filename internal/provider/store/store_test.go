@@ -239,6 +239,36 @@ func TestCreateModels(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestCreateModelsSyncEnabledFalse 回归：sync 导入的模型 Enabled=false 必须真正落库。
+// GORM 对带 default tag 的字段在零值时不剔除列，而是把值替换成解析出的默认值
+// （create.go 299-301：isZero → values[i]=DefaultValueInterface + field.Set 回写结构体）
+// → sync 的 "默认停用" 会被 GORM 静默改成 true、模型全部变启用。
+// 本用例断言 CreateModels 后结构体字段仍为 false（buggy 代码 GORM 会把它 set 成 true）。
+// （service 层 sync 测试走内存 fake，天然暴露不了 GORM 的默认值替换，故放 store 层。）
+func TestCreateModelsSyncEnabledFalse(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO "models" \([^)]*"enabled"[^)]*\) VALUES`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(2, now, now))
+	mock.ExpectCommit()
+
+	ms := []*providersvc.Model{{
+		ProviderID:  1,
+		Name:        "GPT-4o",
+		ModelID:     "gpt-4o",
+		Capability:  "chat",
+		Enabled:     false, // sync 导入默认停用（sync_default_disabled_spec）
+		Source:      "discovered",
+		ExtraParams: map[string]any{},
+	}}
+	err := s.CreateModels(context.Background(), ms)
+	assert.NoError(t, err)
+	assert.False(t, ms[0].Enabled, "带 default tag 时 GORM 会把零值替换成默认值 true，导致 sync 默认停用失效")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 // 空切片直接返回，不发 SQL。
 func TestCreateModelsEmpty(t *testing.T) {
 	db, mock := newMockDB(t)
@@ -456,6 +486,44 @@ func TestGetHealthByProviderIDNotFound(t *testing.T) {
 
 	_, err := s.GetHealthByProviderID(context.Background(), 999)
 	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestListHealthByProviderIDs 列表聚合批量读：IN 展开 + 只回存在行；空 ids 不发查询。
+func TestListHealthByProviderIDs(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT provider_id, status, last_check_at, last_success_at, fail_count, latency_ms, error_message, created_at, updated_at FROM "provider_health" WHERE provider_id IN ($1,$2)`)).
+		WithArgs(uint64(1), uint64(2)).
+		WillReturnRows(healthRows(1, "up", now).AddRow(2, "down", now, now, int32(3), int32(0), "HTTP 500", now, now))
+
+	hs, err := s.ListHealthByProviderIDs(context.Background(), []uint64{1, 2})
+	assert.NoError(t, err)
+	assert.Len(t, hs, 2)
+	assert.Equal(t, "up", hs[0].Status)
+	assert.Equal(t, "down", hs[1].Status)
+	assert.NoError(t, mock.ExpectationsWereMet())
+
+	// 空 ids：短路返回，不产生任何 SQL
+	hs, err = s.ListHealthByProviderIDs(context.Background(), nil)
+	assert.NoError(t, err)
+	assert.Empty(t, hs)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestCountEnabledModelsByProviderIDs 列表聚合批量计数：IN + enabled 过滤 + GROUP BY；无行键计 0。
+func TestCountEnabledModelsByProviderIDs(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT provider_id, COUNT(*) AS cnt FROM "models" WHERE provider_id IN ($1,$2) AND enabled = $3 GROUP BY "provider_id"`)).
+		WithArgs(uint64(1), uint64(2), true).
+		WillReturnRows(sqlmock.NewRows([]string{"provider_id", "cnt"}).AddRow(uint64(1), int64(2)))
+
+	counts, err := s.CountEnabledModelsByProviderIDs(context.Background(), []uint64{1, 2})
+	assert.NoError(t, err)
+	assert.EqualValues(t, 2, counts[1])
+	assert.EqualValues(t, 0, counts[2], "无行键计 0（service 归 0）")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 

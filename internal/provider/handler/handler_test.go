@@ -77,9 +77,9 @@ func (f fakeProviderSvc) List(_ context.Context, req providerapi.ListProvidersRe
 	if f.injected != nil {
 		return nil, f.injected
 	}
-	items := make([]providerapi.ProviderSchema, 0, len(f.providers))
+	items := make([]providerapi.ProviderListItemSchema, 0, len(f.providers))
 	for _, p := range f.providers {
-		items = append(items, p)
+		items = append(items, providerapi.ProviderListItemSchema{ProviderSchema: p})
 	}
 	page, size := req.Page, req.PageSize
 	if page < 1 {

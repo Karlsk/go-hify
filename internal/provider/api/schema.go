@@ -393,11 +393,21 @@ type ProviderHealthSchema struct {
 }
 
 // ProviderDetailSchema 详情聚合：provider 本体（内嵌，JSON 扁平展开）+ 该提供商模型列表 + 健康状态。
-// 仅 Get 详情接口使用；列表不聚合（N+1 无意义）。health 无行（从未探测）为 null，models 空为 []。
+// 仅 Get 详情接口使用；列表项聚合另见 ProviderListItemSchema（分页窗口批量现读，非逐行 N+1）。
+// health 无行（从未探测）为 null，models 空为 []。
 type ProviderDetailSchema struct {
 	ProviderSchema
 	Models []ModelSchema         `json:"models"`
 	Health *ProviderHealthSchema `json:"health"`
+}
+
+// ProviderListItemSchema 列表项：provider 本体 + 当页批量现读的聚合列（健康 + 已启用模型数）。
+// health 不进列表缓存——探测 60s 一轮写库，进缓存必读到旧值（与详情接口同一先例）；
+// List 在分页后对当页 id 发 2 条 IN 批量查询填充，非逐行 N+1。
+type ProviderListItemSchema struct {
+	ProviderSchema
+	Health            *ProviderHealthSchema `json:"health"`              // 无行（从未探测）为 null
+	EnabledModelCount int32                 `json:"enabled_model_count"` // models.enabled=true 计数
 }
 
 // ModelSyncResultSchema 模型自动发现结果。
@@ -408,10 +418,10 @@ type ModelSyncResultSchema struct {
 
 // ProviderListResult / ModelListResult 偏移分页结果（喂给 respond.OKWithOffset）。
 type ProviderListResult struct {
-	Items    []ProviderSchema `json:"items"`
-	Page     int              `json:"page"`
-	PageSize int              `json:"page_size"`
-	Total    int64            `json:"total"`
+	Items    []ProviderListItemSchema `json:"items"`
+	Page     int                      `json:"page"`
+	PageSize int                      `json:"page_size"`
+	Total    int64                    `json:"total"`
 }
 
 // ModelListResult 模型偏移分页结果。

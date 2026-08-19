@@ -42,6 +42,9 @@ type Store interface {
 	GetModelByProviderAndModelID(ctx context.Context, providerID uint64, modelID string) (*Model, error)
 	ListModelsByProvider(ctx context.Context, providerID uint64) ([]Model, error) // 详情聚合用，id 升序
 	ListModels(ctx context.Context, providerID uint64, p page.OffsetParams) (page.OffsetResult[Model], error)
+	// CountEnabledModelsByProviderIDs 列表聚合用批量计数：models.enabled=true 按提供商分组；
+	// map 无键 = 0（该提供商无已启用模型）。
+	CountEnabledModelsByProviderIDs(ctx context.Context, ids []uint64) (map[uint64]int32, error)
 	UpdateModel(ctx context.Context, m *Model) error
 	// UpdateModelName sync 专用列级更新：只写 name / updated_at（WHERE 限定 source='discovered'），
 	// 防止 Save 全列回写覆盖并发的手工编辑（价格 / enabled / extra_params）。
@@ -50,6 +53,8 @@ type Store interface {
 
 	// health
 	GetHealthByProviderID(ctx context.Context, providerID uint64) (*ProviderHealth, error) // 无行 → gorm.ErrRecordNotFound（service 归 nil）
+	// ListHealthByProviderIDs 列表聚合用批量读：只回存在的行（无行 provider 的 health 由 service 归 nil）。
+	ListHealthByProviderIDs(ctx context.Context, ids []uint64) ([]ProviderHealth, error)
 	// GetHealthByProviderIDForUpdate 探测状态机事务内的锁定读（FOR UPDATE），串行化并发探测的读-改-写。
 	GetHealthByProviderIDForUpdate(ctx context.Context, providerID uint64) (*ProviderHealth, error)
 	UpsertHealth(ctx context.Context, h *ProviderHealth) error // 探测写入：无行插入、有行更新
@@ -251,7 +256,8 @@ func (s *providerService) fillHealth(ctx context.Context, providerID uint64, d *
 	return nil
 }
 
-// List 偏移分页列表：整表快照缓存（list）命中后在内存做 kind / enabled 筛选与分页。
+// List 偏移分页列表：整表快照缓存（list）命中后在内存做 kind / enabled 筛选与分页，
+// 分页窗口再批量现读聚合列（health / 已启用模型数，见 withAggregates）。
 // providers 是极小配置表——全表 + 内存筛选比逐查询缓存 key 的模式失效简单且命中率高。
 func (s *providerService) List(ctx context.Context, req providerapi.ListProvidersReq) (*providerapi.ProviderListResult, error) {
 	if err := req.Validate(); err != nil {
@@ -261,7 +267,7 @@ func (s *providerService) List(ctx context.Context, req providerapi.ListProvider
 	if found, err := s.cm.Get(ctx, cache.NameProvider, cacheKeyList, &cached); err != nil {
 		slog.WarnContext(ctx, "read provider list cache failed; fallback to db", "err", err)
 	} else if found {
-		return filterPaginateProviders(cached, req), nil
+		return s.withAggregates(ctx, filterPaginateProviders(cached, req))
 	}
 
 	ps, err := s.store.ListProviders(ctx)
@@ -275,7 +281,47 @@ func (s *providerService) List(ctx context.Context, req providerapi.ListProvider
 	if err := s.cm.Set(ctx, cache.NameProvider, cacheKeyList, all); err != nil {
 		slog.WarnContext(ctx, "set provider list cache failed", "err", err)
 	}
-	return filterPaginateProviders(all, req), nil
+	return s.withAggregates(ctx, filterPaginateProviders(all, req))
+}
+
+// withAggregates 列表项聚合填充：对分页窗口的当页 id 批量现读 health 与已启用模型数
+// （2 条 IN 查询，页大小 ≤100——非逐行 N+1）。health 不进列表缓存：探测 60s 一轮写库，
+// 进缓存必读到旧值（与 Get/fillHealth 同一先例），缓存载荷仍为 []ProviderSchema、聚合列每次现读。
+// 空页直接返回不发查询。id 是 schema 序列化字符串，parse 回 uint64 发查询——本模块自己
+// format 的十进制，解析失败属内部不变量破坏，按错误上抛。
+func (s *providerService) withAggregates(ctx context.Context, res *providerapi.ProviderListResult) (*providerapi.ProviderListResult, error) {
+	if len(res.Items) == 0 {
+		return res, nil
+	}
+	ids := make([]uint64, 0, len(res.Items))
+	idxByID := make(map[uint64]int, len(res.Items))
+	for i := range res.Items {
+		id, err := strconv.ParseUint(res.Items[i].ID, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse provider id %q: %w", res.Items[i].ID, err)
+		}
+		ids = append(ids, id)
+		idxByID[id] = i
+	}
+	hs, err := s.store.ListHealthByProviderIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list health by provider ids: %w", err)
+	}
+	counts, err := s.store.CountEnabledModelsByProviderIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("count enabled models by provider ids: %w", err)
+	}
+	for i := range hs {
+		if idx, ok := idxByID[hs[i].ProviderID]; ok {
+			res.Items[idx].Health = toHealthSchema(&hs[i])
+		}
+	}
+	for id, n := range counts {
+		if idx, ok := idxByID[id]; ok {
+			res.Items[idx].EnabledModelCount = n
+		}
+	}
+	return res, nil
 }
 
 // filterPaginateProviders 内存筛选（kind / enabled）+ 偏移分页；Total = 筛选后总数。
@@ -292,8 +338,12 @@ func filterPaginateProviders(all []providerapi.ProviderSchema, req providerapi.L
 	}
 	p := page.NewOffset(req.Page, req.PageSize)
 	start, end := clampWindow(p.Offset(), p.Limit(), len(filtered))
+	items := make([]providerapi.ProviderListItemSchema, 0, end-start)
+	for i := start; i < end; i++ {
+		items = append(items, providerapi.ProviderListItemSchema{ProviderSchema: filtered[i]})
+	}
 	return &providerapi.ProviderListResult{
-		Items:    filtered[start:end],
+		Items:    items,
 		Page:     p.Page,
 		PageSize: p.PageSize,
 		Total:    int64(len(filtered)),

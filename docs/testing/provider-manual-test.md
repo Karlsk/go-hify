@@ -253,3 +253,26 @@ curl -s -b /tmp/hify-jar -X POST localhost:8080/api/v1/providers/$PID/models/syn
 - [ ] 定时探测 up → degraded → down → up 时间线（§6）
 - [ ] `kill`（SIGTERM）优雅退出：`hify shutting down` 日志、进程退出码 0
 - [ ] 重启后缓存为空但功能正常（PG 是唯一事实源，Redis 只缓存）
+
+## 9. 前端联调走查（ProviderList + ProviderModelsDrawer，已接真实 API）
+
+前置：`cd web && npm run dev`（:5173，/api 代理到 :8080）；后端按 §1 起好、§2 登录（浏览器走 `/login` 页）。
+
+| # | 场景 | 操作 | 预期 |
+|---|---|---|---|
+| 1 | 列表加载 | 进入「模型提供商」页 | 信封拆包正常，行数据来自 GET /providers；分页器 total 正确 |
+| 2 | 健康状态列 | 未探测的新行 / §6 探测过的行 | 未探测显示灰 tag「未探测」；探测过的显示 正常(绿)/降级(黄)/故障(红) + 延迟 ms 小字 |
+| 3 | 模型数列 | §5 sync 过的 provider | 数字 = enabled=true 计数（sync 新增是 enabled=false，不计数）；点击数字打开模型抽屉 |
+| 4 | 连通性测试 | 点行内「测试」 | 按钮转 loading ≤10s；成功 toast `连接成功 · Xms · N 个模型`；失败 toast 含 error_message；结束后列表自动刷新、健康列更新 |
+| 5 | 新增提供商 | 「新增提供商」→ 填名称/类型 | openai/claude/gemini 不填 Key 无法提交（表单校验）；选「兼容网关」时 Base URL 变必填；创建成功 toast + 列表刷新 |
+| 6 | 编辑提供商 | 编辑任一行 | kind 下拉禁用（创建后不可改）；Key placeholder「已设置：留空保留」；「启用」开关回显当前状态；改名保存后列表刷新 |
+| 7 | PUT enabled 陷阱回归 | 停用某 provider → 编辑只改名保存 | enabled 保持停用（开关随行状态回显，PUT 全量提交不清掉） |
+| 8 | 删除提供商 | 删除 mock 桩 provider | 确认框红按钮；成功 toast + 行消失（models/health 级联） |
+| 9 | 抽屉·列表 | 点模型数打开抽屉 | 标题「{provider 名} · 模型」；能力/来源 tag、上下文 K、启用开关渲染正确；分页可用 |
+| 10 | 抽屉·同步 | 点「同步模型」 | toast `同步完成：新增 X，更新 Y`；新行 enabled=false（开关灰） |
+| 11 | 抽屉·启停开关 | 打开某模型开关 | 行内即时翻转；失败（如 embedding 缺 dim 的行）自动回滚 + 拦截器弹错 |
+| 12 | 抽屉·手动新增 | 「手动新增」 | 名称留空提交 → 库里 name=model_id；能力选 embedding 时出现「嵌入维度」必填项；chat 选 embedding 维度不发送 |
+| 13 | 抽屉·删除 | 删除自动发现的模型 | 确认 → 行消失；409 MODEL_IN_USE（被引用）时拦截器弹后端消息 |
+| 14 | 错误信封 | 断开后端点「测试」 | 拦截器统一 ElMessage.error，页面不崩、loading 复位 |
+
+走查后回归：§8 全项仍过。

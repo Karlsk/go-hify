@@ -264,6 +264,37 @@ func (m *memStore) GetHealthByProviderIDForUpdate(ctx context.Context, providerI
 	return m.GetHealthByProviderID(ctx, providerID)
 }
 
+// ListHealthByProviderIDs 批量读：只回存在的行（对齐 store 层 IN 查询语义）。
+func (m *memStore) ListHealthByProviderIDs(_ context.Context, ids []uint64) ([]ProviderHealth, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	hs := make([]ProviderHealth, 0, len(ids))
+	for _, id := range ids {
+		if h, ok := m.healths[id]; ok {
+			cp := *h
+			hs = append(hs, cp)
+		}
+	}
+	return hs, nil
+}
+
+// CountEnabledModelsByProviderIDs 批量计数：enabled=true 按提供商分组（对齐 GROUP BY 语义）。
+func (m *memStore) CountEnabledModelsByProviderIDs(_ context.Context, ids []uint64) (map[uint64]int32, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	counts := make(map[uint64]int32, len(ids))
+	for _, mo := range m.models {
+		if mo.Enabled && want[mo.ProviderID] {
+			counts[mo.ProviderID]++
+		}
+	}
+	return counts, nil
+}
+
 func (m *memStore) WithTx(_ context.Context, fn func(tx Store) error) error {
 	return fn(m) // 内存 store 无真实事务，直接同 store 回调（并发语义由 store 层 sqlmock 覆盖）
 }
