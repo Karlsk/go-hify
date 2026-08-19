@@ -180,7 +180,7 @@ func TestSyncModels_Kinds(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantName, mo.Name)
 			assert.Equal(t, providerapi.CapabilityChat, mo.Capability, "上游列表无能力元数据，默认 chat")
-			assert.True(t, mo.Enabled)
+			assert.False(t, mo.Enabled, "导入默认待启用，勾选走 PUT /models/:id")
 			assert.Equal(t, providerapi.SourceDiscovered, mo.Source)
 		})
 	}
@@ -222,6 +222,43 @@ func TestSyncModels_ManualProtectedAndDiscoveredRefresh(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, res.Added)
 	assert.Equal(t, 0, res.Updated)
+}
+
+// TestSyncModels_EnableChoiceSurvivesResync 勾选启用不被 sync 打回（sync_default_disabled_spec.md）：
+// 导入默认 enabled=false → PUT 启用 → 上游改名后再 sync → enabled 仍 true 且 name 跟进刷新。
+// 覆盖两条链路：Update 保留 source=discovered（后续 sync 仍认领 name 刷新）、
+// UpdateModelName 列级更新不碰 enabled（勾选状态不被幂等重跑重置）。
+func TestSyncModels_EnableChoiceSurvivesResync(t *testing.T) {
+	stub, base := newSyncStub(t, `{"data":[{"id":"gpt-4o","display_name":"GPT-4o"}]}`)
+	st, _, _, ms := newTestService(t)
+	ctx := context.Background()
+	pid := st.seed(&Provider{Name: "Compat", Kind: providerapi.KindOpenAICompatible, BaseURL: base, Enabled: true}).ID
+
+	res, err := ms.SyncModels(ctx, providerapi.SyncModelsReq{ID: pid})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Added)
+	mo, err := st.GetModelByProviderAndModelID(ctx, pid, "gpt-4o")
+	require.NoError(t, err)
+	assert.False(t, mo.Enabled, "导入默认待启用")
+
+	// 勾选启用：走现有 Update（PUT 语义，前端勾选框的落点）
+	upd, err := ms.Update(ctx, providerapi.UpdateModelReq{ID: mo.ID, ProviderID: pid,
+		Name: mo.Name, ModelID: mo.ModelID, Capability: providerapi.CapabilityChat, Enabled: true})
+	require.NoError(t, err)
+	assert.True(t, upd.Enabled)
+
+	// 上游改名后再 sync：name 刷新生效、勾选保持
+	stub.body = `{"data":[{"id":"gpt-4o","display_name":"GPT-4o 2026"}]}`
+	res, err = ms.SyncModels(ctx, providerapi.SyncModelsReq{ID: pid})
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.Added)
+	assert.Equal(t, 1, res.Updated)
+
+	mo, err = st.GetModelByProviderAndModelID(ctx, pid, "gpt-4o")
+	require.NoError(t, err)
+	assert.True(t, mo.Enabled, "勾选启用不被 sync 打回")
+	assert.Equal(t, "GPT-4o 2026", mo.Name, "name 仍跟进上游改名")
+	assert.Equal(t, providerapi.SourceDiscovered, mo.Source, "PUT 启用后仍归 discovered")
 }
 
 // TestSyncModels_EvictsDetailOnChangeOnly 缓存失效时机：有改动（added/updated>0）失效

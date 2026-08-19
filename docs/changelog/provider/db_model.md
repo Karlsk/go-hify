@@ -41,7 +41,7 @@ erDiagram
         numeric input_price "USD/百万token；NULL=不计费"
         numeric output_price "USD/百万token；NULL=不计费"
         integer embedding_dim "嵌入维度；仅capability=embedding有值"
-        boolean enabled "模型级停用；sync不覆盖"
+        boolean enabled "模型级停用；sync不覆盖；发现行默认false待启用(勾选走PUT)"
         text source "discovered=自动发现 / manual=手动录入"
         jsonb extra_params "白名单键：think_level等"
         timestamptz created_at "UTC"
@@ -117,7 +117,7 @@ erDiagram
 | `max_output_tokens` | Claude 协议 `max_tokens` 必填 |
 | `input_price` / `output_price`（USD/1M token，NULL = 不计费） | `platform/budget` 成本护栏 token→钱换算 |
 | `embedding_dim`（仅 embedding 行） | rag 建 KB 校验维度；`vector(维度)` 建后不可改 |
-| `enabled` | 模型级停用（发现会拉回上百个模型，只留常用的） |
+| `enabled` | 模型级停用（发现会拉回上百个模型，只留常用的；**发现行默认 false 待启用，勾选启用走 PUT，sync 列级更新不碰**，见 sync_default_disabled_spec.md） |
 | `source` | sync upsert 语义依据 |
 | `extra_params` | 模型级参数白名单：`think_level`（思考档位，chat 引擎读默认值）等 |
 

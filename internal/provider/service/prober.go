@@ -1,6 +1,6 @@
-// 手动连通性探测引擎（db_model.md §2.3 手动半边）：按 kind 分发探测端点，直连轻量 GET，
-// 不走 eino、不占 bulkhead、不触发熔断——探测只回答"端点可达吗、鉴权过吗"，不产生 token 消费。
-// 定时探测（StartProber）属后续批次，复用本引擎与状态机。
+// 连通性探测引擎（db_model.md §2.3）：按 kind 分发探测端点，直连轻量 GET，不走 eino、
+// 不占 bulkhead、不触发熔断——探测只回答"端点可达吗、鉴权过吗"，不产生 token 消费。
+// 手动 TestConnection 与定时 StartProber 共用本引擎与状态机（probeOne 单点，source 参数区分日志来源）。
 package service
 
 import (
@@ -213,12 +213,13 @@ func applyProbeResult(providerID uint64, old *ProviderHealth, r probeResult, now
 	return h
 }
 
-// probeOne 单 provider 探测写库核心（手动 TestConnection 与定时 runProbeRound 共用）：
-// 解密 key → probe（kind 分发端点，10s 超时）→ 事务内锁定读 → DEGRADED 状态机转移 →
-// UpsertHealth；状态翻转为 down 时打 WARN。返回探测结果本体四字段。
+// probeOne 单 provider 探测写库核心（手动 TestConnection 与定时 runProbeRound 共用，source
+// 标记日志来源 "manual" / "scheduled"）：解密 key → probe（kind 分发端点，10s 超时）→ 事务内
+// 锁定读 → DEGRADED 状态机转移 → UpsertHealth；每次探测落库后一条 INFO（source / provider /
+// status / latency / model_count，失败附 err 摘要），状态翻转为 down 时另打 WARN。
 // 解密失败（主密钥轮换后的旧密文）是本地配置问题而非供应商故障：不发请求、不动 health，
 // 以失败结果返回——避免把配置错误记成供应商 down。
-func (s *providerService) probeOne(ctx context.Context, p *Provider) (*providerapi.ConnectionTestSchema, error) {
+func (s *providerService) probeOne(ctx context.Context, p *Provider, source string) (*providerapi.ConnectionTestSchema, error) {
 	key := ""
 	if enc := p.AuthConfig[apiKeyEncryptedKey]; enc != "" {
 		pt, err := decryptAPIKey(s.master, enc)
@@ -235,6 +236,7 @@ func (s *providerService) probeOne(ctx context.Context, p *Provider) (*providera
 	res := probe(ctx, s.probe, p.Kind, p.BaseURL, key)
 	now := time.Now()
 	flippedToDown := false
+	newStatus := ""
 	// 事务内锁定读 → 状态机转移 → 写回：把"读 fail_count + 算 +1 + 写"做成原子，否则并发探测
 	// 都读到同一个 fail_count，连续失败阈值（≥3 → down）被延迟，破坏"连续失败≥3"契约。
 	if err := s.store.WithTx(ctx, func(tx Store) error {
@@ -243,6 +245,7 @@ func (s *providerService) probeOne(ctx context.Context, p *Provider) (*providera
 			return fmt.Errorf("get health of provider %d: %w", p.ID, err)
 		}
 		nh := applyProbeResult(p.ID, old, res, now)
+		newStatus = nh.Status
 		if (old == nil || old.Status != providerapi.HealthDown) && nh.Status == providerapi.HealthDown {
 			flippedToDown = true
 		}
@@ -250,6 +253,12 @@ func (s *providerService) probeOne(ctx context.Context, p *Provider) (*providera
 	}); err != nil {
 		return nil, fmt.Errorf("upsert health of provider %d: %w", p.ID, err)
 	}
+	attrs := []any{"source", source, "provider_id", p.ID, "name", p.Name,
+		"status", newStatus, "latency_ms", res.latency.Milliseconds(), "model_count", res.modelCount}
+	if res.errMsg != "" {
+		attrs = append(attrs, "err", res.errMsg) // 截断后的错误摘要（≤200 字符，无 key 材料）
+	}
+	slog.InfoContext(ctx, "provider probed", attrs...)
 	if flippedToDown {
 		slog.WarnContext(ctx, "provider flipped to down", "provider_id", p.ID, "kind", p.Kind,
 			"latency_ms", res.latency.Milliseconds(), "err", res.errMsg)
@@ -265,17 +274,19 @@ func (s *providerService) probeOne(ctx context.Context, p *Provider) (*providera
 // StartProber 启动定时健康探测循环：每 interval 轮询一轮，随 ctx 取消退出（优雅关闭）。
 // 由组合根 go func 启动（接线见 db_model §2.3.1）；只探 enabled=true；探测走直连 HTTP，
 // 不占 bulkhead、不触发熔断。time.Ticker 消费端忙时丢 tick（channel 缓冲 1），单轮 10s 上界
-// << 60s 间隔，无重叠。
+// << 60s 间隔，无重叠。启动 / 退出各一条 INFO（运维确认接线与优雅关闭生效的最直接线索）。
 func (s *providerService) StartProber(ctx context.Context) {
 	interval := s.interval
 	if interval <= 0 { // 防御：非 NewProviderService 构造的零值 interval 会令 NewTicker panic
 		interval = probeInterval
 	}
+	slog.InfoContext(ctx, "provider prober started", "interval", interval.String())
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			slog.InfoContext(ctx, "provider prober stopped")
 			return
 		case <-t.C:
 			s.runProbeRound(ctx)
@@ -285,14 +296,20 @@ func (s *providerService) StartProber(ctx context.Context) {
 
 // runProbeRound 单轮定时探测：ListProviders → 过滤 enabled → 每 provider 一个 goroutine 并发
 // probeOne（个位数量级；goroutine 代价≈0，无需线程池）。同步方法（WaitGroup 等全部探测收尾），
-// 供 StartProber 每轮调用、也供测试直调（不依赖真实 ticker）。
+// 供 StartProber 每轮调用、也供测试直调（不依赖真实 ticker）。轮末一条 INFO 汇总
+// （probed / ok / failed / duration_ms）——确认探测循环存活的最直接心跳线索。
 func (s *providerService) runProbeRound(ctx context.Context) {
+	start := time.Now()
 	ps, err := s.store.ListProviders(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "prober: list providers failed; retry next round", "err", err)
 		return
 	}
-	var wg sync.WaitGroup
+	var (
+		wg         sync.WaitGroup
+		mu         sync.Mutex
+		ok, failed int
+	)
 	for i := range ps {
 		p := &ps[i]
 		if !p.Enabled {
@@ -301,10 +318,23 @@ func (s *providerService) runProbeRound(ctx context.Context) {
 		wg.Add(1)
 		go func(p *Provider) {
 			defer wg.Done()
-			if _, err := s.probeOne(ctx, p); err != nil {
+			res, err := s.probeOne(ctx, p, "scheduled")
+			if err != nil {
+				// 存储层故障（探测本身没跑成）：不计入 ok/failed，ERROR 单独可见。
 				slog.ErrorContext(ctx, "prober: probe provider failed", "provider_id", p.ID, "err", err)
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if res.Success {
+				ok++
+			} else {
+				failed++
 			}
 		}(p)
 	}
 	wg.Wait()
+	slog.InfoContext(ctx, "provider probe round done",
+		"probed", ok+failed, "ok", ok, "failed", failed,
+		"duration_ms", time.Since(start).Milliseconds())
 }

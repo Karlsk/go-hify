@@ -386,7 +386,7 @@ func (s *providerService) TestConnection(ctx context.Context, req providerapi.Te
 		}
 		return nil, fmt.Errorf("get provider %d: %w", req.ID, err)
 	}
-	return s.probeOne(ctx, p)
+	return s.probeOne(ctx, p, "manual")
 }
 
 // ---- ModelService ----

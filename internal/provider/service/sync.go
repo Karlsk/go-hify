@@ -27,9 +27,10 @@ type discoveredModel struct {
 
 // SyncModels 自动发现并同步模型列表（只增改不删，不覆盖手编字段）：
 // 解密 key → 直连 GET 上游模型目录（probeTarget 组 URL / 认证头，10s 超时）→ 按 kind 解析 →
-// 一次载入库内全表做内存 diff 后按变化集落库：新条目批量插入（capability=chat、enabled=true、
-// source=discovered）、discovered 行仅列级刷新 name、manual 行完全跳过；批量插入撞唯一约束
-// （与手工创建竞态）退回逐条、冲突行跳过。
+// 一次载入库内全表做内存 diff 后按变化集落库：新条目批量插入（capability=chat、enabled=false
+// 待启用——勾选启用走 PUT /models/:id，sync 不覆盖 enabled，sync_default_disabled_spec.md）、
+// discovered 行仅列级刷新 name、manual 行完全跳过；批量插入撞唯一约束（与手工创建竞态）退回
+// 逐条、冲突行跳过。
 // 有改动才失效 detail 缓存（失效矩阵：model 增删改失效 detail，list 是 providers 快照不涉及）。
 //
 // 限制（上游列表不含该元数据，wiring_sync_spec.md §3.2）：capability 固定 chat（embedding
@@ -148,8 +149,9 @@ func parseModels(kind string, r io.Reader) ([]discoveredModel, error) {
 
 // applyDiscovered 把上游目录落到库内，返回 (added, updated)。一次 ListModelsByProvider 载入
 // 全表做内存 diff（消 N+1：300 模型从 ~600 次往返降到 1 读 + k 写），再按变化集发写：
-//   - 新条目（库内无 model_id）→ CreateModels 批量插入（单条多 VALUES）；整批撞唯一约束
-//     （与手工创建竞态）时退回逐条插入、冲突行跳过；
+//   - 新条目（库内无 model_id）→ CreateModels 批量插入（单条多 VALUES，enabled=false 待启用：
+//     上游目录会带回几十上百个模型，导入默认停用、按需勾选启用，UpdateModelName 列级更新保证
+//     勾选状态不被后续 sync 打回）；整批撞唯一约束（与手工创建竞态）时退回逐条插入、冲突行跳过；
 //   - discovered 行且 name 与上游不一致 → UpdateModelName 列级 UPDATE（只写 name /
 //     updated_at，WHERE 限定 source）——不用全列 Save，防止并发手工编辑被旧快照覆盖；
 //   - manual 行完全跳过（手编保护，含 display_name）。
@@ -183,7 +185,7 @@ func (s *modelService) applyDiscovered(ctx context.Context, providerID uint64, m
 			Name:        dm.displayName,
 			ModelID:     dm.modelID,
 			Capability:  providerapi.CapabilityChat,
-			Enabled:     true,
+			Enabled:     false, // 待启用：勾选走 PUT /models/:id；sync 列级更新不碰 enabled
 			Source:      providerapi.SourceDiscovered,
 			ExtraParams: map[string]any{},
 		})

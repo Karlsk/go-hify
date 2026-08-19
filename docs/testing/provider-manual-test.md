@@ -43,8 +43,10 @@ make build-backend && ./bin/hify migrate up   # 预期逐条 migration applied
 curl -s localhost:8080/health | jq .
 ```
 
-**预期**：`{"success":true,"data":"Hify is running",...}`；启动日志含 `hify ready`。
-（graceful shutdown 本批已接：`kill %1` 应输出 `hify shutting down` 后干净退出，无 panic。）
+**预期**：`{"success":true,"data":"Hify is running",...}`；启动日志含 `hify ready` 与
+`provider prober started`（含 interval）。
+（graceful shutdown 本批已接：`kill %1` 应输出 `hify shutting down` 与 `provider prober stopped`
+后干净退出，无 panic。）
 
 ## 2. 登录链（后续所有请求都要带 cookie）
 
@@ -118,6 +120,7 @@ curl -s -b /tmp/hify-jar -X POST localhost:8080/api/v1/providers/$PID/test-conne
 
 **预期**：mock 桩在线时 200 + `{"success":true,"latency_ms":<个位数>,"model_count":2}`；
 桩关掉后仍 **HTTP 200** 但 `success:false` + `error_message`（探测失败是业务结果不是 HTTP 错误）。
+服务日志对应一条 `provider probed`（`source:"manual"`、`status`、`latency_ms`）。
 随后 `GET /providers/$PID` 的 `health.status` 变为 `"up"`（或桩关掉时 `"degraded"`，首次失败）。
 
 ### 3.6 删除
@@ -177,7 +180,18 @@ curl -s -b /tmp/hify-jar 'localhost:8080/api/v1/providers/'$PID'/models' | jq '.
 ```
 
 **预期**：两条入库，`source:"discovered"`、`capability:"chat"`（上游列表无能力元数据的默认值）、
-`name` 回退 model_id、`enabled:true`。
+`name` 回退 model_id、**`enabled:false`（导入默认待启用）**。
+
+**勾选启用（sync_default_disabled_spec.md）**：
+
+```bash
+# 从上面列表输出拿到 mock-chat 的 id（下文以 $MID 代称），PUT 翻 enabled
+curl -s -b /tmp/hify-jar -X PUT localhost:8080/api/v1/models/$MID -H 'Content-Type: application/json' \
+  -d '{"provider_id":'"$PID"',"name":"mock-chat","model_id":"mock-chat","capability":"chat","enabled":true}' | jq '.data.enabled'  # → true
+# 再 sync 一轮（同目录），勾选不被打回
+curl -s -b /tmp/hify-jar -X POST localhost:8080/api/v1/providers/$PID/models/sync | jq '.data'   # → {"added":0,"updated":0}
+curl -s -b /tmp/hify-jar 'localhost:8080/api/v1/providers/'$PID'/models' | jq '.data[]|select(.model_id=="mock-chat")|.enabled'  # → true
+```
 
 **手编保护**：手动 PUT 改 `mock-chat` 的 name 为 "我改过的"，把桩重启为不同目录
 （如 `{"data":[{"id":"mock-chat"},{"id":"mock-embed"},{"id":"mock-new"}]}`）再 sync：
@@ -197,11 +211,17 @@ curl -s -b /tmp/hify-jar -X POST localhost:8080/api/v1/providers/$PID/models/syn
 
 前提：`$PID` 指向 mock 桩且 enabled=true。
 
+日志观测（确认 ticker 存活的最直接线索，每分钟各一条）：
+`provider probe round done`（probed/ok/failed/duration_ms 轮汇总）+ 每个 enabled provider 的
+`provider probed`（`source:"scheduled"`、status、latency_ms、model_count）。
+
 1. **up**：桩在线，等 60-70s 后 `GET /providers/$PID` → `health.status:"up"`、`last_check_at` 每分钟刷新。
 2. **degraded → down**：kill 桩，约 1 分钟后 status 变 `degraded`（fail_count=1..2），
-   连续 3 轮失败（约 3-4 分钟）后变 `down`，服务日志出现一条 `provider flipped to down` WARN。
+   连续 3 轮失败（约 3-4 分钟）后变 `down`，服务日志出现一条 `provider flipped to down` WARN
+   （同轮 `provider probed` 的 `status:"down"`）。
 3. **恢复**：重启桩，下一轮回到 `up`（fail_count 清零）。
-4. **停用豁免**：PUT `enabled:false` 后即使桩关闭，health 不再变化。
+4. **停用豁免**：PUT `enabled:false` 后即使桩关闭，health 不再变化
+   （轮汇总 `probed` 计数减一，该 provider 不再有 `provider probed` 行）。
 
 > 观察加速：也可以每轮手动 `POST .../test-connection` 复用同一状态机，但定时轮验的就是
 > "没人戳也会自己探测"，建议至少等满一轮确认 ticker 在跑。

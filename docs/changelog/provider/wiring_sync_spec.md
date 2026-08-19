@@ -110,7 +110,7 @@ return nil // ErrServerClosed 不上抛：Shutdown 触发的返回是正常路�
 
 | 库内状态 | 动作 | 计数 |
 |---|---|---|
-| 无行 | 收进 `toInsert`，`CreateModels` 批量插入（单条多 VALUES）：`Name=DisplayName`、`Capability=chat`、`Enabled=true`、`Source=discovered`、`ExtraParams={}` | Added += 批量成功行数 |
+| 无行 | 收进 `toInsert`，`CreateModels` 批量插入（单条多 VALUES）：`Name=DisplayName`、`Capability=chat`、`Enabled=false`（待启用，勾选走 PUT /models/:id，见 sync_default_disabled_spec.md）、`Source=discovered`、`ExtraParams={}` | Added += 批量成功行数 |
 | 有行且 `source=discovered` 且 name 与上游不一致 | `UpdateModelName` 列级 UPDATE：只写 `name`/`updated_at`，WHERE 限定 `source='discovered'`——不用全列 Save，防并发手工编辑被旧快照覆盖 | Updated++ |
 | 有行且 `source=manual` | 完全跳过（手编行受保护，含 display_name） | — |
 | 有行且 source=discovered 且 name 一致 | 不动 | — |
