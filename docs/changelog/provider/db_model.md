@@ -1,6 +1,6 @@
 # Provider 模块数据模型（db_model）
 
-> 状态：**已落地数据层、契约层、CRUD 全链路与手动连通性探测**（2026-08-18）：00002 最终态三张表 + `provider/api/`（schema / 接口 / 哨兵 / 测试）+ `service/crypto.go`（AES-256-GCM）+ `service/service.go`（ProviderService / ModelService CRUD、Cache-Aside 缓存、23505/23503 翻译）+ `service/prober.go`（kind 分发探测 + DEGRADED 状态机，TestConnection 已实现）+ `store/store.go`（GORM 15 方法含 UpsertHealth，sqlmock 测试绿）均已就位；主密钥经 `config.ProviderCfg`（`PROVIDER_MASTER_KEY`，启动缺失 fail-fast）。探测设计要点：detail 缓存载荷**剔除 health**（探测写库不失效缓存，Get 现读 provider_health 单行填充）；解密失败（主密钥轮换后旧密文）不发请求、不动 health，以失败结果返回。剩余：handler 挂路由、StartProber、models sync（见《落地顺序》第 4 步后半 / 第 5 步）。
+> 状态：**已落地数据层、契约层、CRUD 全链路与手动连通性探测**（2026-08-18）：00002 最终态三张表 + `provider/api/`（schema / 接口 / 哨兵 / 测试）+ `service/crypto.go`（AES-256-GCM）+ `service/service.go`（ProviderService / ModelService CRUD、Cache-Aside 缓存、23505/23503 翻译）+ `service/prober.go`（kind 分发探测 + DEGRADED 状态机，TestConnection 已实现）+ `store/store.go`（GORM 15 方法含 UpsertHealth，sqlmock 测试绿）均已就位；主密钥经 `config.ProviderCfg`（`PROVIDER_MASTER_KEY`，启动缺失 fail-fast）。探测设计要点：detail 缓存载荷**剔除 health**（探测写库不失效缓存，Get 现读 provider_health 单行填充）；解密失败（主密钥轮换后旧密文）不发请求、不动 health，以失败结果返回。剩余：handler 挂路由（spec 见 [handler_spec.md](handler_spec.md)）、组合根接线（StartProber 启动 + handler 注册）、models sync 真实实现（见《落地顺序》第 4 / 5 步）。
 > 本文记录 provider 模块数据模型的最终结论、决策理由与相关约定；表归属总览见 [docs/design/data-model.md](../../design/data-model.md)，建表通用规范见 CLAUDE.md《数据库规范》。
 
 ## 1. 实体关系
@@ -148,7 +148,45 @@ erDiagram
 
 阈值（slow = 3s、fail = 3 次）先做包内常量，需要再提 env。
 
-**定时探测运行时形态**：service 内 `StartProber(ctx)`——`app.Run` 启动、随 ctx 优雅退出；默认 60s 一轮；只探 `enabled=true`；每 provider 一个 goroutine（个位数量级）+ 独立 5s 探测超时；探测是直连 HTTP 轻量调用，**不走 eino、不占 bulkhead、不触发熔断**（与 platform/llm 运行时状态互不干扰）；翻转为 `down` 打 WARN 日志。探测端点按 kind：openai/claude/gemini → `GET /models`，ollama → `GET /api/tags`，openai_compatible → `GET {base_url}/models`（结果分类：2xx/429 = 成功，401/403 = 鉴权失败，其余 = 失败；404 特例后续按需细化）。
+**定时探测运行时形态**：service 内 `StartProber(ctx)`——`app.Run` 启动、随 ctx 优雅退出；默认 60s 一轮；只探 `enabled=true`；每 provider 一个 goroutine（个位数量级）+ 复用 10s 探测超时（probeTimeout，单 client 单代码路径）；探测是直连 HTTP 轻量调用，**不走 eino、不占 bulkhead、不触发熔断**（与 platform/llm 运行时状态互不干扰）；翻转为 `down` 打 WARN 日志。探测端点按 kind：openai/claude/gemini → `GET /models`，ollama → `GET /api/tags`，openai_compatible → `GET {base_url}/models`（结果分类：2xx/429 = 成功，401/403 = 鉴权失败，其余 = 失败；404 特例后续按需细化）。
+
+### 2.3.1 定时探测落地 spec（StartProber，2026-08-18 定）
+
+> 需求澄清结论（已交互确认）：复用 DEGRADED 状态机——慢成功（2xx 但 latency > 3s）记 `degraded`，**非 up**；失败不足 3 次也记 `degraded`（防抖动）。范围仅 service 层 + 测试，组合根接线留 TODO。探测超时复用 10s（probeTimeout），上文「5s」为落地前的过时值，已更正。
+
+**Java 概念 → Go 映射**（对齐现有实现，无新建机制）：
+
+| Java | Go |
+|---|---|
+| `@Scheduled(fixedRate=60s)` | `time.Ticker` + goroutine + `select ctx.Done()` |
+| `asyncExecutor` 线程池 | 每 provider 一个 goroutine（个位数量级；goroutine 代价≈0，无需线程池） |
+| 「不阻塞主线程」 | 组合根 `go func` 启动 `StartProber`，主 goroutine 继续跑 gin |
+
+**代码结构（全部在 `internal/provider/service/`，prober.go 为主）**：
+
+1. **抽 `probeOne(ctx, p *Provider) (*providerapi.ConnectionTestSchema, error)`**——把 `TestConnection` 的「解密 → probe → WithTx(锁读 → applyProbeResult → UpsertHealth)」核心体抽出；`TestConnection` 与 `runProbeRound` 共用同一探测写库逻辑，避免定时路径二次 `GetProviderByID`。`TestConnection` 瘦身为 validate → GetProviderByID → probeOne，行为不变（既有用例全绿）。
+
+2. **down 翻转 WARN**（§2.3 已定）：`probeOne` 内锁读后比较 `old.Status` 与 `applyProbeResult` 结果，`old.Status != down && new == down` 时 `slog.WarnContext(ctx, ..., "provider_id", p.ID, "latency", ...)`。手动与定时共用，语义一致。
+
+3. **`StartProber(ctx)`（concrete 方法，不进 `providerapi.ProviderService` 接口）**：`time.NewTicker(s.interval)` 循环，`select { <-ctx.Done() → return; <-t.C → runProbeRound(ctx) }`，`defer t.Stop()`。生命周期接缝在接线批次解决（见下方「接线注记」）。
+
+4. **`runProbeRound(ctx)`（同步方法，测试直调，不依赖真实 ticker）**：`ListProviders` → 过滤 `Enabled` → 每 provider 一个 goroutine 调 `probeOne`（`sync.WaitGroup` 收尾）→ `probeOne` 返回 err 时 `slog.ErrorContext`。
+
+5. **常量**：`probeInterval = time.Minute`（包内常量，与其余探测阈值一致「暂不进配置」）；`providerService` 增 `interval time.Duration` 字段，`NewProviderService` 默认 `probeInterval`，测试注入短间隔。
+
+6. **并发安全**：`*http.Client` 并发安全（`s.probe` 跨 goroutine 共享）；`applyProbeResult` 纯函数 + `WithTx` 内 `FOR UPDATE` 已串行化 fail_count 读改写（§2.3 既有机制，定时路径直接继承）；`time.Ticker` 消费端忙时丢 tick（channel 缓冲 1），单轮 10s 上界 << 60s 间隔，无重叠。
+
+7. **解密失败**（主密钥轮换后的旧密文）沿用 `TestConnection` 语义：不发请求、不写 health，`slog.Warn` + 返回失败 schema；定时路径同样不把配置错误记成 down。
+
+**接线注记**：`NewProviderService` 现返回 `providerapi.ProviderService`（接口），`StartProber` 在未导出的 concrete 类型上，组合根拿不到。接线批次二选一：定义窄接口 `type Prober interface{ StartProber(ctx context.Context) }` 让 New 返回 `(providerapi.ProviderService, Prober)`，或组合根持有导出 concrete 类型。本批次只在 `internal/app/server.go` 的 provider 装配块留 TODO 注释说明，不实现。
+
+**测试（`prober_test.go` / `provider_service_test.go` 增补，覆盖率 ≥80%）**：
+
+- `runProbeRound` 只探 enabled（seed 2 enabled + 1 disabled，断言 `upsertHealthCalls == 2`）
+- `runProbeRound` 探测成功写 health（httptest 桩，断言 memStore.healths 状态 up / latency 落列）
+- `StartProber` 预取消 ctx 立即返回（优雅关闭路径）
+- `StartProber` 注入短 interval（10ms）触发 ≥1 轮后取消
+- `probeOne` 抽离后 `TestConnection` 既有用例全绿（行为不变）
 
 ### 2.4 方言与通用约定（对照 MySQL 写法）
 
@@ -310,5 +348,5 @@ func (ProviderHealth) TableName() string { return "provider_health" }
 1. 重写 `migrations/00002_provider.sql`（本文 §3）+ dev 库重置验证 ✅
 2. `service/model.go`（本文 §4）+ `service/crypto.go`（AES-256-GCM 加解密与打码）✅
 3. `api/`：接口、schema、哨兵 ✅
-4. `store/` + `service/`：CRUD（✅ 2026-08-18：缓存失效矩阵、加密落库、双服务）、test-connection 状态机（✅ 2026-08-18：`service/prober.go` 探测引擎 + DEGRADED 转移 + UpsertHealth；detail 缓存剔除 health 改现读）、StartProber、models sync（未做）
-5. `handler/` 挂路由；前端 ProviderList 对接（未做）
+4. `store/` + `service/`：CRUD（✅ 2026-08-18：缓存失效矩阵、加密落库、双服务）、test-connection 状态机（✅ 2026-08-18：`service/prober.go` 探测引擎 + DEGRADED 转移 + UpsertHealth；detail 缓存剔除 health 改现读）、StartProber（✅ 2026-08-19：`StartProber`/`runProbeRound` 落地并过审查，接线见 §2.3.1 末注）、models sync（service 层占位 503，真实实现待 platform/llm 模型发现批次）
+5. `handler/` 挂路由（spec 已定 [handler_spec.md](handler_spec.md)，待实现：12 端点含模型路由 + service 两处一行配套改）；组合根接线（与 StartProber 启动同批）；前端 ProviderList 对接（未做）
