@@ -59,6 +59,7 @@ command -v curl >/dev/null 2>&1 || die "未找到 curl（健康检查依赖它�
 env_value() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | tr -d '\r' || true; }
 
 SERVER_PORT="$(env_value SERVER_PORT)"; SERVER_PORT="${SERVER_PORT:-8080}"
+export SERVER_PORT # 供 web/vite.config.ts 的 /api 代理目标同源（改 .env 一处即可）
 PG_DSN="$(env_value PG_DSN)"
 [[ -n "$PG_DSN" ]] || die ".env 缺 PG_DSN"
 REDIS_ADDR="$(env_value REDIS_ADDR)"; REDIS_ADDR="${REDIS_ADDR:-localhost:6379}"

@@ -8,6 +8,9 @@ const pkg = JSON.parse(
   readFileSync(new URL('./package.json', import.meta.url), 'utf-8'),
 ) as { version: string }
 
+// 后端端口：start.sh 从 .env 读 SERVER_PORT 后 export（本地端口被占用时 .env 改一处即可）
+const apiTarget = `http://localhost:${process.env.SERVER_PORT ?? '8080'}`
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [vue()],
@@ -21,15 +24,15 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // /api → 后端 Go (Gin)，默认 localhost:8080（见 .env: SERVER_PORT）
     proxy: {
+      // /api → 后端 Go (Gin)；端口与 .env SERVER_PORT 同源（默认 8080）
       '/api': {
-        target: 'http://localhost:8080',
+        target: apiTarget,
         changeOrigin: true,
       },
       // /health 在 /api/v1 之外（探活、不走鉴权），dev 下单独转发
       '/health': {
-        target: 'http://localhost:8080',
+        target: apiTarget,
         changeOrigin: true,
       },
     },
