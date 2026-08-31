@@ -24,6 +24,11 @@ func TestConstantsPinned(t *testing.T) {
 	assert.Equal(t, 2.0, TemperatureMax)
 	assert.Equal(t, 0.7, DefaultTemperature)
 
+	// 上下文轮数边界与 migrations 00009 的 DEFAULT 10 / binding 1-100 对齐。
+	assert.Equal(t, 1, MaxContextTurnsMin)
+	assert.Equal(t, 100, MaxContextTurnsMax)
+	assert.Equal(t, 10, DefaultMaxContextTurns)
+
 	// 绑定上限与 binding tag max=100 对齐（防提示词无界膨胀）。
 	assert.Equal(t, 100, MaxToolBindings)
 }
@@ -75,6 +80,8 @@ func TestAgentSchema_JSON(t *testing.T) {
 	s.Name = "客服助手"
 	s.ModelID = "5"
 	s.Temperature = 0.7
+	s.MaxContextTurns = 10
+	s.Enabled = true
 
 	b, err := json.Marshal(s)
 	assert.NoError(t, err)
@@ -85,10 +92,28 @@ func TestAgentSchema_JSON(t *testing.T) {
 	assert.Equal(t, "5", m["model_id"])
 	assert.Equal(t, "客服助手", m["name"])
 	assert.Equal(t, 0.7, m["temperature"])
+	assert.Equal(t, float64(10), m["max_context_turns"])
+	assert.Equal(t, true, m["enabled"])
 	assert.Nil(t, m["fallback_model_id"], "未设置备用模型 → null")
 	assert.Nil(t, m["max_output_tokens"], "跟随模型默认 → null")
 	assert.Contains(t, m, "created_at")
 	assert.Contains(t, m, "updated_at")
+}
+
+func TestAgentListItem_JSON(t *testing.T) {
+	// 列表项 = AgentSchema 展平 + 聚合列；悬空引用 ModelName=""（前端 fallback model_id）。
+	it := AgentListItem{ModelName: "gpt-4o", ToolCount: 2}
+	it.ID = "1"
+	it.ModelID = "5"
+	b, err := json.Marshal(it)
+	assert.NoError(t, err)
+	var m map[string]any
+	assert.NoError(t, json.Unmarshal(b, &m))
+
+	assert.Equal(t, "gpt-4o", m["model_name"], "聚合列展平在列表项上")
+	assert.Equal(t, float64(2), m["tool_count"])
+	assert.Contains(t, m, "name", "嵌入 AgentSchema 字段展平")
+	assert.Contains(t, m, "enabled")
 }
 
 func TestAgentDetailSchema_JSONToolIDs(t *testing.T) {

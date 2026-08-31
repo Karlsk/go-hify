@@ -70,10 +70,10 @@ func (f *fakeSvc) List(_ context.Context, req agentapi.ListAgentsReq) (*agentapi
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	items := make([]agentapi.AgentSchema, 0, len(ids))
+	items := make([]agentapi.AgentListItem, 0, len(ids))
 	for _, id := range ids {
 		s := f.agents[id].AgentSchema
-		items = append(items, s)
+		items = append(items, agentapi.AgentListItem{AgentSchema: s})
 	}
 	return &agentapi.AgentListResult{Items: items, Page: req.Page, PageSize: req.PageSize, Total: int64(len(items))}, nil
 }

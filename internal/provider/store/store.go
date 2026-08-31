@@ -144,6 +144,22 @@ func (s *Store) ListModelsByProvider(ctx context.Context, providerID uint64) ([]
 	return items, nil
 }
 
+// ListModelsByIDs 按 id 集合批量取模型（id 升序）；跨模块列表聚合用（agent 列表 model_name 映射）。
+// 缺行不算错——悬空引用由调用方归零值处理。IN 而非 ANY：GORM 对 slice 参数按逗号展开
+// （`= ANY($1,$2)` 非法）；调用方限 1-100 个 id，在 IN 上限内。
+func (s *Store) ListModelsByIDs(ctx context.Context, ids []uint64) ([]providersvc.Model, error) {
+	var items []providersvc.Model
+	err := s.db.WithContext(ctx).
+		Where("id IN ?", ids).
+		Select(selectModel).
+		Order("id").
+		Find(&items).Error
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 // ListModels 某提供商下模型偏移分页（小表，OFFSET 可接受，见 CLAUDE.md《分页》）：
 // 先精确 Count，再 Apply(offset/limit) + ORDER BY id 取本页。
 // 每条语句从 base 重derive——GORM 的 *gorm.DB 在 finisher（Count）后复用有连锁状态风险。

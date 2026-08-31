@@ -169,6 +169,11 @@ func (f fakeModelSvc) List(_ context.Context, req providerapi.ListModelsReq) (*p
 	return &providerapi.ModelListResult{Items: items, Page: page, PageSize: size, Total: int64(len(items))}, nil
 }
 
+// ListByIDs handler 不触达（无对应端点）；满足 ModelService 接口的空实现。
+func (f fakeModelSvc) ListByIDs(_ context.Context, _ providerapi.ListModelsByIDsReq) ([]providerapi.ModelSchema, error) {
+	return nil, nil
+}
+
 func (f fakeModelSvc) Update(_ context.Context, req providerapi.UpdateModelReq) (*providerapi.ModelSchema, error) {
 	if f.injected != nil {
 		return nil, f.injected

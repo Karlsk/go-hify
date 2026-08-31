@@ -70,21 +70,31 @@ curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/models -H 'Content-Type: 
 ## 4. 创建（POST /agents）
 
 ```bash
-# 完整字段：备用模型 + 显式 temperature + max_output_tokens
+# 完整字段：备用模型 + 显式 temperature + max_output_tokens + max_context_turns + enabled
 curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/agents -H 'Content-Type: application/json' \
   -d '{"name":"客服助手","description":"售后问答","model_id":1,"fallback_model_id":2,
-       "system_prompt":"你是售后客服","temperature":0.3,"max_output_tokens":4096}' | jq .
+       "system_prompt":"你是售后客服","temperature":0.3,"max_output_tokens":4096,
+       "max_context_turns":20,"enabled":true}' | jq .
 ```
 
 **预期** 201 信封：`data.id="1"`（字符串）、`model_id="1"`、`fallback_model_id="2"`、
-`temperature=0.3`、双时间戳 RFC 3339。注意请求侧 `model_id` 是**数字**（`"model_id":1`），
-响应侧一律字符串。
+`temperature=0.3`、`max_context_turns=20`、`enabled=true`、双时间戳 RFC 3339。
+注意请求侧 `model_id` 是**数字**（`"model_id":1`），响应侧一律字符串。
 
 ```bash
-# 最小字段：temperature 缺省 0.7、fallback 为 null
+# 最小字段：temperature / max_context_turns / enabled 缺省 0.7 / 10 / true、fallback 为 null
 curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/agents -H 'Content-Type: application/json' \
-  -d '{"name":"裸 Agent","model_id":1}' | jq -c '{temp: .data.temperature, fb: .data.fallback_model_id}'
-# → {"temp":0.7,"fb":null}
+  -d '{"name":"裸 Agent","model_id":1}' \
+  | jq -c '{temp: .data.temperature, turns: .data.max_context_turns, en: .data.enabled, fb: .data.fallback_model_id}'
+# → {"temp":0.7,"turns":10,"en":true,"fb":null}
+
+# 显式停用（enabled=false 是合法显式值，不得被缺省 true 吞掉）
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/agents -H 'Content-Type: application/json' \
+  -d '{"name":"停用 Agent","model_id":1,"enabled":false}' | jq -c '.data.enabled'   # → false
+
+# 轮数越界（binding 1-100）
+curl -s -o /dev/null -w '%{http_code}\n' -b /tmp/hify-jar -X POST localhost:8081/api/v1/agents \
+  -H 'Content-Type: application/json' -d '{"name":"x","model_id":1,"max_context_turns":0}'   # → 400
 ```
 
 ## 5. 创建的失败路径
@@ -118,11 +128,22 @@ curl -s -o /dev/null -w '%{http_code}\n' -b /tmp/hify-jar localhost:8081/api/v1/
 
 ## 7. 列表（GET /agents）
 
+列表项 = Agent 全字段 + 两列**当页批量现读的聚合列**（`model_name` / `tool_count`，防 N+1）；
+无 `tool_ids`（绑定走详情）。
+
 ```bash
+curl -s -b /tmp/hify-jar 'localhost:8081/api/v1/agents?page=1&page_size=10' \
+  | jq -c '.data[] | {name, model_name, tool_count, enabled, max_context_turns}'
+# → {"name":"客服助手","model_name":"GPT-4o","tool_count":0,"enabled":true,"max_context_turns":10} ...
 curl -s -b /tmp/hify-jar 'localhost:8081/api/v1/agents?page=1&page_size=10' | jq -c '{n: (.data|length), .meta}'
-# → {"n":2,"meta":{"page":1,"page_size":10,"total":2}}   列表项无 tool_ids（绑定走详情，防 N+1）
+# → {"n":2,"meta":{"page":1,"page_size":10,"total":2}}
 curl -s -o /dev/null -w '%{http_code}\n' -b /tmp/hify-jar 'localhost:8081/api/v1/agents?page_size=999'  # → 400
 ```
+
+聚合口径：`model_name` 来自当页去重 model_id 批量查（provider `ListByIDs`），
+**模型被删的悬空引用返回空串 `""`**（前端 fallback 显示裸 id）；`tool_count` 来自
+agent_tools 按 agent_id 分组计数（本模块 `CountToolsByAgentIDs`，IN 批量——GORM 对
+slice 参数按逗号展开，`= ANY($1,$2)` 是非法语法）。
 
 ## 8. 更新（PUT /agents/:id，整体覆盖）
 
@@ -132,6 +153,11 @@ curl -s -b /tmp/hify-jar -X PUT localhost:8081/api/v1/agents/1 -H 'Content-Type:
   -d '{"id":999,"name":"客服助手v2","model_id":1,"system_prompt":"新提示词","temperature":0}' \
   | jq -c '{id: .data.id, name: .data.name, temp: .data.temperature}'
 # → {"id":"1","name":"客服助手v2","temp":0}
+
+# PUT 漏发 enabled / max_context_turns 会被置回缺省 true / 10（PUT 全量语义——前端必须显式提交）
+curl -s -b /tmp/hify-jar -X PUT localhost:8081/api/v1/agents/1 -H 'Content-Type: application/json' \
+  -d '{"name":"x","model_id":1,"enabled":false}' | jq -c '{en: .data.enabled, turns: .data.max_context_turns}'
+# → {"en":false,"turns":10}    （显式 false 生效；未传 turns → 置回 10）
 
 # 写时删 key：update 后缓存键应消失，再 get 拿到新值（并重新回填）
 docker exec hify-redis-test redis-cli --scan --pattern 'hify:cache:agent-cache:*' | wc -l   # → 0
@@ -179,3 +205,13 @@ docker exec hify-redis-test redis-cli --scan --pattern 'hify:cache:agent-cache:*
   401（未登录）、404（AGENT_NOT_FOUND / MODEL_NOT_FOUND / TOOL_NOT_FOUND，FK 23503 实测触发）
 - 缓存三态：miss 回填 → 命中 → update/delete 写时删 key（TTL 30min 兜底）
 - 软删语义：DB 行保留、get/list 不可见、重复删 404
+
+### 二次走查（2026-08-31 下午，enabled / max_context_turns + 列表聚合，全部通过）
+
+- 迁移 00009 两列上线：创建缺省 `true` / `10`，显式 `false` / 自定义轮数生效，越界 400
+- PUT 全量语义：漏发 enabled / turns 置回 `true` / `10`（前端编辑必须显式提交两字段）
+- 列表聚合：`model_name` 批量映射正确（悬空引用 `""`）、`tool_count` 分组计数正确；
+  走查中发现并修复 `= ANY(?)` + GORM slice 展开导致的 SQL 语法错误（改 `IN ?`）
+- 前端链路（经 5173 Vite 代理，与浏览器同路径）：列表 / 模型下拉（provider→models 过滤
+  enabled chat）/ 创建（数值转换载荷）/ 更新 / 详情回填 / 删除 204 全通；
+  Vite 代理目标改为随 `SERVER_PORT` 环境变量（start.sh export），本地 8081 端口不再写死

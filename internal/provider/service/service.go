@@ -41,6 +41,8 @@ type Store interface {
 	GetModelByID(ctx context.Context, id uint64) (*Model, error)
 	GetModelByProviderAndModelID(ctx context.Context, providerID uint64, modelID string) (*Model, error)
 	ListModelsByProvider(ctx context.Context, providerID uint64) ([]Model, error) // 详情聚合用，id 升序
+	// ListModelsByIDs 按 id 集合批量取模型（id 升序）；跨模块列表聚合用，缺行不算错。
+	ListModelsByIDs(ctx context.Context, ids []uint64) ([]Model, error)
 	ListModels(ctx context.Context, providerID uint64, p page.OffsetParams) (page.OffsetResult[Model], error)
 	// CountEnabledModelsByProviderIDs 列表聚合用批量计数：models.enabled=true 按提供商分组；
 	// map 无键 = 0（该提供商无已启用模型）。
@@ -518,6 +520,23 @@ func (s *modelService) List(ctx context.Context, req providerapi.ListModelsReq) 
 		items = append(items, *toModelSchema(&res.Items[i]))
 	}
 	return &providerapi.ModelListResult{Items: items, Page: res.Page, PageSize: res.PageSize, Total: res.Total}, nil
+}
+
+// ListByIDs 按 id 集合批量取模型（跨模块列表聚合用，如 agent 列表的 model_name 映射）。
+// 缺行不算错——悬空引用（模型被删）由调用方归零值处理；不做 provider 存在性预检。
+func (s *modelService) ListByIDs(ctx context.Context, req providerapi.ListModelsByIDsReq) ([]providerapi.ModelSchema, error) {
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("validate list models by ids: %w", err)
+	}
+	items, err := s.store.ListModelsByIDs(ctx, req.IDs)
+	if err != nil {
+		return nil, fmt.Errorf("list models by ids: %w", err)
+	}
+	out := make([]providerapi.ModelSchema, 0, len(items))
+	for i := range items {
+		out = append(out, *toModelSchema(&items[i]))
+	}
+	return out, nil
 }
 
 // Update 整体更新；支持换绑 provider（目标 provider 须存在，目标下 model_id 唯一）。

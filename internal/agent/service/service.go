@@ -38,6 +38,9 @@ type Store interface {
 	DeleteAgent(ctx context.Context, id uint64) error
 	// ListToolIDsByAgent 读某 Agent 绑定的工具 id 列表（按绑定先后，id 升序）。
 	ListToolIDsByAgent(ctx context.Context, agentID uint64) ([]uint64, error)
+	// CountToolsByAgentIDs 列表聚合用批量计数：绑定工具数按 Agent 分组
+	// （GROUP BY + 聚合，一条查询覆盖当页全部 id，防 N+1——踩坑 #3）。map 无键 = 0。
+	CountToolsByAgentIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error)
 	// DeleteToolsByAgent 清空某 Agent 的全部绑定（硬删——append-only 表无软删）。
 	// 更新路径在事务内先删后插，uq(agent_id, tool_id) 保证幂等。
 	DeleteToolsByAgent(ctx context.Context, agentID uint64) error
@@ -144,7 +147,8 @@ func (s *agentService) Get(ctx context.Context, req agentapi.GetAgentReq) (*agen
 	return &detail, nil
 }
 
-// List 活跃 Agent 偏移分页（id 升序）；列表不带绑定明细（N+1，绑定走 Get 详情）。
+// List 活跃 Agent 偏移分页（id 升序）+ 当页聚合（模型展示名 / 工具数）；
+// 绑定明细 tool_ids 不进列表（N+1，走 Get 详情）。
 func (s *agentService) List(ctx context.Context, req agentapi.ListAgentsReq) (*agentapi.AgentListResult, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate list agents: %w", err)
@@ -153,16 +157,55 @@ func (s *agentService) List(ctx context.Context, req agentapi.ListAgentsReq) (*a
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
-	result := agentapi.AgentListResult{
-		Items:    make([]agentapi.AgentSchema, 0, len(res.Items)), // 空页返 [] 不返 null
+	items := make([]agentapi.AgentListItem, 0, len(res.Items)) // 空页返 [] 不返 null
+	for i := range res.Items {
+		items = append(items, agentapi.AgentListItem{AgentSchema: toSchema(&res.Items[i])})
+	}
+	if err := s.withAggregates(ctx, res.Items, items); err != nil {
+		return nil, err
+	}
+	return &agentapi.AgentListResult{
+		Items:    items,
 		Page:     res.Page,
 		PageSize: res.PageSize,
 		Total:    res.Total,
+	}, nil
+}
+
+// withAggregates 当页聚合（批量现读，防 N+1，provider withAggregates 先例）：
+// 工具数走本模块 agent_tools 分组计数；模型展示名走 provider api（model_id 去重后
+// ListByIDs，去重后 ≤ 页大小 100 不超其上限）。缺行（模型被删的悬空引用）不报错，
+// ModelName 留零值 ""——前端 fallback 显示 model_id。
+func (s *agentService) withAggregates(ctx context.Context, agents []Agent, items []agentapi.AgentListItem) error {
+	agentIDs := make([]uint64, len(agents))
+	modelIDs := make([]uint64, 0, len(agents))
+	seen := make(map[uint64]struct{}, len(agents))
+	for i := range agents {
+		agentIDs[i] = agents[i].ID
+		if _, dup := seen[agents[i].ModelID]; !dup {
+			seen[agents[i].ModelID] = struct{}{}
+			modelIDs = append(modelIDs, agents[i].ModelID)
+		}
 	}
-	for i := range res.Items {
-		result.Items = append(result.Items, toSchema(&res.Items[i]))
+	toolCounts, err := s.store.CountToolsByAgentIDs(ctx, agentIDs)
+	if err != nil {
+		return fmt.Errorf("count agent tools: %w", err)
 	}
-	return &result, nil
+	names := make(map[string]string, len(modelIDs))
+	if len(modelIDs) > 0 {
+		models, err := s.models.ListByIDs(ctx, providerapi.ListModelsByIDsReq{IDs: modelIDs})
+		if err != nil {
+			return fmt.Errorf("list models by ids: %w", err)
+		}
+		for i := range models {
+			names[models[i].ID] = models[i].Name // 双方同为字符串化 id，键无须回转 uint64
+		}
+	}
+	for i := range items {
+		items[i].ToolCount = toolCounts[agents[i].ID]
+		items[i].ModelName = names[items[i].ModelID]
+	}
+	return nil
 }
 
 // Update 整体更新（PUT 语义）：先取实体（区分 404 与静默不命中，且保住 created_at 等
@@ -272,6 +315,23 @@ func resolveTemperature(t *float64) float64 {
 	return *t
 }
 
+// resolveMaxContextTurns 未传 → 缺省 10；指针区分「未传」与显式值。
+func resolveMaxContextTurns(t *int) int {
+	if t == nil {
+		return agentapi.DefaultMaxContextTurns
+	}
+	return *t
+}
+
+// resolveEnabled 未传 → true（创建即启用；PUT 全量未传视为启用——
+// 显式传 false 才停用，指针防 Go 零值吞掉该语义）。
+func resolveEnabled(e *bool) bool {
+	if e == nil {
+		return true
+	}
+	return *e
+}
+
 // toModelCreate 创建请求 → model（id / 时间戳由 DB 生成）。
 func toModelCreate(req agentapi.CreateAgentReq) *Agent {
 	return &Agent{
@@ -282,6 +342,8 @@ func toModelCreate(req agentapi.CreateAgentReq) *Agent {
 		SystemPrompt:    req.SystemPrompt,
 		Temperature:     resolveTemperature(req.Temperature),
 		MaxOutputTokens: req.MaxOutputTokens,
+		MaxContextTurns: resolveMaxContextTurns(req.MaxContextTurns),
+		Enabled:         resolveEnabled(req.Enabled),
 	}
 }
 
@@ -295,6 +357,8 @@ func applyUpdate(a *Agent, req agentapi.UpdateAgentReq) {
 	a.SystemPrompt = req.SystemPrompt
 	a.Temperature = resolveTemperature(req.Temperature)
 	a.MaxOutputTokens = req.MaxOutputTokens
+	a.MaxContextTurns = resolveMaxContextTurns(req.MaxContextTurns)
+	a.Enabled = resolveEnabled(req.Enabled)
 }
 
 // toSchema model → 响应 schema（id / 外键字符串化，接口规范）。
@@ -306,6 +370,8 @@ func toSchema(a *Agent) agentapi.AgentSchema {
 		SystemPrompt:    a.SystemPrompt,
 		Temperature:     a.Temperature,
 		MaxOutputTokens: a.MaxOutputTokens,
+		MaxContextTurns: a.MaxContextTurns,
+		Enabled:         a.Enabled,
 	}
 	s.ID = strconv.FormatUint(a.ID, 10)
 	s.CreatedAt = a.CreatedAt

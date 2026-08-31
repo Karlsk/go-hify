@@ -12,9 +12,8 @@ import (
 
 // ---- 响应 Schema ----
 
-// AgentSchema Agent 响应（创建 / 更新 / 列表项）。不含绑定工具——列表带 tool_ids 需要逐行
-// 查询（N+1），绑定明细走 Get 详情（AgentDetailSchema）。model_name 不回传：展示名由前端
-// 用 providers/models 目录本地映射（db_model.md §4.3）。
+// AgentSchema Agent 响应（创建 / 更新）。不含绑定工具——tool_ids 需要逐行
+// 查询（N+1），绑定明细走 Get 详情（AgentDetailSchema）。
 type AgentSchema struct {
 	schema.BaseSchema         // id 字符串化 + created_at / updated_at
 	Name              string  `json:"name"`
@@ -24,6 +23,17 @@ type AgentSchema struct {
 	SystemPrompt      string  `json:"system_prompt"`
 	Temperature       float64 `json:"temperature"`
 	MaxOutputTokens   *int64  `json:"max_output_tokens"` // null=跟随模型默认
+	MaxContextTurns   int     `json:"max_context_turns"` // 多轮对话携带的最大历史轮数
+	Enabled           bool    `json:"enabled"`           // false=停用（保留配置，新会话被拒）
+}
+
+// AgentListItem 列表项：AgentSchema + 当页批量现读的聚合列（模型展示名 / 绑定工具数，
+// service List 聚合，防 N+1——provider 模块踩坑 #3 先例）。
+// ModelName 为空串表示悬空引用（模型已被删），前端 fallback 显示 model_id。
+type AgentListItem struct {
+	AgentSchema
+	ModelName string `json:"model_name"` // 关联模型展示名（悬空引用为 ""）
+	ToolCount int64  `json:"tool_count"` // 绑定 MCP 工具数
 }
 
 // AgentDetailSchema Agent 详情：AgentSchema + 绑定工具 id 列表。
@@ -37,10 +47,10 @@ type AgentDetailSchema struct {
 // AgentListResult Agent 偏移分页结果。agents 是极小配置表，按接口规范走偏移分页
 // （keyset 强制规则的例外表）；Items 由 service 保证非 nil。
 type AgentListResult struct {
-	Items    []AgentSchema `json:"items"`
-	Page     int           `json:"page"`
-	PageSize int           `json:"page_size"`
-	Total    int64         `json:"total"`
+	Items    []AgentListItem `json:"items"`
+	Page     int             `json:"page"`
+	PageSize int             `json:"page_size"`
+	Total    int64           `json:"total"`
 }
 
 // ---- 请求 Req ----
@@ -54,12 +64,19 @@ const (
 	TemperatureMax = 2.0
 	// DefaultTemperature 创建/更新未传 temperature 时的缺省（与 DB DEFAULT 0.7 对齐）。
 	DefaultTemperature = 0.7
+	// MaxContextTurnsMin / MaxContextTurnsMax 与 migrations 00009 的
+	// CHECK 一致性约定对齐（1-100 轮）；DefaultMaxContextTurns 未传时的缺省
+	// （与 DB DEFAULT 10 对齐）。
+	MaxContextTurnsMin     = 1
+	MaxContextTurnsMax     = 100
+	DefaultMaxContextTurns = 10
 	// MaxToolBindings 单 Agent 绑定工具数上限（uq 防重复，上限防提示词无界膨胀）。
 	MaxToolBindings = 100
 )
 
 // CreateAgentReq 创建 Agent 请求：主资源 body 内嵌 tool_ids（db_model.md §4.3），
-// 事务内一并落库。Temperature 用指针区分「未传（缺省 0.7）」与「显式 0（严谨模式）」。
+// 事务内一并落库。Temperature / Enabled / MaxContextTurns 用指针区分「未传（取缺省）」
+// 与「显式零值」（temperature=0 严谨模式 / enabled=false 停用）。
 type CreateAgentReq struct {
 	Name            string   `json:"name" binding:"required,min=1,max=128"`
 	Description     string   `json:"description" binding:"omitempty,max=512"`
@@ -68,6 +85,8 @@ type CreateAgentReq struct {
 	SystemPrompt    string   `json:"system_prompt" binding:"omitempty,max=32000"`
 	Temperature     *float64 `json:"temperature" binding:"omitempty,gte=0,lte=2"`
 	MaxOutputTokens *int64   `json:"max_output_tokens" binding:"omitempty,min=1"`
+	MaxContextTurns *int     `json:"max_context_turns" binding:"omitempty,min=1,max=100"`
+	Enabled         *bool    `json:"enabled"` // 未传 = true（创建即启用）
 	ToolIDs         []uint64 `json:"tool_ids" binding:"omitempty,max=100,dive,gt=0"`
 }
 
@@ -88,6 +107,8 @@ type UpdateAgentReq struct {
 	SystemPrompt    string   `json:"system_prompt" binding:"omitempty,max=32000"`
 	Temperature     *float64 `json:"temperature" binding:"omitempty,gte=0,lte=2"`
 	MaxOutputTokens *int64   `json:"max_output_tokens" binding:"omitempty,min=1"`
+	MaxContextTurns *int     `json:"max_context_turns" binding:"omitempty,min=1,max=100"`
+	Enabled         *bool    `json:"enabled"` // 未传 = true（PUT 全量；前端漏发会被置回启用）
 	ToolIDs         []uint64 `json:"tool_ids" binding:"omitempty,max=100,dive,gt=0"`
 }
 

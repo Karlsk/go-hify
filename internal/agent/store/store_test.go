@@ -35,11 +35,12 @@ func newMockDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 }
 
 // 列清单（与 store.go 的 selectAgent 一致，供 NewRows 用）。
-var agentCols = []string{"id", "name", "description", "model_id", "fallback_model_id", "system_prompt", "temperature", "max_output_tokens", "created_at", "updated_at", "deleted_at"}
+var agentCols = []string{"id", "name", "description", "model_id", "fallback_model_id", "system_prompt", "temperature", "max_output_tokens", "max_context_turns", "enabled", "created_at", "updated_at", "deleted_at"}
 
 // avals 展开为 agents 一行（列序 = agentCols）；基础列填典型值，变体由参数带入。
+// max_context_turns=10 / enabled=true 固定（store 层无缺省逻辑，值原样扫描）。
 func avals(id, modelID uint64, fallback, maxTok *int64, now time.Time) []driver.Value {
-	return []driver.Value{id, "客服助手", "回答售后问题", modelID, fallback, "你是售后客服", 0.7, maxTok, now, now, nil}
+	return []driver.Value{id, "客服助手", "回答售后问题", modelID, fallback, "你是售后客服", 0.7, maxTok, 10, true, now, now, nil}
 }
 
 // agentRows 单行 agents 结果集。
@@ -47,11 +48,11 @@ func agentRows(vals []driver.Value) *sqlmock.Rows {
 	return sqlmock.NewRows(agentCols).AddRow(vals...)
 }
 
-const getAgentByIDSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, created_at, updated_at, deleted_at FROM "agents" WHERE "agents"."id" = $1 AND "agents"."deleted_at" IS NULL ORDER BY "agents"."id" LIMIT $2`
+const getAgentByIDSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at, deleted_at FROM "agents" WHERE "agents"."id" = $1 AND "agents"."deleted_at" IS NULL ORDER BY "agents"."id" LIMIT $2`
 
 const listAgentsCountSQL = `SELECT count(*) FROM "agents" WHERE "agents"."deleted_at" IS NULL`
 
-const listAgentsPageSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, created_at, updated_at, deleted_at FROM "agents" WHERE "agents"."deleted_at" IS NULL ORDER BY id LIMIT $1`
+const listAgentsPageSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at, deleted_at FROM "agents" WHERE "agents"."deleted_at" IS NULL ORDER BY id LIMIT $1`
 
 const deleteAgentSQL = `UPDATE "agents" SET "deleted_at"=$1 WHERE "agents"."id" = $2 AND "agents"."deleted_at" IS NULL`
 

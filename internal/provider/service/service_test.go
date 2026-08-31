@@ -201,6 +201,26 @@ func (m *memStore) ListModelsByProvider(_ context.Context, providerID uint64) ([
 	return m.modelsByProviderSorted(providerID), nil
 }
 
+// ListModelsByIDs 按 id 集合批量取（id 升序）；缺行跳过，对齐 store 包语义。
+func (m *memStore) ListModelsByIDs(_ context.Context, ids []uint64) ([]Model, error) {
+	want := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	found := make([]uint64, 0, len(ids))
+	for id := range m.models {
+		if want[id] {
+			found = append(found, id)
+		}
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i] < found[j] })
+	out := make([]Model, 0, len(found))
+	for _, id := range found {
+		out = append(out, *m.models[id])
+	}
+	return out, nil
+}
+
 func (m *memStore) ListModels(_ context.Context, providerID uint64, p page.OffsetParams) (page.OffsetResult[Model], error) {
 	all := m.modelsByProviderSorted(providerID)
 	start, end := clampWindow(p.Offset(), p.Limit(), len(all))

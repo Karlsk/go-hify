@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -270,3 +271,22 @@ func warmDetail(t *testing.T, ctx context.Context, ps providerapi.ProviderServic
 
 // int32Ptr 便捷取指针。
 func int32Ptr(v int32) *int32 { return &v }
+
+func TestModelListByIDs(t *testing.T) {
+	st, _, _, ms := newTestService(t)
+	ctx := context.Background()
+	pid, cid := seedTwoProviders(st)
+	gpt := st.seedModel(&Model{ProviderID: pid, Name: "GPT-4o", ModelID: "gpt-4o", Capability: providerapi.CapabilityChat})
+	sonnet := st.seedModel(&Model{ProviderID: cid, Name: "Sonnet", ModelID: "claude-sonnet", Capability: providerapi.CapabilityChat})
+
+	// 含悬空 id（模型被删）：跳过不报错；返回按 id 升序
+	items, err := ms.ListByIDs(ctx, providerapi.ListModelsByIDsReq{IDs: []uint64{sonnet.ID, 9999, gpt.ID}})
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	assert.Equal(t, strconv.FormatUint(gpt.ID, 10), items[0].ID, "id 升序（字符串化）")
+	assert.Equal(t, strconv.FormatUint(sonnet.ID, 10), items[1].ID)
+
+	// 空 ids：binding 校验失败
+	_, err = ms.ListByIDs(ctx, providerapi.ListModelsByIDsReq{})
+	assert.Error(t, err)
+}

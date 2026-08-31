@@ -340,6 +340,20 @@ type ListModelsReq struct {
 // Validate 跨字段校验；当前无跨字段规则。
 func (r ListModelsReq) Validate() error { return nil }
 
+// ListModelsByIDsReq 按 id 集合批量取模型（跨模块列表聚合用，如 agent 列表的 model_name 映射）。
+type ListModelsByIDsReq struct {
+	IDs []uint64 `json:"-"` // 请求体不可注入，仅程序内构造；长度约束在 Validate（不经 gin binding）
+}
+
+// Validate 长度约束（1-100，与列表分页上限一致）。该请求不走 HTTP 绑定，
+// binding tag 不会生效，约束必须在这里执行。
+func (r ListModelsByIDsReq) Validate() error {
+	if len(r.IDs) < 1 || len(r.IDs) > 100 {
+		return fmt.Errorf("ids 数量须在 1-100 之间，当前 %d", len(r.IDs))
+	}
+	return nil
+}
+
 // SyncModelsReq 自动发现并同步模型请求（只增改不删，不覆盖手编字段：价格 / enabled / display_name / extra_params）。
 type SyncModelsReq struct {
 	ID uint64 `uri:"id" binding:"required"`

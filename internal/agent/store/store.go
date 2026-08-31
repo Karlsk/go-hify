@@ -13,7 +13,7 @@ import (
 
 // selectAgent 显式列清单（禁 SELECT *）：agents 无大文本列，此处主要为对齐全仓规范
 // 与防加列耦合。deleted_at 一并取回（软删 mixin 字段，可见行恒为 NULL）。
-const selectAgent = "id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, created_at, updated_at, deleted_at"
+const selectAgent = "id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at, deleted_at"
 
 // Store 实现 agentsvc.Store。
 type Store struct{ db *gorm.DB }
@@ -96,6 +96,34 @@ func (s *Store) ListToolIDsByAgent(ctx context.Context, agentID uint64) ([]uint6
 		return nil, err
 	}
 	return ids, nil
+}
+
+// CountToolsByAgentIDs 列表聚合用批量计数：绑定工具数按 Agent 分组
+// （GROUP BY + 聚合，一条查询覆盖当页全部 id）。map 无键 = 0。
+// IN 而非 ANY：GORM 对 slice 参数按逗号展开，`= ANY($1,$2)` 是非法语法
+// （provider CountEnabledModelsByProviderIDs 同款写法；页大小 ≤100 在 IN 上限内）。
+func (s *Store) CountToolsByAgentIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+	counts := make(map[uint64]int64, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	var rows []struct {
+		AgentID uint64
+		Cnt     int64
+	}
+	err := s.db.WithContext(ctx).
+		Model(&agentsvc.AgentTool{}).
+		Select("agent_id, COUNT(*) AS cnt").
+		Where("agent_id IN ?", ids).
+		Group("agent_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		counts[r.AgentID] = r.Cnt
+	}
+	return counts, nil
 }
 
 // DeleteToolsByAgent 清空绑定（硬删，append-only 表无软删语义）。

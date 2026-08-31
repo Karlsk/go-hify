@@ -32,6 +32,9 @@ type ModelService interface {
 	Get(ctx context.Context, req GetModelReq) (*ModelSchema, error)
 	// List 某提供商下的模型（偏移分页）。
 	List(ctx context.Context, req ListModelsReq) (*ModelListResult, error)
+	// ListByIDs 按 id 集合批量取模型（id 升序）；跨模块列表聚合用。
+	// 缺行不算错（悬空引用由调用方处理），仅 ids 为空或超限时校验失败。
+	ListByIDs(ctx context.Context, req ListModelsByIDsReq) ([]ModelSchema, error)
 	// Update 整体更新；不存在返回 ErrModelNotFound。
 	Update(ctx context.Context, req UpdateModelReq) (*ModelSchema, error)
 	// Delete 删除；被 agents / knowledge_bases 引用时外键挡住，返回 ErrModelInUse（service 层翻译）。

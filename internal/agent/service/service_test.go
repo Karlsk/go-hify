@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
@@ -14,6 +13,7 @@ import (
 	agentapi "github.com/Karlsk/go-hify/internal/agent/api"
 	"github.com/Karlsk/go-hify/internal/platform/cache"
 	"github.com/Karlsk/go-hify/internal/platform/page"
+	"github.com/Karlsk/go-hify/internal/platform/schema"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 )
 
@@ -32,6 +32,7 @@ type stubStore struct {
 	listTools   func(ctx context.Context, agentID uint64) ([]uint64, error)
 	deleteTools func(ctx context.Context, agentID uint64) error
 	createTools func(ctx context.Context, agentID uint64, toolIDs []uint64) error
+	countTools  func(ctx context.Context, ids []uint64) (map[uint64]int64, error)
 
 	calls struct {
 		getByID, createAgent, updateAgent, deleteAgent int
@@ -106,14 +107,28 @@ func (s *stubStore) CreateTools(ctx context.Context, agentID uint64, toolIDs []u
 	return nil
 }
 
-// stubModels 只覆写 Get（内嵌接口兜底其余方法——本 service 只用这一个）。
+// CountToolsByAgentIDs 默认空 map（无绑定）；列表聚合测试按需注入。
+func (s *stubStore) CountToolsByAgentIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+	if s.countTools != nil {
+		return s.countTools(ctx, ids)
+	}
+	return map[uint64]int64{}, nil
+}
+
+// stubModels 覆写 Get（存在性预检）与 ListByIDs（列表聚合名映射）；
+// 其余方法由内嵌接口兜底（本 service 只用这两个）。
 type stubModels struct {
 	providerapi.ModelService
-	get func(ctx context.Context, req providerapi.GetModelReq) (*providerapi.ModelSchema, error)
+	get       func(ctx context.Context, req providerapi.GetModelReq) (*providerapi.ModelSchema, error)
+	listByIDs func(ctx context.Context, req providerapi.ListModelsByIDsReq) ([]providerapi.ModelSchema, error)
 }
 
 func (s *stubModels) Get(ctx context.Context, req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
 	return s.get(ctx, req)
+}
+
+func (s *stubModels) ListByIDs(ctx context.Context, req providerapi.ListModelsByIDsReq) ([]providerapi.ModelSchema, error) {
+	return s.listByIDs(ctx, req)
 }
 
 // stubCache 按方法注入行为；Delete 默认记录 key 后成功。
@@ -166,9 +181,14 @@ func sampleAgent(id uint64) *Agent {
 }
 
 func okModels() *stubModels {
-	return &stubModels{get: func(ctx context.Context, req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
-		return nil, nil
-	}}
+	return &stubModels{
+		get: func(ctx context.Context, req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
+			return nil, nil
+		},
+		listByIDs: func(ctx context.Context, req providerapi.ListModelsByIDsReq) ([]providerapi.ModelSchema, error) {
+			return []providerapi.ModelSchema{}, nil // 空返回 → 悬空引用路径，ModelName 全 ""
+		},
+	}
 }
 
 func newSvc(st Store, models providerapi.ModelService, cm cacheManager) agentapi.AgentService {
@@ -217,6 +237,35 @@ func TestCreate_TemperatureDefaults(t *testing.T) {
 	_, err = svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 5, Temperature: &zero})
 	assert.NoError(t, err)
 	assert.Equal(t, 0.0, captured.Temperature)
+}
+
+func TestCreate_EnabledAndContextDefaults(t *testing.T) {
+	st := &stubStore{}
+	var captured *Agent
+	st.createAgent = func(ctx context.Context, a *Agent) error {
+		captured = a
+		return nil
+	}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	// 未传 enabled / max_context_turns → true / 10（与 DB DEFAULT 对齐）。
+	resp, err := svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 5})
+	assert.NoError(t, err)
+	assert.True(t, captured.Enabled)
+	assert.Equal(t, 10, captured.MaxContextTurns)
+	assert.True(t, resp.Enabled)
+	assert.Equal(t, 10, resp.MaxContextTurns)
+
+	// 显式传 false / 20：false 是停用（合法显式值），不得被缺省吞掉（踩坑 #1 布尔变体）。
+	off, turns := false, 20
+	resp, err = svc.Create(context.Background(), agentapi.CreateAgentReq{
+		Name: "a", ModelID: 5, Enabled: &off, MaxContextTurns: &turns,
+	})
+	assert.NoError(t, err)
+	assert.False(t, captured.Enabled)
+	assert.Equal(t, 20, captured.MaxContextTurns)
+	assert.False(t, resp.Enabled)
+	assert.Equal(t, 20, resp.MaxContextTurns)
 }
 
 func TestCreate_ModelNotFound(t *testing.T) {
@@ -322,19 +371,73 @@ func TestGet_NotFound(t *testing.T) {
 // ---- List ----
 
 func TestList(t *testing.T) {
-	now := time.Now()
-	st := &stubStore{listAgents: func(ctx context.Context, p page.OffsetParams) (page.OffsetResult[Agent], error) {
-		return page.NewOffsetResult([]Agent{*sampleAgent(1)}, p, 1), nil
-	}}
-	svc := newSvc(st, okModels(), &stubCache{})
+	a1, a2 := sampleAgent(1), sampleAgent(2)
+	a2.ModelID = 5 // 两行同模型 → 去重后一次 ListByIDs
+	a3 := sampleAgent(3)
+	a3.ModelID = 999
+	st := &stubStore{
+		listAgents: func(ctx context.Context, p page.OffsetParams) (page.OffsetResult[Agent], error) {
+			return page.NewOffsetResult([]Agent{*a1, *a2, *a3}, p, 3), nil
+		},
+		countTools: func(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+			assert.Equal(t, []uint64{1, 2, 3}, ids, "当页 id 一次批量计数")
+			return map[uint64]int64{1: 2, 3: 1}, nil // agent 2 无绑定 → map 无键 = 0
+		},
+	}
+	models := &stubModels{
+		get: func(ctx context.Context, req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
+			return nil, nil
+		},
+		listByIDs: func(ctx context.Context, req providerapi.ListModelsByIDsReq) ([]providerapi.ModelSchema, error) {
+			assert.Equal(t, []uint64{5, 999}, req.IDs, "model_id 去重后批量取名")
+			return []providerapi.ModelSchema{{BaseSchema: schema.BaseSchema{ID: "5"}, Name: "gpt-4o"}}, nil // 999 缺行 = 悬空引用
+		},
+	}
+	svc := newSvc(st, models, &stubCache{})
 
 	resp, err := svc.List(context.Background(), agentapi.ListAgentsReq{Page: 1, PageSize: 20})
 	assert.NoError(t, err)
-	assert.Equal(t, int64(1), resp.Total)
-	assert.Len(t, resp.Items, 1)
-	assert.Equal(t, "客服助手", resp.Items[0].Name)
-	assert.Equal(t, "5", resp.Items[0].ModelID)
-	_ = now
+	assert.Equal(t, int64(3), resp.Total)
+	assert.Len(t, resp.Items, 3)
+	// 聚合列：模型名映射 + 工具计数（缺行 / 无绑定归零值）。
+	assert.Equal(t, "gpt-4o", resp.Items[0].ModelName)
+	assert.Equal(t, int64(2), resp.Items[0].ToolCount)
+	assert.Equal(t, "gpt-4o", resp.Items[1].ModelName, "同模型去重不影响映射")
+	assert.Equal(t, int64(0), resp.Items[1].ToolCount)
+	assert.Equal(t, "", resp.Items[2].ModelName, "悬空引用 → 空串，前端 fallback model_id")
+	assert.Equal(t, int64(1), resp.Items[2].ToolCount)
+}
+
+func TestList_AggregateErrors(t *testing.T) {
+	// 工具计数失败 → 整列表失败（聚合是列表契约一部分，不静默降级）。
+	st := &stubStore{
+		listAgents: func(ctx context.Context, p page.OffsetParams) (page.OffsetResult[Agent], error) {
+			return page.NewOffsetResult([]Agent{*sampleAgent(1)}, p, 1), nil
+		},
+		countTools: func(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+			return nil, errors.New("count failed")
+		},
+	}
+	svc := newSvc(st, okModels(), &stubCache{})
+	_, err := svc.List(context.Background(), agentapi.ListAgentsReq{})
+	assert.Error(t, err)
+
+	// 模型名查询失败同理。
+	st2 := &stubStore{
+		listAgents: st.listAgents,
+		countTools: func(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+			return map[uint64]int64{}, nil
+		},
+	}
+	models := &stubModels{
+		get: okModels().get,
+		listByIDs: func(ctx context.Context, req providerapi.ListModelsByIDsReq) ([]providerapi.ModelSchema, error) {
+			return nil, errors.New("provider down")
+		},
+	}
+	svc2 := newSvc(st2, models, &stubCache{})
+	_, err = svc2.List(context.Background(), agentapi.ListAgentsReq{})
+	assert.Error(t, err)
 }
 
 func TestList_EmptyPageNotEmptyArray(t *testing.T) {
@@ -373,6 +476,29 @@ func TestUpdate_NotFound(t *testing.T) {
 
 	_, err := svc.Update(context.Background(), agentapi.UpdateAgentReq{ID: 999, Name: "x", ModelID: 5})
 	assert.ErrorIs(t, err, agentapi.ErrAgentNotFound)
+}
+
+func TestUpdate_EnabledAndContextApplied(t *testing.T) {
+	st := &stubStore{}
+	var captured *Agent
+	st.updateAgent = func(ctx context.Context, a *Agent) error {
+		captured = a
+		return nil
+	}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	// PUT 全量未传 → 置回缺省（true / 10）——前端必须显式提交 enabled。
+	off := false
+	_, err := svc.Update(context.Background(), agentapi.UpdateAgentReq{ID: 1, Name: "x", ModelID: 5, Enabled: &off})
+	assert.NoError(t, err)
+	assert.False(t, captured.Enabled, "显式 false 停用")
+	assert.Equal(t, 10, captured.MaxContextTurns, "未传轮数 → 缺省 10")
+
+	turns := 20
+	_, err = svc.Update(context.Background(), agentapi.UpdateAgentReq{ID: 1, Name: "x", ModelID: 5, MaxContextTurns: &turns})
+	assert.NoError(t, err)
+	assert.True(t, captured.Enabled, "未传 enabled → 置回 true")
+	assert.Equal(t, 20, captured.MaxContextTurns)
 }
 
 func TestUpdate_FKOnTools(t *testing.T) {
