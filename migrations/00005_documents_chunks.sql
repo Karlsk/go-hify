@@ -1,4 +1,7 @@
 -- +goose Up
+-- pgvector 扩展（幂等）：vector 列类型依赖；扩展是库级对象，新库必须先建
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- documents：上传文档（rag 模块，软删除）
 CREATE TABLE documents (
     id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

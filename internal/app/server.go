@@ -18,6 +18,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	agenthandler "github.com/Karlsk/go-hify/internal/agent/handler"
+	agentsvc "github.com/Karlsk/go-hify/internal/agent/service"
+	agentstore "github.com/Karlsk/go-hify/internal/agent/store"
 	authhandler "github.com/Karlsk/go-hify/internal/auth/handler"
 	authsvc "github.com/Karlsk/go-hify/internal/auth/service"
 	authstore "github.com/Karlsk/go-hify/internal/auth/store"
@@ -98,9 +101,16 @@ func Run(cfg *config.Config) error {
 	modelSvc := providersvc.NewModelService(providerStore, providerCache, cfg.Provider.MasterKey)
 	go prober.StartProber(appCtx) // 定时健康探测：60s 一轮，随 appCtx 取消退出（db_model §2.3.1）
 
+	// agent：依赖 provider 的 ModelService（主/备用模型存在性预检，api 接口注入）。
+	// cache 用独立实例（NameAgent 命名空间隔离）；失效矩阵只有 detail:{id} 一条边——
+	// 列表是低频管理页查询，不进缓存（agent/service/service.go cacheKeyDetail 注释）。
+	agentStore := agentstore.New(gormDB)
+	agentCache := cache.New(rdb, cache.DefaultConfig()) // agent-cache：TTL 30min + 写时删 key
+	agentSvc := agentsvc.New(agentStore, modelSvc, agentCache)
+
 	// 其余模块当前为空壳，构造函数待业务实现后按下序填入：
-	// 顺序：mcp → agent → rag → workflow → chat（chat 最后，依赖图最外层、零被依赖）；
-	// 上游模块 service.New 的入参直接传 providerSvc（api.ProviderService 接口注入）。
+	// 顺序：mcp → rag → workflow → chat（chat 最后，依赖图最外层、零被依赖）；
+	// 上游模块 service.New 的入参直接传 providerSvc / agentSvc（api 接口注入）。
 
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()
@@ -126,7 +136,8 @@ func Run(cfg *config.Config) error {
 	authH.RegisterRoutes(v1)
 	demohandler.New(demoSvc).RegisterRoutes(v1)                   // demo 参照实现（受登录中间件保护）
 	providerhandler.New(providerSvc, modelSvc).RegisterRoutes(v1) // provider：providers + models 双组 12 端点
-	// TODO: 各模块 handler.RegisterRoutes(v1)（mcp / agent / rag / workflow / chat）
+	agenthandler.New(agentSvc).RegisterRoutes(v1)                 // agent：agents 一组 5 端点
+	// TODO: 其余模块 handler.RegisterRoutes(v1)（mcp / rag / workflow / chat）
 
 	// ── ⑤ 启动（§组合根步骤 5）──────────────────────────────────────
 	slog.Info("hify ready", slog.String("addr", ":"+cfg.Server.Port), slog.String("version", version))

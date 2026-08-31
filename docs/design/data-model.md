@@ -16,7 +16,7 @@ erDiagram
     providers ||--o| provider_health : "1:1，首次探测才建行"
     mcp_servers ||--o{ mcp_tools : ""
     agents }o--|| models : "主/备用模型"
-    agents }o--o{ mcp_tools : "agent_mcp_tools"
+    agents }o--o{ mcp_tools : "agent_tools"
     agents }o--o{ knowledge_bases : "agent_knowledge_bases"
     knowledge_bases }o--|| models : "嵌入模型"
     knowledge_bases ||--o{ documents : ""
@@ -44,8 +44,8 @@ erDiagram
 - `mcp_tools` — 各 server 暴露的工具（名称、描述、参数 schema）
 
 ### agent（关系枢纽）
-- `agents` — Agent 配置（系统提示词、温度等；引用主模型 + 备用模型）
-- `agent_mcp_tools` — 关联表：Agent ↔ MCP 工具（多对多）
+- `agents` — Agent 配置（系统提示词、温度、max_output_tokens；引用主模型 + 备用模型）
+- `agent_tools` — 关联表：Agent ↔ MCP 工具（多对多；绑定=授权，粒度到工具不到 server）
 - `agent_knowledge_bases` — 关联表：Agent ↔ 知识库（多对多）
 
 ### rag
@@ -73,7 +73,7 @@ mcp_servers 1──N mcp_tools                     # 一个 server 多个工具
 
 agents N──1 models         (model_id 主模型)
 agents N──1 models         (fallback_model_id 备用，一期不用)
-agents N──M mcp_tools      via agent_mcp_tools
+agents N──M mcp_tools      via agent_tools
 agents N──M knowledge_bases via agent_knowledge_bases
 
 knowledge_bases N──1 models (embedding_model_id 嵌入模型)
@@ -103,7 +103,7 @@ workflows ──(LLM 节点调用)──▶ executions        # 工作流节点�
 | users | auth | `auth/service/model.go` |
 | providers, models, provider_health | provider | `provider/service/model.go` |
 | mcp_servers, mcp_tools | mcp | `mcp/service/model.go` |
-| agents, agent_mcp_tools, agent_knowledge_bases | agent | `agent/service/model.go` |
+| agents, agent_tools, agent_knowledge_bases | agent | `agent/service/model.go` |
 | knowledge_bases, documents, chunks | rag | `rag/service/model.go` |
 | conversations, messages | chat | `chat/service/model.go` |
 | workflows | workflow | `workflow/service/model.go` |

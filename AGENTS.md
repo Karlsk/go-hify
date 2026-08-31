@@ -767,7 +767,7 @@ Hify 索引地图（建表时照抄；向量索引细节见《pgvector 索引规
 | `models` | `(provider_id)` |
 | `mcp_tools` | `(mcp_server_id)` |
 | `agents` | `(model_id)`、`(fallback_model_id)` |
-| `agent_mcp_tools` | PK `(agent_id, mcp_tool_id)` + 反查 `(mcp_tool_id)` |
+| `agent_tools` | id PK + `uq(agent_id, tool_id)` + 反查 `(tool_id)` |
 | `agent_knowledge_bases` | PK `(agent_id, knowledge_base_id)` + 反查 `(knowledge_base_id)` |
 | `knowledge_bases` | `(embedding_model_id)` |
 | `documents` | `(knowledge_base_id)` + partial `(status) WHERE status='processing'` |
