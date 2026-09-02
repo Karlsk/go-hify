@@ -56,6 +56,7 @@ erDiagram
 ### chat
 - `conversations` — 对话会话（归属用户 + 基于某 Agent）
 - `messages` — 多轮消息（user/assistant/tool 角色，按顺序串成上下文）
+- 全链路数据流与字段明细见 [docs/changelog/chat/data_flow_and_model.md](../changelog/chat/data_flow_and_model.md)（executions 字段明细同此文档）
 
 ### workflow
 - `workflows` — JSON 配置定义（线性 + 条件分支节点）
