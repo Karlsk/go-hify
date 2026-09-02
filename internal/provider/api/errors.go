@@ -15,6 +15,8 @@ var (
 	ErrModelIDConflict = errors.New("MODEL_ID_CONFLICT")
 	// ErrModelInUse 模型被 agents / knowledge_bases 引用，删除被外键挡住（409，提示先解绑）。
 	ErrModelInUse = errors.New("MODEL_IN_USE")
+	// ErrModelDisabled 模型已停用，拒绝新调用（与 ErrProviderDisabled 对称；仅跨模块 ResolveLLMConfig 路径，无 HTTP 映射）。
+	ErrModelDisabled = errors.New("MODEL_DISABLED")
 	// ErrProviderDisabled 提供商已停用，拒绝新调用（503）。
 	ErrProviderDisabled = errors.New("PROVIDER_DISABLED")
 )

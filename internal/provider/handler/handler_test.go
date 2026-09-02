@@ -207,6 +207,11 @@ func (f fakeModelSvc) SyncModels(_ context.Context, _ providerapi.SyncModelsReq)
 	return &providerapi.ModelSyncResultSchema{Added: 2, Updated: 1}, nil
 }
 
+// ResolveLLMConfig 跨模块专用，无 HTTP 路由——桩实现仅满足接口。
+func (f fakeModelSvc) ResolveLLMConfig(_ context.Context, _ providerapi.ResolveLLMConfigReq) (*providerapi.LLMConfig, error) {
+	return nil, f.injected
+}
+
 // 编译期钉住：包装类型各自满足接口。
 var (
 	_ providerapi.ProviderService = fakeProviderSvc{}

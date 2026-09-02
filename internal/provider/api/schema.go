@@ -354,6 +354,31 @@ func (r ListModelsByIDsReq) Validate() error {
 	return nil
 }
 
+// ResolveLLMConfigReq 取 LLM 调用配置请求（跨模块专用：chat / workflow 发起调用前）。
+// 不走 HTTP（同 ListModelsByIDsReq：json:"-" 防注入，仅程序内构造）。
+type ResolveLLMConfigReq struct {
+	ModelID uint64 `json:"-"` // models.id 主键（消费方从 agent schema 拿到的 uint64）
+}
+
+// Validate 该请求不走 HTTP 绑定，约束必须在这里执行。
+func (r ResolveLLMConfigReq) Validate() error {
+	if r.ModelID == 0 {
+		return fmt.Errorf("model_id 不能为空")
+	}
+	return nil
+}
+
+// LLMConfig 一次 LLM 调用所需的 provider 侧配置（纯内存跨模块结构）。
+// 安全约束（crypto.go 明文四不）：永不序列化（无 json tag）、永不落日志、
+// 永不进缓存；生命周期 = 调用方内存内即取即用，用后丢弃。
+type LLMConfig struct {
+	ProviderName string // providers.name——llm.Manager 的 gate / 熔断标识
+	Kind         string // providers.kind（openai/claude/gemini/ollama/openai_compatible）
+	BaseURL      string // 空串 = kind 默认地址
+	APIKey       string // 明文（解密后）；ollama / 未配 key 的 openai_compatible 为空串
+	ModelID      string // models.model_id——传给供应商 API 的标识（如 gpt-4o）
+}
+
 // SyncModelsReq 自动发现并同步模型请求（只增改不删，不覆盖手编字段：价格 / enabled / display_name / extra_params）。
 type SyncModelsReq struct {
 	ID uint64 `uri:"id" binding:"required"`

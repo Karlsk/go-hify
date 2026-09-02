@@ -41,4 +41,9 @@ type ModelService interface {
 	Delete(ctx context.Context, req DeleteModelReq) error
 	// SyncModels 自动发现并 upsert（只增改不删；不覆盖价格 / enabled / display_name / extra_params）。
 	SyncModels(ctx context.Context, req SyncModelsReq) (*ModelSyncResultSchema, error)
+	// ResolveLLMConfig 取一次 LLM 调用的 provider 侧配置（model → provider → 解密 key）。
+	// 跨模块专用（chat / workflow 发起调用前）；不走 HTTP、不进缓存（明文 key 禁入缓存）。
+	// 模型不存在 / 已停用返回 ErrModelNotFound / ErrModelDisabled；provider 悬空 / 停用
+	// 返回 ErrProviderNotFound / ErrProviderDisabled；解密失败包装 errs.ErrInternal。
+	ResolveLLMConfig(ctx context.Context, req ResolveLLMConfigReq) (*LLMConfig, error)
 }
