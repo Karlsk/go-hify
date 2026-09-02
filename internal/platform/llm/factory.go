@@ -15,15 +15,20 @@ import (
 )
 
 // chatModelStreamer 把 eino model.ChatModel 适配成 Streamer：
-// ChatModel.Stream 带变参 options，方法集与 Streamer 差一个变参，需此包装吃掉差异。
-// 字段保留 ChatModel（而非收窄）：chat 模块上工具调用时还要经它 BindTools / WithTools。
+// Stream/Generate 的变参 model.Option 与 Streamer 接口的 *CallOptions 差一个转换层，
+// 此包装负责 CallOptions → eino 调用时选项（工具与生成参数按调用传入，不做构造期绑定）。
 type chatModelStreamer struct {
 	m model.ChatModel
 }
 
-// Stream 实现 Streamer：生命周期与传入 ctx 绑定，ctx 取消即打断上游 Recv。
-func (a chatModelStreamer) Stream(ctx context.Context, msgs []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
-	return a.m.Stream(ctx, msgs)
+// Stream 实现 Streamer：生命周期与传入 ctx 绑定，ctx 取消即打断上游 Recv。opts 可为 nil。
+func (a chatModelStreamer) Stream(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*schema.StreamReader[*schema.Message], error) {
+	return a.m.Stream(ctx, msgs, opts.einoOptions()...)
+}
+
+// Generate 实现 Streamer：非流式单次生成（workflow LLM 节点用）。opts 可为 nil。
+func (a chatModelStreamer) Generate(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*schema.Message, error) {
+	return a.m.Generate(ctx, msgs, opts.einoOptions()...)
 }
 
 // NewUpstreamFactory 构造注入 Manager 的 UpstreamFactory：

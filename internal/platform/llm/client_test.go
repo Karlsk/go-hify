@@ -16,10 +16,23 @@ import (
 type fakeStreamer struct {
 	calls atomic.Int64
 	fn    func(call int, ctx context.Context) (*schema.StreamReader[*schema.Message], error)
+	genFn func(call int, ctx context.Context) (*schema.Message, error) // Generate 路径用；nil 时返回错误
+	// 最近一次收到的 opts（透传断言用；仅在调用返回后断言，测试均为顺序调用，无竞争）
+	lastOpts    *CallOptions
+	lastGenOpts *CallOptions
 }
 
-func (f *fakeStreamer) Stream(ctx context.Context, _ []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+func (f *fakeStreamer) Stream(ctx context.Context, _ []*schema.Message, opts *CallOptions) (*schema.StreamReader[*schema.Message], error) {
+	f.lastOpts = opts
 	return f.fn(int(f.calls.Add(1)), ctx)
+}
+
+func (f *fakeStreamer) Generate(ctx context.Context, _ []*schema.Message, opts *CallOptions) (*schema.Message, error) {
+	f.lastGenOpts = opts
+	if f.genFn == nil {
+		return nil, errors.New("fakeStreamer: genFn not set")
+	}
+	return f.genFn(int(f.calls.Add(1)), ctx)
 }
 
 func msg(content string) *schema.Message {
@@ -116,13 +129,13 @@ func TestBulkheadFailFast(t *testing.T) {
 	p.Bulkhead = 1
 	c := NewClient("p", p, chunkThenHangStreamer(msg("hi")))
 
-	s1, err := c.Stream(context.Background(), nil)
+	s1, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("first stream: %v", err)
 	}
 	defer s1.Close()
 
-	_, err = c.Stream(context.Background(), nil)
+	_, err = c.Stream(context.Background(), nil, nil)
 	if !errors.Is(err, ErrProviderBusy) {
 		t.Fatalf("second stream err = %v, want ErrProviderBusy", err)
 	}
@@ -133,13 +146,13 @@ func TestSlotReleasedOnClose(t *testing.T) {
 	p.Bulkhead = 1
 	c := NewClient("p", p, okStreamer(msg("hi"), msg("bye")))
 
-	s1, err := c.Stream(context.Background(), nil)
+	s1, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("first stream: %v", err)
 	}
 	s1.Close()
 
-	s2, err := c.Stream(context.Background(), nil)
+	s2, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("second stream after close: %v", err)
 	}
@@ -151,13 +164,13 @@ func TestSlotAutoReleasedOnEOF(t *testing.T) {
 	p.Bulkhead = 1
 	c := NewClient("p", p, okStreamer(msg("only")))
 
-	s1, err := c.Stream(context.Background(), nil)
+	s1, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("first stream: %v", err)
 	}
 	drain(t, s1) // 读尽（EOF 自动清理）
 
-	s2, err := c.Stream(context.Background(), nil)
+	s2, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("second stream after EOF: %v", err)
 	}
@@ -172,11 +185,11 @@ func TestBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 	c := NewClient("p", p, fs)
 
 	for i := 0; i < 3; i++ {
-		_, err := c.Stream(context.Background(), nil)
+		_, err := c.Stream(context.Background(), nil, nil)
 		requireClass(t, err, ClassProviderDown)
 	}
 	// 熔断已打开：秒拒，上游不再被调用
-	_, err := c.Stream(context.Background(), nil)
+	_, err := c.Stream(context.Background(), nil, nil)
 	if !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
 	}
@@ -193,7 +206,7 @@ func TestRateLimitedDoesNotTripBreaker(t *testing.T) {
 	c := NewClient("p", p, fs)
 
 	for i := 0; i < 5; i++ {
-		_, err := c.Stream(context.Background(), nil)
+		_, err := c.Stream(context.Background(), nil, nil)
 		requireClass(t, err, ClassRateLimited) // 仍是 429，不是 unavailable
 	}
 	if got := fs.calls.Load(); got != 5 {
@@ -219,7 +232,7 @@ func TestBreakerConsecutiveResetsOnSuccess(t *testing.T) {
 	c := NewClient("p", p, fs)
 
 	for i := 0; i < 6; i++ {
-		s, err := c.Stream(context.Background(), nil)
+		s, err := c.Stream(context.Background(), nil, nil)
 		if err == nil {
 			drain(t, s)
 		}
@@ -234,7 +247,7 @@ func TestTTFTTimeout(t *testing.T) {
 	p := shortProfile()
 	c := NewClient("p", p, hangStreamer())
 
-	_, err := c.Stream(context.Background(), nil)
+	_, err := c.Stream(context.Background(), nil, nil)
 	requireClass(t, err, ClassTimeout)
 }
 
@@ -242,7 +255,7 @@ func TestIdleTimeoutAfterFirstChunk(t *testing.T) {
 	p := shortProfile()
 	c := NewClient("p", p, chunkThenHangStreamer(msg("hi")))
 
-	s, err := c.Stream(context.Background(), nil)
+	s, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
@@ -269,7 +282,7 @@ func TestRetryBeforeFirstToken(t *testing.T) {
 	}}
 	c := NewClient("p", p, fs)
 
-	s, err := c.Stream(context.Background(), nil)
+	s, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
@@ -285,7 +298,7 @@ func TestRetryExhaustedReturnsClassified(t *testing.T) {
 	fs := errStreamer(&Error{Class: ClassOverloaded, Err: errors.New("529")})
 	c := NewClient("p", p, fs)
 
-	_, err := c.Stream(context.Background(), nil)
+	_, err := c.Stream(context.Background(), nil, nil)
 	requireClass(t, err, ClassOverloaded)
 	if got := fs.calls.Load(); got != 3 {
 		t.Fatalf("upstream calls = %d, want 3 (MaxRetries=2)", got)
@@ -307,7 +320,7 @@ func TestNoRetryAfterFirstToken(t *testing.T) {
 	}}
 	c := NewClient("p", p, fs)
 
-	s, err := c.Stream(context.Background(), nil)
+	s, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
@@ -322,7 +335,7 @@ func TestNonRetryableNoRetry(t *testing.T) {
 	fs := errStreamer(&Error{Class: ClassInvalidRequest, Err: errors.New("400 context too long")})
 	c := NewClient("p", p, fs)
 
-	_, err := c.Stream(context.Background(), nil)
+	_, err := c.Stream(context.Background(), nil, nil)
 	requireClass(t, err, ClassInvalidRequest)
 	if got := fs.calls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1", got)
@@ -335,7 +348,7 @@ func TestRetryAfterCapExceededGivesUp(t *testing.T) {
 	fs := errStreamer(&Error{Class: ClassRateLimited, RetryAfter: 40 * time.Second, Err: errors.New("429")})
 	c := NewClient("p", p, fs)
 
-	_, err := c.Stream(context.Background(), nil)
+	_, err := c.Stream(context.Background(), nil, nil)
 	requireClass(t, err, ClassRateLimited)
 	if got := fs.calls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1 (Retry-After 超封顶放弃)", got)
@@ -359,7 +372,7 @@ func TestRetryAfterRespected(t *testing.T) {
 	c := NewClient("p", p, fs)
 
 	start := time.Now()
-	s, err := c.Stream(context.Background(), nil)
+	s, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
@@ -383,7 +396,7 @@ func TestClientDisconnectStopsRetry(t *testing.T) {
 	}}
 	c := NewClient("p", p, fs)
 
-	_, err := c.Stream(ctx, nil)
+	_, err := c.Stream(ctx, nil, nil)
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -400,7 +413,7 @@ func TestOverallTimeoutWrapsRetries(t *testing.T) {
 	fs := errStreamer(&Error{Class: ClassRateLimited, RetryAfter: 200 * time.Millisecond, Err: errors.New("429")})
 	c := NewClient("p", p, fs)
 
-	_, err := c.Stream(context.Background(), nil)
+	_, err := c.Stream(context.Background(), nil, nil)
 	requireClass(t, err, ClassTimeout)
 	if got := fs.calls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1", got)
@@ -411,7 +424,7 @@ func TestStreamEOF(t *testing.T) {
 	p := shortProfile()
 	c := NewClient("p", p, okStreamer(msg("hi"), msg("bye")))
 
-	s, err := c.Stream(context.Background(), nil)
+	s, err := c.Stream(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
@@ -475,5 +488,119 @@ func TestManagerSetProfileAppliedToNewClients(t *testing.T) {
 	}
 	if c.profile.Bulkhead != 3 {
 		t.Fatalf("profile.Bulkhead = %d, want 3 (SetProfile 覆盖生效)", c.profile.Bulkhead)
+	}
+}
+
+// 同 provider 不同 model：不同 Client（独立上游实例）、同一 gate（共享槽位与熔断）。
+func TestManagerClientsPerModelShareGate(t *testing.T) {
+	m := NewManager(func(opts UpstreamOptions) (Streamer, error) {
+		return okStreamer(msg("x")), nil
+	})
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("client m1: %v", err)
+	}
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o-mini"})
+	if err != nil {
+		t.Fatalf("client m2: %v", err)
+	}
+	c1Again, _ := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o"})
+	if c1 == c2 {
+		t.Fatal("不同 model 应返回不同 Client（独立上游实例）")
+	}
+	if c1Again != c1 {
+		t.Fatal("同 (provider, model) 应复用 Client")
+	}
+	if c1.g != c2.g {
+		t.Fatal("同 provider 的各 model Client 应共享同一 gate")
+	}
+}
+
+// 行为级断言：bulkhead 按 provider 共享——同 provider 另一模型的 Client 也抢不到槽。
+func TestManagerSharedBulkheadAcrossModels(t *testing.T) {
+	p := shortProfile()
+	p.Bulkhead = 1
+	m := NewManager(func(opts UpstreamOptions) (Streamer, error) {
+		return chunkThenHangStreamer(msg("hi")), nil
+	})
+	m.SetProfile("p1", p)
+
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("client m1: %v", err)
+	}
+	s, err := c1.Stream(context.Background(), nil, nil) // 占住唯一的槽
+	if err != nil {
+		t.Fatalf("stream m1: %v", err)
+	}
+	defer s.Close()
+
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o-mini"})
+	if err != nil {
+		t.Fatalf("client m2: %v", err)
+	}
+	if _, err := c2.Stream(context.Background(), nil, nil); !errors.Is(err, ErrProviderBusy) {
+		t.Fatalf("m2 stream err = %v, want ErrProviderBusy（同 provider 共享槽位）", err)
+	}
+}
+
+// 行为级断言：熔断按 provider 共享——c1 连续失败打熔断后，同 provider 另一模型秒拒。
+func TestManagerSharedBreakerAcrossModels(t *testing.T) {
+	p := shortProfile()
+	p.BreakerAfter = 2
+	p.MaxRetries = 0
+	m := NewManager(func(opts UpstreamOptions) (Streamer, error) {
+		if opts.Model == "bad" {
+			return errStreamer(&Error{Class: ClassProviderDown, Err: errors.New("down")}), nil
+		}
+		return okStreamer(msg("ok")), nil
+	})
+	m.SetProfile("p1", p)
+
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "bad"})
+	if err != nil {
+		t.Fatalf("client bad: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c1.Stream(context.Background(), nil, nil); err == nil {
+			t.Fatal("want error")
+		}
+	}
+
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "good"})
+	if err != nil {
+		t.Fatalf("client good: %v", err)
+	}
+	if _, err := c2.Stream(context.Background(), nil, nil); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("m2 stream err = %v, want ErrProviderUnavailable（同 provider 共享熔断）", err)
+	}
+}
+
+// SetProfile 只影响之后新建的 gate：已建 gate 上新增的 model Client 沿用旧 gate 的 profile。
+func TestManagerSetProfileOnlyNewGates(t *testing.T) {
+	m := NewManager(func(opts UpstreamOptions) (Streamer, error) {
+		return okStreamer(msg("x")), nil
+	})
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "m1"})
+	if err != nil {
+		t.Fatalf("client m1: %v", err)
+	}
+	override := DefaultProfile()
+	override.Bulkhead = 3
+	m.SetProfile("p1", override) // gate 已存在：不回灌
+	m.SetProfile("p2", override) // p2 无 gate：之后新建生效
+
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "m2"})
+	if err != nil {
+		t.Fatalf("client m2: %v", err)
+	}
+	if c2.profile.Bulkhead == 3 || c2.profile.Bulkhead != c1.profile.Bulkhead {
+		t.Fatalf("已建 gate 上的新 model 应沿用旧 profile: got %d, want %d",
+			c2.profile.Bulkhead, c1.profile.Bulkhead)
+	}
+
+	c3, _ := m.Client("p2", UpstreamOptions{Kind: KindOpenAI, Model: "m1"})
+	if c3.profile.Bulkhead != 3 {
+		t.Fatalf("新 provider gate 应用 SetProfile 覆盖: got %d, want 3", c3.profile.Bulkhead)
 	}
 }

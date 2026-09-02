@@ -69,11 +69,14 @@ func Run(cfg *config.Config) error {
 		return fmt.Errorf("init redis: %w", err)
 	}
 	// llm：共享 Transport + 流式 Client 壳注入 eino adapter（定制 transport 见 platform/llm/httpx.go）；
-	// Manager 按 provider 惰性创建受保护 Client（bulkhead → 熔断 → 重试 → 三层超时）。
+	// Manager 按 provider 惰性创建受保护 Client（bulkhead → 熔断 → 重试 → 三层超时），双层缓存：
+	// gate（槽位+熔断）按 provider 共享，Client 按 (provider, model) 独立上游实例。
 	llmTransport := llm.NewSharedTransport()
 	llmManager := llm.NewManager(llm.NewUpstreamFactory(llm.NewStreamClient(llmTransport)))
-	// TODO: 注入消费方——chat（对话引擎）。provider 的探测 / 模型同步走直连轻量 GET（NewJSONClient
-	// + 共享 transport），不经 Manager——元数据请求不产生 token 消费，不占 bulkhead / 熔断。
+	// TODO: 注入消费方——chat（对话引擎）。chat 接线时经 modelSvc.ResolveLLMConfig 取
+	// UpstreamOptions（provider 名 / kind / key / model 标识）再向 Manager 要 Client。
+	// provider 的探测 / 模型同步走直连轻量 GET（NewJSONClient + 共享 transport），不经 Manager
+	// ——元数据请求不产生 token 消费，不占 bulkhead / 熔断。
 	_ = llmManager
 	_ = llmTransport
 	// TODO: platform/budget（每用户限流 + 每日预算熔断，fail-open + 80% 告警）
