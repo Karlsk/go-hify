@@ -193,12 +193,21 @@ curl -s -b /tmp/hify-jar -X POST localhost:8080/api/v1/providers/$PID/models/syn
 curl -s -b /tmp/hify-jar 'localhost:8080/api/v1/providers/'$PID'/models' | jq '.data[]|select(.model_id=="mock-chat")|.enabled'  # → true
 ```
 
-**手编保护**：手动 PUT 改 `mock-chat` 的 name 为 "我改过的"，把桩重启为不同目录
-（如 `{"data":[{"id":"mock-chat"},{"id":"mock-embed"},{"id":"mock-new"}]}`）再 sync：
+**手编保护（按 source 判定）**：保护对象是 `source:"manual"` 的行，不是"被手动改过的行"——
+PUT 改名不翻 source，discovered 行改名后仍会被 sync 刷回。两条都验：
 
 ```bash
+# ① discovered 行改名 → 会被上游刷回（name 归位、enabled 不碰），updated 计数
+curl -s -b /tmp/hify-jar -X PUT localhost:8080/api/v1/models/$MID -H 'Content-Type: application/json' \
+  -d '{"provider_id":'"$PID"',"name":"我改过的","model_id":"mock-chat","capability":"chat","enabled":true}' >/dev/null
+# ② manual 行撞上游 id → 完全不被触碰：先建（name 用"我手编的"区别于上游）
+curl -s -b /tmp/hify-jar -X POST localhost:8080/api/v1/models -H 'Content-Type: application/json' \
+  -d '{"provider_id":'"$PID"',"name":"我手编的","model_id":"manual-collide","capability":"chat"}' >/dev/null
+# 桩重启为目录含 manual-collide（{"data":[{"id":"mock-chat"},{"id":"mock-embed"},{"id":"manual-collide","display_name":"Upstream Name"}]}）后 sync：
 curl -s -b /tmp/hify-jar -X POST localhost:8080/api/v1/providers/$PID/models/sync | jq '.data'
-# → {"added":1,"updated":0}——只有 mock-new 新增，手编行（manual 来源）完全不被触碰
+# → {"added":0,"updated":1}——updated 是 ① 的 discovered 行刷回；② 的 manual 行 name 仍"我手编的"、enabled 仍 true
+curl -s -b /tmp/hify-jar 'localhost:8080/api/v1/providers/'$PID'/models' | jq '.data[]|select(.model_id=="manual-collide")|{name,enabled,source}'
+# → {"name":"我手编的","enabled":true,"source":"manual"}
 ```
 
 **上游失败**：把桩 kill 掉再 sync → HTTP 503 + `error.code:"SERVICE_UNAVAILABLE"`；
