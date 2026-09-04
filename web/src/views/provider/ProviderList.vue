@@ -105,7 +105,7 @@
         <el-form-item label="Base URL" prop="baseUrl">
           <el-input
             v-model="form.baseUrl"
-            placeholder="如 https://api.openai.com/v1（兼容网关必填）"
+            placeholder="可选；空 = 默认官方端点，兼容网关填完整前缀（含 /v1）"
           />
         </el-form-item>
         <!-- PUT 全量提交含 enabled：不处理的话任何编辑都会把提供商停用（Go bool 零值） -->
@@ -140,37 +140,33 @@ import {
 // ---- kind 展示与校验配置（对齐后端 api 层枚举） ----
 
 const KIND_OPTIONS: Array<{ value: ProviderKind; label: string }> = [
-  { value: 'openai', label: 'OpenAI' },
+  { value: 'openai_compatible', label: 'OpenAI 兼容（官方 / 网关）' },
   { value: 'claude', label: 'Claude' },
   { value: 'gemini', label: 'Gemini' },
   { value: 'ollama', label: 'Ollama' },
-  { value: 'openai_compatible', label: '兼容网关（OpenAI Compatible）' },
 ]
 
-// EP 仅 5 种 tag 色；openai_compatible 与 openai 同色不同文案（不用 danger 表达中性类目）
+// EP 仅 5 种 tag 色
 const KIND_TAG: Record<ProviderKind, 'primary' | 'warning' | 'success' | 'info'> = {
-  openai: 'primary',
+  openai_compatible: 'primary',
   claude: 'warning',
   gemini: 'success',
   ollama: 'info',
-  openai_compatible: 'primary',
 }
 
 const KIND_LABEL: Record<ProviderKind, string> = {
-  openai: 'OpenAI',
+  openai_compatible: 'OpenAI 兼容',
   claude: 'Claude',
   gemini: 'Gemini',
   ollama: 'Ollama',
-  openai_compatible: '兼容网关',
 }
 
-/** api_key 必填的 kind（对齐后端 kindNeedsAPIKey：ollama 无鉴权、兼容网关可选） */
+/** api_key 必填的 kind（对齐后端 kindNeedsAPIKey：ollama 无鉴权；无鉴权本地网关可填占位串） */
 const KIND_NEEDS_KEY: Record<ProviderKind, boolean> = {
-  openai: true,
+  openai_compatible: true,
   claude: true,
   gemini: true,
   ollama: false,
-  openai_compatible: false,
 }
 
 // ---- 健康状态展示（null 归 unknown——从未探测） ----
@@ -247,12 +243,12 @@ const dialogRef = ref<{ open: (data?: ProviderForm) => void }>()
 const dialogVisible = ref(false)
 const isEdit = ref(false)
 /** rules 需感知弹窗内的 kind（api_key 必填按 kind 分）：选择变化时同步镜像 */
-const formKind = ref<ProviderKind>('openai')
+const formKind = ref<ProviderKind>('openai_compatible')
 
 const emptyForm = (): ProviderForm => ({
   id: '',
   name: '',
-  kind: 'openai',
+  kind: 'openai_compatible',
   apiKey: '',
   baseUrl: '',
   hasApiKey: false,
@@ -284,18 +280,14 @@ const rules = computed<FormRules>(() => ({
       ? [{ required: true, message: '该类型必须提供 API Key', trigger: 'blur' }]
       : [],
   baseUrl: [
-    {
-      required: formKind.value === 'openai_compatible',
-      message: '兼容网关必填 Base URL',
-      trigger: 'blur',
-    },
+    // 可选：空 = kind 默认端点（openai_compatible 默认官方 api.openai.com/v1）
     { validator: validateBaseUrl, trigger: 'blur' },
   ],
 }))
 
 function openCreate(): void {
   isEdit.value = false
-  formKind.value = 'openai'
+  formKind.value = 'openai_compatible'
   dialogRef.value?.open()
 }
 

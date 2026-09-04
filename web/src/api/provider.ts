@@ -11,13 +11,12 @@ import type { PageQuery } from '@/types'
 
 // ---- 类型（对齐 provider/api/schema.go） ----
 
-/** 提供商类型（kind 枚举，5 类；创建后不可改） */
+/** 提供商类型（kind 枚举，4 类；创建后不可改）。openai_compatible 含官方 OpenAI（base_url 空 = 默认官方端点） */
 export type ProviderKind =
-  | 'openai'
+  | 'openai_compatible'
   | 'claude'
   | 'gemini'
   | 'ollama'
-  | 'openai_compatible'
 
 /** 健康状态（provider_health.status，DEGRADED 状态机见 db_model.md §2.3） */
 export type HealthStatus = 'up' | 'degraded' | 'down' | 'unknown'
