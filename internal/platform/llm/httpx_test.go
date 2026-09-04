@@ -32,7 +32,7 @@ func TestNewSharedTransport(t *testing.T) {
 		t.Error("DialContext must be set (dial timeout 5s)")
 	}
 	// 不变量：ResponseHeaderTimeout 大于任何 kind 的 TTFT → 永远 ctx 先到期、错误类是我们的。
-	for _, kind := range []ProviderKind{KindOpenAI, KindClaude, KindGemini, KindOllama} {
+	for _, kind := range []ProviderKind{KindOpenAICompatible, KindClaude, KindGemini, KindOllama} {
 		if tr.ResponseHeaderTimeout <= ProfileForKind(kind).TTFT {
 			t.Errorf("ResponseHeaderTimeout %v <= TTFT(%s) %v, ctx-first invariant broken",
 				tr.ResponseHeaderTimeout, kind, ProfileForKind(kind).TTFT)

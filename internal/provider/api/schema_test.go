@@ -9,11 +9,10 @@ import (
 // 常量钉住：DB CHECK / 前端枚举 / eino 适配都依赖这些字符串值，改动即破坏性变更。
 func TestConstantsPinned(t *testing.T) {
 	cases := []struct{ got, want string }{
-		{KindOpenAI, "openai"},
+		{KindOpenAICompatible, "openai_compatible"},
 		{KindClaude, "claude"},
 		{KindGemini, "gemini"},
 		{KindOllama, "ollama"},
-		{KindOpenAICompatible, "openai_compatible"},
 		{CapabilityChat, "chat"},
 		{CapabilityEmbedding, "embedding"},
 		{SourceDiscovered, "discovered"},
@@ -36,17 +35,16 @@ func TestValidateProvider_Create(t *testing.T) {
 		req     CreateProviderReq
 		wantErr bool
 	}{
-		{"openai 带密钥", CreateProviderReq{Name: "OpenAI", Kind: KindOpenAI, APIKey: "sk-xxx"}, false},
-		{"openai 缺密钥", CreateProviderReq{Name: "OpenAI", Kind: KindOpenAI}, true},
+		{"官方 OpenAI（空 base_url = 默认端点）", CreateProviderReq{Name: "OpenAI", Kind: KindOpenAICompatible, APIKey: "sk-xxx"}, false},
+		{"缺密钥", CreateProviderReq{Name: "OpenAI", Kind: KindOpenAICompatible}, true},
 		{"claude 缺密钥", CreateProviderReq{Name: "Claude", Kind: KindClaude}, true},
 		{"gemini 缺密钥", CreateProviderReq{Name: "Gemini", Kind: KindGemini}, true},
 		{"ollama 无密钥合法", CreateProviderReq{Name: "本机", Kind: KindOllama}, false},
-		{"openai_compatible 缺 base_url", CreateProviderReq{Name: "vLLM", Kind: KindOpenAICompatible}, true},
-		{"openai_compatible 齐全", CreateProviderReq{Name: "vLLM", Kind: KindOpenAICompatible, BaseURL: "http://localhost:8000/v1"}, false},
-		{"名称为空", CreateProviderReq{Name: "", Kind: KindOpenAI, APIKey: "sk-xxx"}, true},
+		{"兼容网关带 base_url", CreateProviderReq{Name: "vLLM", Kind: KindOpenAICompatible, APIKey: "k", BaseURL: "http://localhost:8000/v1"}, false},
+		{"名称为空", CreateProviderReq{Name: "", Kind: KindOpenAICompatible, APIKey: "sk-xxx"}, true},
 		{"kind 非法", CreateProviderReq{Name: "Azure", Kind: "azure", APIKey: "xxx"}, true},
-		{"base_url 协议非法", CreateProviderReq{Name: "OpenAI", Kind: KindOpenAI, APIKey: "sk-xxx", BaseURL: "ftp://api.openai.com"}, true},
-		{"base_url https 合法", CreateProviderReq{Name: "OpenAI", Kind: KindOpenAI, APIKey: "sk-xxx", BaseURL: "https://api.openai.com/v1"}, false},
+		{"base_url 协议非法", CreateProviderReq{Name: "OpenAI", Kind: KindOpenAICompatible, APIKey: "sk-xxx", BaseURL: "ftp://api.openai.com"}, true},
+		{"base_url https 合法", CreateProviderReq{Name: "OpenAI", Kind: KindOpenAICompatible, APIKey: "sk-xxx", BaseURL: "https://api.openai.com/v1"}, false},
 	}
 	for _, c := range cases {
 		err := c.req.Validate()
@@ -85,11 +83,11 @@ func TestValidateProvider_UpdateWithKind(t *testing.T) {
 		kind    string
 		wantErr bool
 	}{
-		{"openai 合法", UpdateProviderReq{ID: 1, Name: "OpenAI"}, KindOpenAI, false},
-		{"openai_compatible 缺 base_url", UpdateProviderReq{ID: 1, Name: "vLLM"}, KindOpenAICompatible, true},
-		{"keep_alive 非 ollama 被拒", UpdateProviderReq{ID: 1, Name: "x", ExtraConfig: map[string]any{"keep_alive": "30m"}}, KindOpenAI, true},
+		{"合法（空 base_url 走默认端点）", UpdateProviderReq{ID: 1, Name: "OpenAI"}, KindOpenAICompatible, false},
+		{"兼容网关空 base_url 合法", UpdateProviderReq{ID: 1, Name: "vLLM"}, KindOpenAICompatible, false},
+		{"keep_alive 非 ollama 被拒", UpdateProviderReq{ID: 1, Name: "x", ExtraConfig: map[string]any{"keep_alive": "30m"}}, KindOpenAICompatible, true},
 		{"keep_alive ollama 放行", UpdateProviderReq{ID: 1, Name: "x", ExtraConfig: map[string]any{"keep_alive": "30m"}}, KindOllama, false},
-		{"ID 缺失", UpdateProviderReq{Name: "x"}, KindOpenAI, true},
+		{"ID 缺失", UpdateProviderReq{Name: "x"}, KindOpenAICompatible, true},
 	}
 	for _, c := range cases {
 		err := c.req.ValidateWithKind(c.kind)
@@ -124,23 +122,23 @@ func TestValidateExtraConfig(t *testing.T) {
 		extra   map[string]any
 		wantErr bool
 	}{
-		{"空 map", KindOpenAI, map[string]any{}, false},
-		{"nil map", KindOpenAI, nil, false},
-		{"bulkhead 合法", KindOpenAI, map[string]any{"bulkhead": float64(16)}, false},
-		{"bulkhead 下界", KindOpenAI, map[string]any{"bulkhead": float64(1)}, false},
-		{"bulkhead 上界", KindOpenAI, map[string]any{"bulkhead": float64(128)}, false},
-		{"bulkhead 超 上界", KindOpenAI, map[string]any{"bulkhead": float64(129)}, true},
-		{"bulkhead 零值", KindOpenAI, map[string]any{"bulkhead": float64(0)}, true},
-		{"bulkhead 非整数", KindOpenAI, map[string]any{"bulkhead": 1.5}, true},
-		{"bulkhead 字符串", KindOpenAI, map[string]any{"bulkhead": "16"}, true},
-		{"bulkhead 布尔", KindOpenAI, map[string]any{"bulkhead": true}, true},
-		{"ttft_seconds 合法", KindOpenAI, map[string]any{"ttft_seconds": float64(30)}, false},
+		{"空 map", KindOpenAICompatible, map[string]any{}, false},
+		{"nil map", KindOpenAICompatible, nil, false},
+		{"bulkhead 合法", KindOpenAICompatible, map[string]any{"bulkhead": float64(16)}, false},
+		{"bulkhead 下界", KindOpenAICompatible, map[string]any{"bulkhead": float64(1)}, false},
+		{"bulkhead 上界", KindOpenAICompatible, map[string]any{"bulkhead": float64(128)}, false},
+		{"bulkhead 超 上界", KindOpenAICompatible, map[string]any{"bulkhead": float64(129)}, true},
+		{"bulkhead 零值", KindOpenAICompatible, map[string]any{"bulkhead": float64(0)}, true},
+		{"bulkhead 非整数", KindOpenAICompatible, map[string]any{"bulkhead": 1.5}, true},
+		{"bulkhead 字符串", KindOpenAICompatible, map[string]any{"bulkhead": "16"}, true},
+		{"bulkhead 布尔", KindOpenAICompatible, map[string]any{"bulkhead": true}, true},
+		{"ttft_seconds 合法", KindOpenAICompatible, map[string]any{"ttft_seconds": float64(30)}, false},
 		{"ttft_seconds 上界", KindOllama, map[string]any{"ttft_seconds": float64(600)}, false},
 		{"ttft_seconds 超 上界", KindOllama, map[string]any{"ttft_seconds": float64(601)}, true},
 		{"keep_alive ollama 合法", KindOllama, map[string]any{"keep_alive": "30m"}, false},
-		{"keep_alive 非 ollama", KindOpenAI, map[string]any{"keep_alive": "30m"}, true},
+		{"keep_alive 非 ollama", KindOpenAICompatible, map[string]any{"keep_alive": "30m"}, true},
 		{"keep_alive 非字符串", KindOllama, map[string]any{"keep_alive": float64(5)}, true},
-		{"未知键", KindOpenAI, map[string]any{"timeout": float64(30)}, true},
+		{"未知键", KindOpenAICompatible, map[string]any{"timeout": float64(30)}, true},
 	}
 	for _, c := range cases {
 		err := validateExtraConfig(c.kind, c.extra)
@@ -196,7 +194,7 @@ func TestProviderSchema_JSONNoSecrets(t *testing.T) {
 	s := ProviderSchema{}
 	s.ID = "12345678901234567" // 超过 2^53 的 id 也不丢精度（字符串化）
 	s.Name = "OpenAI"
-	s.Kind = KindOpenAI
+	s.Kind = KindOpenAICompatible
 	s.HasAPIKey = true
 	s.ExtraConfig = map[string]any{}
 
@@ -223,7 +221,7 @@ func TestProviderDetailSchema_JSON(t *testing.T) {
 	d := ProviderDetailSchema{Models: []ModelSchema{}, Health: nil}
 	d.ID = "1"
 	d.Name = "OpenAI"
-	d.Kind = KindOpenAI
+	d.Kind = KindOpenAICompatible
 	d.HasAPIKey = true
 	d.ExtraConfig = map[string]any{}
 

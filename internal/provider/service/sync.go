@@ -119,7 +119,7 @@ func parseModels(kind string, r io.Reader) ([]discoveredModel, error) {
 
 	out := make([]discoveredModel, 0, len(payload.Data)+len(payload.Models))
 	switch kind {
-	case providerapi.KindOpenAI, providerapi.KindOpenAICompatible, providerapi.KindClaude:
+	case providerapi.KindOpenAICompatible, providerapi.KindClaude:
 		for _, d := range payload.Data {
 			if d.ID == "" {
 				continue

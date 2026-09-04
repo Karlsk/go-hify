@@ -50,14 +50,20 @@ func newChatModel(opts UpstreamOptions, hc *http.Client) (model.ChatModel, error
 	// eino 构造函数签名要求 ctx，但构造期无网络调用，用 Background 即可。
 	ctx := context.Background()
 	switch opts.Kind {
-	case KindOpenAI:
-		// 注意：eino openai adapter 的 BaseURL 字段仅 Azure 场景使用，
-		// 非 Azure 官方端点无自定义入口，故 openai 的 opts.BaseURL 暂不映射。
-		return openai.NewChatModel(ctx, &openai.ChatModelConfig{
+	case KindOpenAICompatible:
+		// OpenAI 兼容端点统一走 openai adapter（chat completions 协议）。adapter 非 Azure
+		// 分支支持 BaseURL 覆盖（chat_model.go NewClient：len(config.BaseURL) > 0 即生效，
+		// 字段上「Azure endpoint」注释是过时文档）；空串则用 adapter 默认官方端点
+		// https://api.openai.com/v1——官方 OpenAI 即 base_url 空的 openai_compatible。
+		cfg := &openai.ChatModelConfig{
 			APIKey:     opts.APIKey,
 			Model:      opts.Model,
 			HTTPClient: hc,
-		})
+		}
+		if opts.BaseURL != "" {
+			cfg.BaseURL = opts.BaseURL // 语义为带 /v1 的完整前缀，请求时拼 /chat/completions
+		}
+		return openai.NewChatModel(ctx, cfg)
 	case KindClaude:
 		cfg := &claude.Config{
 			APIKey:     opts.APIKey,

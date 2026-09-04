@@ -39,10 +39,15 @@ func DefaultProfile() Profile {
 type ProviderKind string
 
 const (
-	KindOpenAI ProviderKind = "openai"
-	KindClaude ProviderKind = "claude"
-	KindGemini ProviderKind = "gemini"
-	KindOllama ProviderKind = "ollama"
+	// KindOpenAICompatible OpenAI 兼容端点：官方 OpenAI（base_url 空 → adapter 默认
+	// https://api.openai.com/v1）、代理/镜像、国产兼容端点（mimo 等）统一走此 kind。
+	// 不设独立的「openai」kind——协议同一套，只差 base_url。
+	// 预留：openai_response（OpenAI Responses API）待 eino-ext 底层 SDK 迁到官方
+	// openai-go 后再开（当前 acl/openai 基于 sashabaranov fork，仅实现 chat completions）。
+	KindOpenAICompatible ProviderKind = "openai_compatible"
+	KindClaude           ProviderKind = "claude"
+	KindGemini           ProviderKind = "gemini"
+	KindOllama           ProviderKind = "ollama"
 )
 
 // ProfileForKind 返回该供应商的默认 Profile（CLAUDE.md《每供应商 Profile 与行为差异》）：

@@ -17,7 +17,7 @@ import (
 
 // seedTwoProviders 建 openai（id=1）与 claude（id=2）两个 provider，返回两个 id。
 func seedTwoProviders(st *memStore) (openai uint64, claude uint64) {
-	openai = st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAI, Enabled: true}).ID
+	openai = st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, Enabled: true}).ID
 	claude = st.seed(&Provider{Name: "Claude", Kind: providerapi.KindClaude, Enabled: true}).ID
 	return openai, claude
 }

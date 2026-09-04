@@ -450,18 +450,18 @@ func TestManagerCachesClients(t *testing.T) {
 	m := NewManager(func(opts UpstreamOptions) (Streamer, error) {
 		return okStreamer(msg("x")), nil
 	})
-	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI})
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible})
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
-	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI})
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible})
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
 	if c1 != c2 {
 		t.Fatal("same key should return cached client（共享槽位与熔断状态）")
 	}
-	c3, _ := m.Client("p2", UpstreamOptions{Kind: KindOpenAI})
+	c3, _ := m.Client("p2", UpstreamOptions{Kind: KindOpenAICompatible})
 	if c1 == c3 {
 		t.Fatal("different key should create new client")
 	}
@@ -469,7 +469,7 @@ func TestManagerCachesClients(t *testing.T) {
 
 func TestManagerNilFactory(t *testing.T) {
 	m := NewManager(nil)
-	if _, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI}); err == nil {
+	if _, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible}); err == nil {
 		t.Fatal("want error when factory not injected")
 	}
 }
@@ -482,7 +482,7 @@ func TestManagerSetProfileAppliedToNewClients(t *testing.T) {
 	override.Bulkhead = 3
 	m.SetProfile("p1", override)
 
-	c, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI})
+	c, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible})
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
@@ -496,15 +496,15 @@ func TestManagerClientsPerModelShareGate(t *testing.T) {
 	m := NewManager(func(opts UpstreamOptions) (Streamer, error) {
 		return okStreamer(msg("x")), nil
 	})
-	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o"})
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "gpt-4o"})
 	if err != nil {
 		t.Fatalf("client m1: %v", err)
 	}
-	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o-mini"})
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "gpt-4o-mini"})
 	if err != nil {
 		t.Fatalf("client m2: %v", err)
 	}
-	c1Again, _ := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o"})
+	c1Again, _ := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "gpt-4o"})
 	if c1 == c2 {
 		t.Fatal("不同 model 应返回不同 Client（独立上游实例）")
 	}
@@ -525,7 +525,7 @@ func TestManagerSharedBulkheadAcrossModels(t *testing.T) {
 	})
 	m.SetProfile("p1", p)
 
-	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o"})
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "gpt-4o"})
 	if err != nil {
 		t.Fatalf("client m1: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestManagerSharedBulkheadAcrossModels(t *testing.T) {
 	}
 	defer s.Close()
 
-	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "gpt-4o-mini"})
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "gpt-4o-mini"})
 	if err != nil {
 		t.Fatalf("client m2: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestManagerSharedBreakerAcrossModels(t *testing.T) {
 	})
 	m.SetProfile("p1", p)
 
-	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "bad"})
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "bad"})
 	if err != nil {
 		t.Fatalf("client bad: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestManagerSharedBreakerAcrossModels(t *testing.T) {
 		}
 	}
 
-	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "good"})
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "good"})
 	if err != nil {
 		t.Fatalf("client good: %v", err)
 	}
@@ -581,7 +581,7 @@ func TestManagerSetProfileOnlyNewGates(t *testing.T) {
 	m := NewManager(func(opts UpstreamOptions) (Streamer, error) {
 		return okStreamer(msg("x")), nil
 	})
-	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "m1"})
+	c1, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "m1"})
 	if err != nil {
 		t.Fatalf("client m1: %v", err)
 	}
@@ -590,7 +590,7 @@ func TestManagerSetProfileOnlyNewGates(t *testing.T) {
 	m.SetProfile("p1", override) // gate 已存在：不回灌
 	m.SetProfile("p2", override) // p2 无 gate：之后新建生效
 
-	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAI, Model: "m2"})
+	c2, err := m.Client("p1", UpstreamOptions{Kind: KindOpenAICompatible, Model: "m2"})
 	if err != nil {
 		t.Fatalf("client m2: %v", err)
 	}
@@ -599,7 +599,7 @@ func TestManagerSetProfileOnlyNewGates(t *testing.T) {
 			c2.profile.Bulkhead, c1.profile.Bulkhead)
 	}
 
-	c3, _ := m.Client("p2", UpstreamOptions{Kind: KindOpenAI, Model: "m1"})
+	c3, _ := m.Client("p2", UpstreamOptions{Kind: KindOpenAICompatible, Model: "m1"})
 	if c3.profile.Bulkhead != 3 {
 		t.Fatalf("新 provider gate 应用 SetProfile 覆盖: got %d, want 3", c3.profile.Bulkhead)
 	}

@@ -22,7 +22,7 @@ func TestProviderCreate_OK(t *testing.T) {
 	ctx := context.Background()
 
 	s, err := ps.Create(ctx, providerapi.CreateProviderReq{
-		Name: "OpenAI", Kind: providerapi.KindOpenAI, APIKey: "sk-plaintext-key-9876",
+		Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, APIKey: "sk-plaintext-key-9876",
 	})
 	require.NoError(t, err)
 	assert.NotEmpty(t, s.ID, "id 应已字符串化回填")
@@ -58,10 +58,10 @@ func TestProviderCreate_NoKeyOllama(t *testing.T) {
 func TestProviderCreate_NameConflict(t *testing.T) {
 	_, _, ps, _ := newTestService(t)
 	ctx := context.Background()
-	_, err := ps.Create(ctx, providerapi.CreateProviderReq{Name: "OpenAI", Kind: providerapi.KindOpenAI, APIKey: "sk-x"})
+	_, err := ps.Create(ctx, providerapi.CreateProviderReq{Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, APIKey: "sk-x"})
 	require.NoError(t, err)
 
-	_, err = ps.Create(ctx, providerapi.CreateProviderReq{Name: "OpenAI", Kind: providerapi.KindOpenAI, APIKey: "sk-y"})
+	_, err = ps.Create(ctx, providerapi.CreateProviderReq{Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, APIKey: "sk-y"})
 	assert.ErrorIs(t, err, providerapi.ErrProviderNameConflict)
 }
 
@@ -70,7 +70,7 @@ func TestProviderCreate_UniqueViolationRace(t *testing.T) {
 	st, _, ps, _ := newTestService(t)
 	st.createProviderErr = pgErr("23505")
 
-	_, err := ps.Create(context.Background(), providerapi.CreateProviderReq{Name: "x", Kind: providerapi.KindOpenAI, APIKey: "sk-x"})
+	_, err := ps.Create(context.Background(), providerapi.CreateProviderReq{Name: "x", Kind: providerapi.KindOpenAICompatible, APIKey: "sk-x"})
 	assert.ErrorIs(t, err, providerapi.ErrProviderNameConflict)
 }
 
@@ -149,14 +149,14 @@ func TestProviderGet_DecryptFailsSkipMask(t *testing.T) {
 func TestProviderList_FiltersAndPaginates(t *testing.T) {
 	st, _, ps, _ := newTestService(t)
 	ctx := context.Background()
-	st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAI, Enabled: true})
+	st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, Enabled: true})
 	st.seed(&Provider{Name: "Claude", Kind: providerapi.KindClaude, Enabled: false})
 	st.seed(&Provider{Name: "vLLM", Kind: providerapi.KindOpenAICompatible, BaseURL: "http://v:8000/v1", Enabled: false})
 
-	// kind 筛选
-	res, err := ps.List(ctx, providerapi.ListProvidersReq{Kind: providerapi.KindOpenAI})
+	// kind 筛选（kind 并入后 OpenAI 与 vLLM 同为 openai_compatible，共 2 条）
+	res, err := ps.List(ctx, providerapi.ListProvidersReq{Kind: providerapi.KindOpenAICompatible})
 	require.NoError(t, err)
-	assert.EqualValues(t, 1, res.Total)
+	assert.EqualValues(t, 2, res.Total)
 	assert.Equal(t, "OpenAI", res.Items[0].Name)
 
 	// enabled=false 筛选（指针区分未传）
@@ -201,7 +201,7 @@ func TestProviderList_CachedSecondCall(t *testing.T) {
 func TestProviderList_FillsAggregates(t *testing.T) {
 	st, _, ps, _ := newTestService(t)
 	ctx := context.Background()
-	a := st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAI, Enabled: true})
+	a := st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, Enabled: true})
 	st.seed(&Provider{Name: "Ollama", Kind: providerapi.KindOllama, Enabled: true})
 	lat := int32(87)
 	st.seedHealth(&ProviderHealth{ProviderID: a.ID, Status: providerapi.HealthUp, LatencyMs: &lat})
@@ -254,7 +254,7 @@ func TestProviderList_KindInvalid(t *testing.T) {
 // 超大 page 的 (page-1)*size 溢出曾致负偏移切片 panic；现应安静返回空页。
 func TestProviderList_HugePageNoPanic(t *testing.T) {
 	st, _, ps, _ := newTestService(t)
-	st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAI, Enabled: true})
+	st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, Enabled: true})
 
 	res, err := ps.List(context.Background(), providerapi.ListProvidersReq{Page: math.MaxInt, PageSize: 20})
 	require.NoError(t, err)
@@ -329,14 +329,14 @@ func TestProviderUpdate_NotFoundAndConflict(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// 更新时用库内真实 kind 补验：compatible 清空 base_url 应被拒。
+// 更新时用库内真实 kind 补验：kind 并入后 base_url 可选，清空 = 回默认端点，放行。
 func TestProviderUpdate_ValidateWithRealKind(t *testing.T) {
 	st, _, ps, _ := newTestService(t)
 	ctx := context.Background()
 	id := st.seed(&Provider{Name: "vLLM", Kind: providerapi.KindOpenAICompatible, BaseURL: "http://v:8000/v1"}).ID
 
 	_, err := ps.Update(ctx, providerapi.UpdateProviderReq{ID: id, Name: "vLLM"})
-	assert.Error(t, err, "openai_compatible 更新缺 base_url 应报错")
+	assert.NoError(t, err, "openai_compatible 更新缺 base_url 应放行（空 = 默认端点）")
 }
 
 func TestProviderUpdate_UniqueViolationRace(t *testing.T) {
@@ -409,7 +409,7 @@ func TestProviderTestConnection_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 	ps := newProbeService(st, cm, srv.Client())
-	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	id := seedProbeProvider(st, providerapi.KindOpenAICompatible, srv.URL)
 	require.True(t, warmDetail(t, ctx, ps, mr, id), "预热 detail（此刻 health 为 nil）")
 
 	res, err := ps.TestConnection(ctx, providerapi.TestConnectionReq{ID: id})
@@ -444,7 +444,7 @@ func TestProviderTestConnection_FailuresToDown(t *testing.T) {
 	}))
 	defer srv.Close()
 	ps := newProbeService(st, cm, srv.Client())
-	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	id := seedProbeProvider(st, providerapi.KindOpenAICompatible, srv.URL)
 
 	wantStatus := []string{providerapi.HealthDegraded, providerapi.HealthDegraded, providerapi.HealthDown}
 	for i, want := range wantStatus {
@@ -481,7 +481,7 @@ func TestProviderTestConnection_DecryptFailsSkipsProbe(t *testing.T) {
 	wrong := &providerService{
 		store: st, cm: cm, master: []byte("99999999999999999999999999999999"), probe: srv.Client(),
 	}
-	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	id := seedProbeProvider(st, providerapi.KindOpenAICompatible, srv.URL)
 
 	res, err := wrong.TestConnection(ctx, providerapi.TestConnectionReq{ID: id})
 	require.NoError(t, err, "解密失败是可预期的配置问题，返回失败结果而非 error")
@@ -498,7 +498,7 @@ func TestProviderTestConnection_UpsertError(t *testing.T) {
 	}))
 	defer srv.Close()
 	ps := newProbeService(st, cm, srv.Client())
-	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	id := seedProbeProvider(st, providerapi.KindOpenAICompatible, srv.URL)
 	st.upsertHealthErr = errors.New("db down")
 
 	_, err := ps.TestConnection(context.Background(), providerapi.TestConnectionReq{ID: id})

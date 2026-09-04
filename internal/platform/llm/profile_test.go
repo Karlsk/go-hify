@@ -36,7 +36,7 @@ func TestProfileForKindOllamaTTFT(t *testing.T) {
 		t.Fatalf("ollama TTFT = %v, want 120s", got)
 	}
 	// 其余 kind 走默认
-	if got := ProfileForKind(KindOpenAI).TTFT; got != 30*time.Second {
+	if got := ProfileForKind(KindOpenAICompatible).TTFT; got != 30*time.Second {
 		t.Fatalf("openai TTFT = %v, want 30s", got)
 	}
 }

@@ -30,20 +30,18 @@ func TestProbeTarget(t *testing.T) {
 		noAuth  bool              // 期望完全无认证头
 	}{
 		{
-			name: "openai 默认 base", kind: providerapi.KindOpenAI, base: "", key: "sk-x",
+			name: "openai 默认 base", kind: providerapi.KindOpenAICompatible, base: "", key: "sk-x",
 			wantURL: "https://api.openai.com/v1/models",
 			headers: map[string]string{"Authorization": "Bearer sk-x"},
 		},
 		{
-			name: "openai 自定义 base 尾斜杠容错", kind: providerapi.KindOpenAI, base: "http://gw:8000/v1/", key: "sk-x",
+			name: "openai 自定义 base 尾斜杠容错", kind: providerapi.KindOpenAICompatible, base: "http://gw:8000/v1/", key: "sk-x",
 			wantURL: "http://gw:8000/v1/models",
 			headers: map[string]string{"Authorization": "Bearer sk-x"},
 		},
 		{
-			name: "compatible 缺 base 报错", kind: providerapi.KindOpenAICompatible, base: "", key: "k",
-			wantErr: true,
-		},
-		{
+			// 空串由 kindDefaultBase 在调用方兜底成默认端点（openai_compatible → 官方），
+			// probeTarget 自身只处理「无默认值的 kind 空串」——现无此 kind，防御分支不设用例
 			name: "compatible 带 base 走 Bearer", kind: providerapi.KindOpenAICompatible, base: "http://vllm:8000/v1", key: "k",
 			wantURL: "http://vllm:8000/v1/models",
 			headers: map[string]string{"Authorization": "Bearer k"},
@@ -106,7 +104,7 @@ func TestProbe_OK(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		res := probe(context.Background(), srv.Client(), providerapi.KindOpenAI, srv.URL, "sk-live")
+		res := probe(context.Background(), srv.Client(), providerapi.KindOpenAICompatible, srv.URL, "sk-live")
 		assert.True(t, res.success)
 		assert.Empty(t, res.errMsg)
 		assert.EqualValues(t, 2, res.modelCount)
@@ -156,7 +154,7 @@ func TestProbe_FailureClassification(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		res := probe(context.Background(), srv.Client(), providerapi.KindOpenAI, srv.URL, "sk")
+		res := probe(context.Background(), srv.Client(), providerapi.KindOpenAICompatible, srv.URL, "sk")
 		assert.True(t, res.success, "限流 ≠ 不可达")
 		assert.EqualValues(t, 0, res.modelCount, "429 body 非模型列表")
 	})
@@ -168,7 +166,7 @@ func TestProbe_FailureClassification(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		res := probe(context.Background(), srv.Client(), providerapi.KindOpenAI, srv.URL, "sk-bad")
+		res := probe(context.Background(), srv.Client(), providerapi.KindOpenAICompatible, srv.URL, "sk-bad")
 		assert.False(t, res.success)
 		assert.Contains(t, res.errMsg, "401")
 		assert.Contains(t, res.errMsg, "鉴权失败")
@@ -206,7 +204,7 @@ func TestProbe_FailureClassification(t *testing.T) {
 		defer srv.Close()
 		slow := &http.Client{Timeout: 50 * time.Millisecond}
 
-		res := probe(context.Background(), slow, providerapi.KindOpenAI, srv.URL, "sk")
+		res := probe(context.Background(), slow, providerapi.KindOpenAICompatible, srv.URL, "sk")
 		assert.False(t, res.success)
 		assert.NotEmpty(t, res.errMsg)
 	})
@@ -340,8 +338,8 @@ func TestRunProbeRound_OnlyEnabled(t *testing.T) {
 	defer srv.Close()
 	svc := newSchedulerService(st, cm, srv.Client(), time.Minute)
 
-	enabled1 := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
-	enabled2 := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	enabled1 := seedProbeProvider(st, providerapi.KindOpenAICompatible, srv.URL)
+	enabled2 := seedProbeProvider(st, providerapi.KindOpenAICompatible, srv.URL)
 	disabled := seedProbeProvider(st, providerapi.KindClaude, srv.URL)
 	st.providers[disabled].Enabled = false
 
@@ -361,7 +359,7 @@ func TestRunProbeRound_ProbeUpdatesHealth(t *testing.T) {
 	}))
 	defer srv.Close()
 	svc := newSchedulerService(st, cm, srv.Client(), time.Minute)
-	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	id := seedProbeProvider(st, providerapi.KindOpenAICompatible, srv.URL)
 
 	svc.runProbeRound(context.Background())
 
@@ -388,7 +386,7 @@ func TestRunProbeRound_DecryptFailure_NoHealthWrite(t *testing.T) {
 	st, _, cm := newTestEnv(t)
 	svc := newSchedulerService(st, cm, http.DefaultClient, time.Minute)
 	bad := st.seed(&Provider{
-		Name: "坏密文", Kind: providerapi.KindOpenAI, BaseURL: "http://unused", Enabled: true,
+		Name: "坏密文", Kind: providerapi.KindOpenAICompatible, BaseURL: "http://unused", Enabled: true,
 		AuthConfig: map[string]string{apiKeyEncryptedKey: "!!!not-valid-ciphertext!!!"},
 	}).ID
 
@@ -427,7 +425,7 @@ func TestStartProber_TicksThenCancel(t *testing.T) {
 	}))
 	defer srv.Close()
 	svc := newSchedulerService(st, cm, srv.Client(), 10*time.Millisecond)
-	id := seedProbeProvider(st, providerapi.KindOpenAI, srv.URL)
+	id := seedProbeProvider(st, providerapi.KindOpenAICompatible, srv.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

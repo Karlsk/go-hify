@@ -419,7 +419,7 @@ func seedProviderWithKey(st *memStore) uint64 {
 	oldRotated := time.Now().Add(-time.Hour)
 	return st.seed(&Provider{
 		Name:            "OpenAI",
-		Kind:            providerapi.KindOpenAI,
+		Kind:            providerapi.KindOpenAICompatible,
 		AuthConfig:      map[string]string{apiKeyEncryptedKey: enc},
 		APIKeyRotatedAt: &oldRotated,
 		Enabled:         true,

@@ -34,13 +34,13 @@ const (
 )
 
 // kindDefaultBase 各 kind 的默认 base URL（providers.base_url 空串时使用）。
-// openai_compatible 无默认值——必填 base_url 由 api 层 Validate 保证，此处兜底报错。
+// openai_compatible 空串 = 官方 OpenAI 端点（kind 并入后官方即 base_url 空的 compatible，
+// 与 llm factory 侧 adapter DefaultConfig 的默认值保持一致）。
 var kindDefaultBase = map[string]string{
-	providerapi.KindOpenAI:           "https://api.openai.com/v1",
+	providerapi.KindOpenAICompatible: "https://api.openai.com/v1",
 	providerapi.KindClaude:           "https://api.anthropic.com/v1",
 	providerapi.KindGemini:           "https://generativelanguage.googleapis.com/v1beta",
 	providerapi.KindOllama:           "http://localhost:11434",
-	providerapi.KindOpenAICompatible: "",
 }
 
 // probeResult 单次探测的原始结果（状态机转移前的输入）。
@@ -104,13 +104,14 @@ func probeTarget(kind, baseURL, apiKey string) (string, map[string]string, error
 		baseURL = kindDefaultBase[kind]
 	}
 	if baseURL == "" {
-		return "", nil, fmt.Errorf("kind %s 必须配置 base_url 才能探测", kind)
+		// 各 kind 都有默认端点（kindDefaultBase 已在调用方兜底），此处仅防御手改库产生的空值
+		return "", nil, fmt.Errorf("kind %s 未配置 base_url 且无默认端点", kind)
 	}
 	base := strings.TrimSuffix(baseURL, "/")
 	h := map[string]string{"Accept": "application/json"}
 	if apiKey != "" {
 		switch kind {
-		case providerapi.KindOpenAI, providerapi.KindOpenAICompatible:
+		case providerapi.KindOpenAICompatible:
 			h["Authorization"] = "Bearer " + apiKey
 		case providerapi.KindClaude:
 			h["x-api-key"] = apiKey
@@ -124,7 +125,7 @@ func probeTarget(kind, baseURL, apiKey string) (string, map[string]string, error
 	}
 
 	switch kind {
-	case providerapi.KindOpenAI, providerapi.KindOpenAICompatible, providerapi.KindClaude, providerapi.KindGemini:
+	case providerapi.KindOpenAICompatible, providerapi.KindClaude, providerapi.KindGemini:
 		return base + "/models", h, nil
 	case providerapi.KindOllama:
 		return base + "/api/tags", h, nil

@@ -13,29 +13,32 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/schema"
 )
 
-// Kind 提供商类型枚举（text + CHECK，见 migrations/00002_provider.sql）。
+// Kind 提供商类型枚举（text + CHECK，见 migrations/00002_provider.sql 与 00010 的约束重建）。
 const (
-	KindOpenAI           = "openai"
+	// KindOpenAICompatible OpenAI 兼容端点：官方 OpenAI（base_url 空 = 默认官方端点）、
+	// 代理/镜像、国产兼容端点统一走此 kind。不设独立「openai」kind——协议同一套只差 base_url。
+	// 预留 openai_response（Responses API）待 eino-ext 底层 SDK 迁到官方 openai-go 后再开。
+	KindOpenAICompatible = "openai_compatible"
 	KindClaude           = "claude"
 	KindGemini           = "gemini"
 	KindOllama           = "ollama"
-	KindOpenAICompatible = "openai_compatible"
 )
 
 // validKind kind 白名单，供 Validate 跨字段校验用（binding oneof 之外的服务层防线）。
 var validKind = map[string]bool{
-	KindOpenAI:           true,
+	KindOpenAICompatible: true,
 	KindClaude:           true,
 	KindGemini:           true,
 	KindOllama:           true,
-	KindOpenAICompatible: true,
 }
 
 // kindNeedsAPIKey 需要鉴权密钥的 kind（ollama 无鉴权、openai_compatible 可选）。
+// kindNeedsAPIKey 必须提供 api_key 的 kind（ollama 无鉴权）。openai_compatible 并入后按必填处理：
+// 官方端点与绝大多数兼容网关都要 Bearer key；无鉴权的本地网关可填任意占位串（仅作 Bearer 头透传）。
 var kindNeedsAPIKey = map[string]bool{
-	KindOpenAI: true,
-	KindClaude: true,
-	KindGemini: true,
+	KindOpenAICompatible: true,
+	KindClaude:           true,
+	KindGemini:           true,
 }
 
 // Capability 模型能力类型。
@@ -77,15 +80,14 @@ func validateProvider(name, kind, baseURL, apiKey string, extra map[string]any, 
 	}
 	if kind != "" {
 		if !validKind[kind] {
-			return fmt.Errorf("kind 必须是 %s / %s / %s / %s / %s 之一",
-				KindOpenAI, KindClaude, KindGemini, KindOllama, KindOpenAICompatible)
+			return fmt.Errorf("kind 必须是 %s / %s / %s / %s 之一",
+				KindOpenAICompatible, KindClaude, KindGemini, KindOllama)
 		}
 		if requireKey && kindNeedsAPIKey[kind] && apiKey == "" {
 			return fmt.Errorf("kind %s 必须提供 api_key", kind)
 		}
-		if kind == KindOpenAICompatible && baseURL == "" {
-			return fmt.Errorf("kind %s 必须提供 base_url", KindOpenAICompatible)
-		}
+		// base_url 可选：空串 = 默认官方端点（openai_compatible 即 api.openai.com，
+		// 代码常量见 service 层 kindDefaultBase；不再要求 compatible 必填）。
 	}
 	if baseURL != "" && !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
 		return fmt.Errorf("base_url 必须以 http:// 或 https:// 开头")
@@ -171,7 +173,7 @@ func validateExtraParams(m map[string]any) error {
 // Enabled 不在创建请求中：新提供商固定 enabled=true，停用走更新。
 type CreateProviderReq struct {
 	Name        string         `json:"name" binding:"required,min=1,max=128"`
-	Kind        string         `json:"kind" binding:"required,oneof=openai claude gemini ollama openai_compatible"`
+	Kind        string         `json:"kind" binding:"required,oneof=openai_compatible claude gemini ollama"`
 	BaseURL     string         `json:"base_url" binding:"omitempty,max=512"`
 	APIKey      string         `json:"api_key" binding:"omitempty,max=512"`
 	ExtraConfig map[string]any `json:"extra_config"`
@@ -243,7 +245,7 @@ type ListProvidersReq struct {
 func (r ListProvidersReq) Validate() error {
 	if r.Kind != "" && !validKind[r.Kind] {
 		return fmt.Errorf("kind 必须是 %s / %s / %s / %s / %s 之一",
-			KindOpenAI, KindClaude, KindGemini, KindOllama, KindOpenAICompatible)
+			KindOpenAICompatible, KindClaude, KindGemini, KindOllama, KindOpenAICompatible)
 	}
 	return nil
 }

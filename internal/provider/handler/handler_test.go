@@ -275,13 +275,13 @@ func decodeData[T any](t *testing.T, e envelope) T {
 func TestCreateProvider(t *testing.T) {
 	r := newTestRouter(newFakeSvc())
 	w := doReq(t, r, http.MethodPost, "/api/v1/providers",
-		`{"name":"OpenAI","kind":"openai","api_key":"sk-x"}`)
+		`{"name":"OpenAI","kind":"openai_compatible","api_key":"sk-x"}`)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 	e := parseEnvelope(t, w.Body.Bytes())
 	require.True(t, e.Success)
 	d := decodeData[providerapi.ProviderSchema](t, e)
 	assert.Equal(t, "OpenAI", d.Name)
-	assert.Equal(t, providerapi.KindOpenAI, d.Kind)
+	assert.Equal(t, providerapi.KindOpenAICompatible, d.Kind)
 	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 }
 
@@ -291,7 +291,7 @@ func TestCreateProvider_ValidationFailed(t *testing.T) {
 		body string
 	}{
 		{"坏 kind（binding oneof）", `{"name":"x","kind":"azure"}`},
-		{"缺 name（binding required）", `{"kind":"openai"}`},
+		{"缺 name（binding required）", `{"kind":"openai_compatible"}`},
 		{"claude 缺 api_key（跨字段 Validate）", `{"name":"x","kind":"claude"}`},
 		{"compatible 缺 base_url（跨字段 Validate）", `{"name":"x","kind":"openai_compatible"}`},
 		{"坏 JSON", `{`},
@@ -354,7 +354,7 @@ func TestListProviders_BadPageSize(t *testing.T) {
 func TestGetProvider_DetailAggregates(t *testing.T) {
 	svc := newFakeSvc()
 	svc.detail[1] = providerapi.ProviderDetailSchema{
-		ProviderSchema: providerapi.ProviderSchema{BaseSchema: schema.BaseSchema{ID: "1"}, Name: "OpenAI", Kind: providerapi.KindOpenAI},
+		ProviderSchema: providerapi.ProviderSchema{BaseSchema: schema.BaseSchema{ID: "1"}, Name: "OpenAI", Kind: providerapi.KindOpenAICompatible},
 		Models:         []providerapi.ModelSchema{{BaseSchema: schema.BaseSchema{ID: "1"}, ModelID: "gpt-4o"}},
 		Health:         &providerapi.ProviderHealthSchema{Status: providerapi.HealthUp},
 	}

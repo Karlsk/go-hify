@@ -34,7 +34,7 @@ func TestResolveLLMConfig_OK(t *testing.T) {
 	cfg, err := ms.ResolveLLMConfig(context.Background(), providerapi.ResolveLLMConfigReq{ModelID: mid})
 	require.NoError(t, err)
 	assert.Equal(t, "OpenAI", cfg.ProviderName)
-	assert.Equal(t, providerapi.KindOpenAI, cfg.Kind)
+	assert.Equal(t, providerapi.KindOpenAICompatible, cfg.Kind)
 	assert.Equal(t, "gpt-4o", cfg.ModelID, "ModelID 是 API 标识而非主键")
 	assert.Equal(t, "sk-old-key-123456", cfg.APIKey, "解密 round-trip 应还原明文")
 }

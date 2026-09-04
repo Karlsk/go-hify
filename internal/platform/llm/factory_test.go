@@ -93,7 +93,7 @@ func TestNewUpstreamFactory_AllKindsConstruct(t *testing.T) {
 		name string
 		opts UpstreamOptions
 	}{
-		{"openai", UpstreamOptions{Kind: KindOpenAI, APIKey: "sk-test", Model: "gpt-4o"}},
+		{"openai", UpstreamOptions{Kind: KindOpenAICompatible, APIKey: "sk-test", Model: "gpt-4o"}},
 		{"claude", UpstreamOptions{Kind: KindClaude, APIKey: "sk-ant-test", Model: "claude-sonnet-4-5", BaseURL: "https://api.anthropic.com"}},
 		{"gemini", UpstreamOptions{Kind: KindGemini, APIKey: "gm-test", Model: "gemini-2.0-flash"}},
 		{"ollama", UpstreamOptions{Kind: KindOllama, BaseURL: "http://localhost:11434", Model: "llama3.1"}},

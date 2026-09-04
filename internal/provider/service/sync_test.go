@@ -59,7 +59,7 @@ func TestParseModels(t *testing.T) {
 	}{
 		{
 			name: "openai 无 display_name 回退 id",
-			kind: providerapi.KindOpenAI,
+			kind: providerapi.KindOpenAICompatible,
 			body: `{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"}]}`,
 			want: []discoveredModel{{modelID: "gpt-4o", displayName: "gpt-4o"}, {modelID: "gpt-4o-mini", displayName: "gpt-4o-mini"}},
 		},
@@ -89,13 +89,13 @@ func TestParseModels(t *testing.T) {
 		},
 		{
 			name: "空列表",
-			kind: providerapi.KindOpenAI,
+			kind: providerapi.KindOpenAICompatible,
 			body: `{"data":[]}`,
 			want: []discoveredModel{},
 		},
 		{
 			name:    "坏 JSON（HTML 错误页）",
-			kind:    providerapi.KindOpenAI,
+			kind:    providerapi.KindOpenAICompatible,
 			body:    `<html>Bad Gateway</html>`,
 			wantErr: errs.ErrServiceUnavailable,
 		},
@@ -289,7 +289,7 @@ func TestSyncModels_SendsBearerFromDecryptedKey(t *testing.T) {
 	st, _, _, ms := newTestService(t)
 	enc, err := encryptAPIKey(testMaster, "sk-sync-test-key")
 	require.NoError(t, err)
-	pid := st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAI, BaseURL: base,
+	pid := st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, BaseURL: base,
 		AuthConfig: map[string]string{apiKeyEncryptedKey: enc}, Enabled: true}).ID
 
 	_, err = ms.SyncModels(context.Background(), providerapi.SyncModelsReq{ID: pid})
@@ -337,7 +337,7 @@ func TestSyncModels_UpstreamUnavailable(t *testing.T) {
 func TestSyncModels_DecryptFails(t *testing.T) {
 	_, base := newSyncStub(t, `{"data":[]}`)
 	st, _, _, ms := newTestService(t)
-	pid := st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAI, BaseURL: base,
+	pid := st.seed(&Provider{Name: "OpenAI", Kind: providerapi.KindOpenAICompatible, BaseURL: base,
 		AuthConfig: map[string]string{apiKeyEncryptedKey: "garbage-not-a-cipher"}, Enabled: true}).ID
 
 	_, err := ms.SyncModels(context.Background(), providerapi.SyncModelsReq{ID: pid})

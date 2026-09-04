@@ -290,7 +290,8 @@ CREATE TABLE executions (
 
 ## 4. 已知限制
 
-- **openai_compatible 无法自定义端点**：eino-ext openai adapter 的 `ChatModelConfig.BaseURL` 仅 Azure 场景生效（`go doc` 核实），非 Azure 官方端点无自定义入口；`llm` factory 对 `openai_compatible` 维持返回 `ErrUnsupportedKind`。后续支持需自写 openai_compatible 适配（直连 OpenAI 协议端点）。
+- **OpenAI Responses API 不支持**：eino-ext `libs/acl/openai`（含 main 分支）基于 sashabaranov/go-openai 的 fork（`meguminnnnnnnnn/go-openai`），仅实现 chat completions；其 go.mod 自述「switch to github.com/openai/openai-go in the future」。待底层迁到官方 SDK 后再引入 `openai_response` kind。
+  - **已修正的旧结论（2026-09-04）**：此前记录「adapter BaseURL 仅 Azure 场景生效」为误判——源码 `chat_model.go` 的 `NewClient` 在**非 Azure 分支**明确应用 `config.BaseURL`（字段上「Azure endpoint」注释是过时文档，当时只看 go doc 没读实现）。据此 kind 收编：删 `openai`，官方 OpenAI = base_url 空的 `openai_compatible`（adapter 默认 `https://api.openai.com/v1`），兼容端点（代理/国产网关）填 base_url 即可（migrations/00010 平移存量数据）。
 
 ## 5. 交付范围（v1 定稿 2026-09-03）
 
