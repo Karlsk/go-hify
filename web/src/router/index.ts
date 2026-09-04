@@ -8,6 +8,8 @@ declare module 'vue-router' {
     bare?: boolean
     /** 免登录但保留 chrome（/design 专用：不调 API 的设计走查页） */
     public?: boolean
+    /** 满血内容区（/chat 专用）：el-main 去 padding + 禁滚动，页面自管全高布局 */
+    fullBleed?: boolean
   }
 }
 
@@ -41,7 +43,7 @@ const routes: RouteRecordRaw[] = [
     path: '/chat',
     name: 'chat',
     component: () => import('@/views/chat/ChatView.vue'),
-    meta: { title: '对话' },
+    meta: { title: '对话', fullBleed: true },
   },
   {
     // 设计系统 token 预览与验收页（不进侧边栏菜单，直接访问 URL）

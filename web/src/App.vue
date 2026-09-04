@@ -77,7 +77,8 @@
           登录
         </el-button>
       </header>
-      <el-main class="app__main">
+      <!-- fullBleed（/chat）：去 padding + 禁滚动，整块交给页面的全高布局（侧栏/顶栏保留） -->
+      <el-main class="app__main" :class="{ 'app__main--flush': route.meta.fullBleed }">
         <router-view />
       </el-main>
     </el-container>
@@ -355,5 +356,11 @@ async function onUserCommand(command: string): Promise<void> {
 .app__main {
   padding: var(--hf-space-6);
   background-color: var(--hf-bg-page);
+}
+
+/* 满血内容区（fullBleed 路由）：页面自带内边距与滚动容器，此处去掉避免缩水 + 双滚动条 */
+.app__main.app__main--flush {
+  padding: 0;
+  overflow: hidden;
 }
 </style>

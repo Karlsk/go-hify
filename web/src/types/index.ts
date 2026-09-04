@@ -47,3 +47,11 @@ export interface PageResult<T> {
   page: number
   pageSize: number
 }
+
+/** 游标分页列表结果（大列表，对齐后端 meta 的 has_more/next_cursor） */
+export interface CursorResult<T> {
+  list: T[]
+  hasMore: boolean
+  /** 下一页游标（原样回传后端）；has_more=false 时为 null */
+  nextCursor: string | null
+}

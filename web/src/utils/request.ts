@@ -1,6 +1,6 @@
 import axios, { type AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
-import type { PageQuery, PageResult, Result } from '@/types'
+import type { CursorResult, PageQuery, PageResult, Result } from '@/types'
 
 // CLAUDE.md《统一响应信封》：{ success, data, error:{code,message,details}, meta }
 
@@ -124,6 +124,24 @@ export async function getList<T>(
     total: meta?.total ?? list.length,
     page: meta?.page ?? params?.page ?? 1,
     pageSize: meta?.page_size ?? params?.page_size ?? 20,
+  }
+}
+
+/** 游标分页列表端点：解包 data + meta，返回 CursorResult（conversations / messages 等 keyset 大列表）。
+ * 参数放宽一档：查询参数名由端点自定（messages 翻页回传 after_id 而非 cursor，spec §13.3）。 */
+export async function getCursorList<T>(
+  url: string,
+  params?: PageQuery & Record<string, string | number | undefined>,
+  config?: AxiosRequestConfig,
+): Promise<CursorResult<T>> {
+  const res = await request.get<Result<T[]>>(url, { ...config, params })
+  const list = res.data.data ?? []
+  const meta = res.data.meta
+  const hasMore = meta?.has_more ?? false
+  return {
+    list,
+    hasMore,
+    nextCursor: hasMore ? (meta?.next_cursor ?? null) : null,
   }
 }
 
