@@ -604,7 +604,7 @@ GET /assets/*.js|css → nginx 直接回，Cache-Control: immutable, max-age=1y
 
 **③ SSE 对话流（核心链路，错一步流式就废）**
 ```
-浏览器 POST /api/chat/stream (fetch + ReadableStream，而非 EventSource——要带 body 和鉴权头)
+浏览器 POST /api/v1/conversations/{id}/messages (fetch + ReadableStream，而非 EventSource——要带 body 和鉴权头；stream:true 流式 / stream:false 一次输出 JSON)
   → nginx：proxy_buffering off / proxy_cache off / proxy_http_version 1.1
            X-Accel-Buffering: no；该路由绝不开 gzip；proxy_read_timeout 300s
   → hify：
@@ -847,15 +847,14 @@ CREATE TABLE executions_2026_08 PARTITION OF executions
 CREATE INDEX idx_executions_conv_time ON executions (conversation_id, created_at);
 ```
 
-分区自动化：用 backup 那类定时容器跑 SQL，月初建下月分区、删 >90 天的（备选 `pg_partman` 扩展，但需改镜像；一人维护下 cron SQL 更简单）：
+分区自动化：**应用内后台任务**（`internal/platform/logging/partition.go` 的 `PartitionMaintainer`，组合根 `go Start(appCtx)`，同 provider StartProber 模式随优雅关停退出）——启动立即首轮 + 此后每 24h 一轮，dev（`make start`）与 prod（compose）同路径生效：
 
-```sql
-CREATE TABLE IF NOT EXISTS executions_YYYY_MM PARTITION OF executions
-    FOR VALUES FROM ('YYYY-MM-01') TO ('YYYY-(MM+1)-01');
-DROP TABLE IF EXISTS executions_YYYY_MM_3个月前;   -- 保留 90 天
-```
+- 建分区：幂等 `CREATE TABLE IF NOT EXISTS executions_YYYY_MM PARTITION OF …`，每轮保证**当月 + 下月**存在（跨月零感知；边界字面量用裸日期，与迁移 DDL 同形由服务器时区解释）。
+- 删分区：**分区结束日 + 保留天数 < now（严格 <）才 drop**——在线窗口恒 ≥ 保留期（默认 90 = 实际 90~120 天锯齿），不按下探到 61 天的「分区起始 90 天」判定。
+- 保留期 `EXECUTIONS_RETENTION_DAYS`（默认 90）：`<=0` 关闭维护（启动 WARN，不建不删）；「永不删除」用超大值（如 36500）表达，不设第三态。单实例部署假设，不加 advisory lock（IF NOT EXISTS 幂等兜底）。
+- 曾由 backup 容器 cron SQL 维护（`deploy/backup/partition_maintenance.sql`，已下线）——backup 回归 pg_dump 单一职责，且容器方案在 dev 模式不生效曾导致缺分区写入失败。规则切换（起始判定 → 整体判定）后的首轮会比旧规则多保留约一个月，预期行为。
 
-> 区分两个"保留"：**PG 每日备份 7-14 天**是灾难恢复（所有数据）；**executions 在线 90 天**是查询窗口——超期 drop 分区，历史仍可从备份恢复。
+> 区分两个"保留"：**PG 每日备份 7-14 天**是灾难恢复（所有数据）；**executions 在线保留 `EXECUTIONS_RETENTION_DAYS` 天（默认 90）**是查询窗口——超期 drop 分区，历史仍可从备份恢复。
 
 **② messages —— 监控阈值。** 50 人阶段一年几十万行，不用分区；但**现在就把 `created_at` 当一等列设计好**，跨 ~10M 行再按月分区（append-only 可在线搬，迁移成本可接受）。
 
@@ -1002,7 +1001,7 @@ Hify 后端所有 HTTP 接口的统一规范，与《代码组织规范》handle
 | mcp | mcp-servers、tools | `/mcp-servers`、`/mcp-servers/{id}/tools`、`/mcp-servers/{id}/discover` |
 | agent | agents | `/agents`、`/agents/{id}/mcp-tools`、`/agents/{id}/knowledge-bases` |
 | rag | knowledge-bases、documents | `/knowledge-bases`、`/knowledge-bases/{id}/documents`、`/documents/{id}/reindex` |
-| chat | conversations、messages、stream | `/conversations`、`/conversations/{id}/messages`、`/chat/stream` |
+| chat | conversations、messages | `POST /conversations`（绑 agent 建会话）、`/conversations/{id}/messages`（发消息：`stream` 开关两模式 + 历史查询）、`DELETE /conversations/{id}` |
 | workflow | workflows | `/workflows`、`/workflows/{id}/execute` |
 
 > `GET /health`（探 PG + Redis）在 `/api/v1` 之外、不需鉴权。
@@ -1112,6 +1111,8 @@ HTTP 状态映射：
 | `BUDGET_EXHAUSTED` | 429 | `errs.ErrBudgetExhausted`（每日预算耗尽，新会话被拒） |
 | `SERVICE_UNAVAILABLE` | 503 | `errs.ErrServiceUnavailable`（通用 503 兜底） |
 | `AGENT_NOT_FOUND` | 404 | `agentapi.ErrAgentNotFound` |
+| `AGENT_DISABLED` | 503 | `agentapi.ErrAgentDisabled`（Agent 已停用，新会话被拒） |
+| `CONVERSATION_NOT_FOUND` | 404 | `chatapi.ErrConversationNotFound` |
 | `MODEL_CONTEXT_TOO_LONG` | 400 | `chatapi.ErrModelContextTooLong`（chat service 翻译自 llm `InvalidRequest`） |
 | `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound` |
 | `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound` |
@@ -1123,7 +1124,7 @@ HTTP 状态映射：
 - 码命名 `MODULE_REASON`，全大写下划线；**新增码必须先有 `api/` 包哨兵错误**，再在 handler 加 `errors.Is` → 状态映射——不存在只改前端、后端无对应哨兵的码。
 - `error.details`：字段级校验错误放这里（`{"fields":[{"field":"name","msg":"required"}]}`）。
 - 500 类不回原始堆栈给前端，只回 `INTERNAL_ERROR` + trace_id，细节进结构化日志（见《部署架构》logging）。
-- SSE 流的错误见《SSE 流式》：流已 200 开始，后续错误用 `event: error` 携带 `code` + `retryable`，不改 HTTP 状态。
+- 流式模式的错误见《对话接口》：流已 200 开始，后续错误用 `error` 事件（`type` 判别）携带 `code` + `retryable`，不改 HTTP 状态。
 
 ### 认证
 
@@ -1132,26 +1133,42 @@ HTTP 状态映射：
 - SSE 用 `fetch` + `credentials: "include"`（带 cookie），**不用 `EventSource`**（不能自定义 header / 带鉴权）。
 - 用户身份随 `ctx` 注入下游，跨模块调用与 HTTP 复用同一套接口；限流 / 预算在 platform 层按 ctx 内用户计数（见《跨模块调用规则》）。
 
-### SSE 流式（对话核心，错一步流式就废）
+### 对话接口（SSE 流式 + 一次输出，核心链路错一步流式就废）
 
-`POST /api/v1/chat/stream`，请求体 `{ "conversation_id": "...", "message": "..." }`（`conversation_id` 缺省则新建会话），响应 `Content-Type: text/event-stream`。
+对话走 RESTful 会话资源，建会话即绑 Agent（中途不换）：
 
-事件协议（`event:` + `data: JSON\n\n`）：
+```
+POST   /api/v1/conversations                 # {"agent_id":"..."} 创建会话
+GET    /api/v1/conversations                 # 会话列表（keyset 分页）
+GET    /api/v1/conversations/{id}/messages   # 历史消息（正序游标 after_id）
+DELETE /api/v1/conversations/{id}            # 删除会话（messages 级联删）
+POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
+```
 
-| event | data | 时机 |
+发消息请求体极简（会话已绑 agent、无变量注入，不需要 Dify 式 `inputs`）：
+
+```jsonc
+{ "content": "Hify 怎么创建 Agent？", "stream": true }   // stream 缺省 true
+```
+
+**流式模式（`stream: true`，缺省，控制台主模式）**：响应 `Content-Type: text/event-stream`；事件用 `data: JSON` 帧内 `type` 判别（不用 `event:` 命名行——fetch 手写解析少一层），SSE 注释行做心跳：
+
+| type | data | 时机 |
 |---|---|---|
-| `meta` | `{conversation_id, message_id}` | 流的首个事件 |
 | `delta` | `{content: "..."}` | 每个 token 片段 |
-| `tool_call` | `{tool, args}` | 触发 MCP 工具调用 |
-| `tool_result` | `{tool, result}` | 工具返回 |
-| `done` | `{message_id, usage:{input,output}, finish_reason}` | 正常结束 |
+| `tool_call` | `{id, tool, args}` | 触发 MCP 工具调用 |
+| `tool_result` | `{id, tool, result}` | 工具返回 |
+| `done` | `{message_id, usage:{input,output}, finish_reason}` | 正常结束（`message_id` 供重新生成/反馈锚定） |
 | `error` | `{code, message, retryable}` | 异常结束 |
-| *(注释)* `: ping` | — | 空闲每 15s 心跳 |
+| *(注释)* `: ping` | — | 空闲每 15s 心跳（防中间层掐静默连接：Ollama TTFT 120s / 思考模型首字久 / 工具执行慢） |
 
-- 流一旦返回 200，后续错误只能用 `event: error` 表达（HTTP 状态码不可改）。
+- 无 `meta` 事件：显式建会话后 `conversation_id` 已知，`message_id` 挪进 `done`。
+- 流一旦返回 200，后续错误只能用 `error` 事件表达（HTTP 状态码不可改）。
 - `retryable=true`（首 token 前 429 / 超时 / 网络错误）：前端可一键"重新生成"；`retryable=false`（`MODEL_CONTEXT_TOO_LONG`、`UNAUTHORIZED`）：不重试，提示用户改输入。
 - 客户端断连 → 服务端 ctx 取消 → 取消上游 LLM 调用（省 token，见《外部 LLM 调用设计》）。
 - 链路由 nginx 保证：`proxy_buffering off` + `X-Accel-Buffering: no` + `proxy_read_timeout 300s`，SSE 路由绝不开 gzip。
+
+**一次输出模式（`stream: false`）**：内部跑同一条 Agent 循环（含工具调用；**工具中间行照常落库**供下轮上下文，只是不推送中间过程），生成完毕经标准 respond 信封一次性返回最终 assistant 消息（`{id, content, usage, finish_reason}`）。错误走标准错误信封 + 正常 HTTP 状态码（流未开始，状态码可用）。约束：总时长仍受 nginx 读超时（300s）限制——工具循环 = 多次 LLM 调用、累计可超，超长生成用流式。
 
 ### 与通用模板的取舍说明
 

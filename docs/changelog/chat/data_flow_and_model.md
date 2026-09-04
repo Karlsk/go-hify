@@ -1,6 +1,6 @@
 # Chat 对话引擎：全链路数据流与数据模型
 
-> 状态：**设计定稿，DDL 已落库**（2026-09-02）。
+> 状态：**设计定稿，DDL 已落库**（2026-09-02）；**HTTP 契约定稿**（2026-09-03，见 §3「接口形态」）。
 > conversations / messages 随 migrations/00006、executions 随 00007 落库；
 > 本文档记录全链路数据流、三张表字段明细与设计决策，作为 chat 模块实现的对照文档。
 > 表归属总览见 [docs/design/data-model.md](../../design/data-model.md)；建表规范见 CLAUDE.md《数据库规范》。
@@ -13,10 +13,10 @@
 
 ```
 ┌─ P0 前端（浏览器）─────────────────────────────────────────────────────┐
-│ fetch POST /api/v1/chat/stream                                         │
-│   body: {conversation_id?, agent_id, message}                          │
+│ fetch POST /api/v1/conversations/{id}/messages                         │
+│   body: {content, stream}（stream 缺省 true；false 走一次输出模式）      │
 │   credentials: "include"（带 hify_session cookie）                     │
-│   Accept: text/event-stream                                            │
+│   Accept: text/event-stream（stream:true 时）                           │
 │   AbortController 挂在「停止生成」按钮和页面关闭上                       │
 │   （不用 EventSource：它不能带 body 和 cookie）                          │
 └──────┬─────────────────────────────────────────────────────────────────┘
@@ -40,7 +40,9 @@
 ┌─ P3 handler（chat/handler，薄绑定）───────────────────────────────────┐
 │ BindJSON 绑定+校验 → 失败 400 信封                                      │
 │ budget 检查：Redis 计数，新会话被拒 → 429（fail-open：Redis 挂则放行）   │
-│ ⚠ 关键顺序：所有可能失败的检查都在「写 200 头之前」完成                   │
+│ stream:false → 一次输出模式：标准 respond 信封 + 正常 HTTP 状态码        │
+│   （流未开始，错误照常 4xx/5xx；总时长受 nginx 300s 读超时限制）          │
+│ stream:true（缺省）→ ⚠ 所有可能失败的检查都在「写 200 头之前」完成        │
 │ 写 SSE 头（text/event-stream / no-store / X-Accel-Buffering:no）+Flush │
 │ → svc.Stream(c.Request.Context(), req)                                 │
 │   这个 ctx 自带魔法：客户端断连时它会被自动 cancel                       │
@@ -89,21 +91,22 @@
 ┌──────┴─────────────────────────────────────────────────────────────────┐
 │ P6 对话引擎逐 chunk 分类（Agent 循环体）                                 │
 │   文本 delta → SSE writer 写                                            │
-│       "event: delta\ndata: {\"content\":\"...\"}\n\n" + Flush          │
-│   tool_call chunk → 发 event: tool_call → 经 mcp api 执行工具           │
-│       → 发 event: tool_result → 结果回填上下文                          │
+│       "data: {\"type\":\"delta\",\"content\":\"...\"}\n\n" + Flush      │
+│   tool_call chunk → 发 type:tool_call → 经 mcp api 执行工具             │
+│       → 发 type:tool_result → 结果回填上下文                            │
 │       → 回到 P5 再调一次 LLM（循环，轮次由模型决定）                     │
 │   流空闲 15s → 写 ": ping" 注释行保活                                    │
-│ 事件协议：meta（首个，含 conversation_id/message_id）                    │
-│           delta / tool_call / tool_result                               │
-│           done（usage + finish_reason）/ error（code + retryable）       │
+│ 事件协议（data 帧内 type 判别，无 event: 命名行）：                       │
+│           delta / tool_call{id,tool,args} / tool_result{id,tool,result} │
+│           done（message_id + usage + finish_reason）                    │
+│           error（code + retryable）；无 meta（会话已知，id 进 done）      │
 └──────┬──────────────────────────────────────────────────────────────────┘
        ▼
    nginx 透传（不缓冲、不压缩）→ 浏览器
        ▼
 ┌─ P7 前端渲染 ──────────────────────────────────────────────────────────┐
 │ response.body.getReader() 循环 read()                                  │
-│ → TextDecoder 解码 → 按空行 \n\n 切事件 → 解析 event:/data: 行           │
+│ → TextDecoder 解码 → 按空行 \n\n 切事件 → 解析 data: 行取 type 分支      │
 │ → delta 逐字 append 进消息气泡（打字机效果）                             │
 │ → tool_call/tool_result 渲染成工具卡片 → done 收尾、解锁输入框           │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -153,7 +156,7 @@
 | `messages` | **append-only** | 次快（一年几十万行） | 监控，~10M 行再分区 |
 | `executions` | append-only 日志 | 最快（每次 LLM 调用一行） | **建表即按月分区 + 90 天保留** |
 
-不存在的表：没有「上下文表」（上下文每次现拼）、没有「历史缓存表」（Redis 只放 session/缓存/计数，历史的事实源是 PG）。
+不存在的表：没有「上下文表」（上下文每次现拼）、没有「历史缓存表」（Redis 只放 session/缓存/计数，历史的事实源是 PG）——上下文策略与历史存储选型的讨论、判据见 [context_and_history_storage.md](./context_and_history_storage.md)。
 
 ### 2.1 conversations —— 会话头
 
@@ -261,6 +264,11 @@ CREATE TABLE executions (
 
 ## 3. 设计决策
 
+**接口形态（2026-09-03 定稿）：**
+- **RESTful 会话资源，显式建会话即绑 Agent**（中途不换）：`POST /conversations`（`{agent_id}`）→ `GET /conversations`（keyset 列表）→ `GET /conversations/{id}/messages`（历史正序游标）→ `DELETE /conversations/{id}`（messages 级联删）。发消息 `POST /conversations/{id}/messages`，body 极简 `{content, stream}`——会话已绑 agent、无变量注入，不需要 Dify 式 `inputs`；此前草稿的 `POST /chat/stream` 懒建会话（body 带 `conversation_id?`/`agent_id`）作废。
+- **stream 开关两模式**：`true`（缺省）SSE 流式，逐 token 推送；`false` 一次输出——内部跑**同一条 Agent 循环**（含工具调用；工具中间行照常落库，下轮上下文需要，只是不推送中间过程），生成完毕经标准 respond 信封一次性返回最终 assistant 消息（`{id, content, usage, finish_reason}`）。一次输出模式的错误走标准错误信封 + 正常 HTTP 状态码（流未开始，状态码可用）；总时长受 nginx 读超时（300s）约束——工具循环累计可超，超长生成用流式。
+- **事件帧用 `data: JSON` 内 `type` 判别，不用 `event:` 命名行**（fetch 手写解析少一层）；无 `meta` 事件（显式建会话后 `conversation_id` 已知，`message_id` 挪进 `done` 供重新生成/反馈锚定）；`tool_call`/`tool_result` 带 `id` 供前端配对。
+
 **命名与形态：**
 - 表名不叫 `sessions`：与 auth 的 Redis session（`hify:session:{token}`）撞名，conversations 语义也更准（对话 ≠ 登录会话）。
 - 不加 `status` 列（ACTIVE/ARCHIVED）：预留字段违反建表规范；真要归档时加 `archived_at timestamptz` + partial 索引 `WHERE archived_at IS NULL`。
@@ -283,3 +291,24 @@ CREATE TABLE executions (
 ## 4. 已知限制
 
 - **openai_compatible 无法自定义端点**：eino-ext openai adapter 的 `ChatModelConfig.BaseURL` 仅 Azure 场景生效（`go doc` 核实），非 Azure 官方端点无自定义入口；`llm` factory 对 `openai_compatible` 维持返回 `ErrUnsupportedKind`。后续支持需自写 openai_compatible 适配（直连 OpenAI 协议端点）。
+
+## 5. 交付范围（v1 定稿 2026-09-03）
+
+**做（纯对话先行）：**
+- 会话 CRUD：建会话绑 Agent（中途不换）、keyset 列表、历史正序游标、删除级联 messages。
+- 上下文组装：`[system（现取 Agent 配置）] + 最近 max_context_turns 轮（整轮截断，user 锚点）+ 当前消息`；**直读 PG keyset 查询，无历史缓存**（见 [context_and_history_storage.md](./context_and_history_storage.md)）。
+- SSE 流式（缺省）+ 一次输出（`stream:false`，同一条 Agent 循环）两模式；事件帧 `data:{type}` 判别 + 15s `: ping` 心跳；写 200 头前完成全部可失败检查，之后错误走 `error` 事件。
+- executions 落库（每次 LLM 调用一行）；model/store 落 `platform/logging`（data-model.md 既定归属，workflow 后续共用）。
+- 组合根接线 llmManager：`ResolveLLMConfig` → `Manager.Client` → `Client.Stream`。
+
+**不做（留接线位）：**
+- 工具循环：agent 的 `tool_ids` 读到但不执行；`tool_call` / `tool_result` 事件类型契约先定好，实现后补。
+- RAG 注入：知识库绑定不消费。
+- budget 检查：P3 该步留 TODO 接线位，独立批次后做。
+- 重新生成 / 反馈：`done.message_id` 仅作锚定预留。
+
+**依赖方向：** chat → agent(api) + provider(api) + platform（llm / logging / db / respond / errs）；不 import mcp / rag / workflow（纯对话用不到）。
+
+**后续批次：** budget → mcp 模块 → chat 工具循环 → rag 模块 → RAG 注入 → workflow。
+
+**验收形态：** LLM + system prompt 的 Agent 端到端可聊（建 provider → 启用模型 → 建 Agent → 建会话 → 流式对话），executions 可查 token / 耗时；手测需真实上游（真实 key 或本地 Ollama——`openai_compatible` 因 eino BaseURL 限制无法指向 mock 桩，见 §4）。

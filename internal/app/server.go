@@ -24,6 +24,9 @@ import (
 	authhandler "github.com/Karlsk/go-hify/internal/auth/handler"
 	authsvc "github.com/Karlsk/go-hify/internal/auth/service"
 	authstore "github.com/Karlsk/go-hify/internal/auth/store"
+	chathandler "github.com/Karlsk/go-hify/internal/chat/handler"
+	chatsvc "github.com/Karlsk/go-hify/internal/chat/service"
+	chatstore "github.com/Karlsk/go-hify/internal/chat/store"
 	demohandler "github.com/Karlsk/go-hify/internal/demo/handler"
 	demosvc "github.com/Karlsk/go-hify/internal/demo/service"
 	demostore "github.com/Karlsk/go-hify/internal/demo/store"
@@ -73,11 +76,8 @@ func Run(cfg *config.Config) error {
 	// gate（槽位+熔断）按 provider 共享，Client 按 (provider, model) 独立上游实例。
 	llmTransport := llm.NewSharedTransport()
 	llmManager := llm.NewManager(llm.NewUpstreamFactory(llm.NewStreamClient(llmTransport)))
-	// TODO: 注入消费方——chat（对话引擎）。chat 接线时经 modelSvc.ResolveLLMConfig 取
-	// UpstreamOptions（provider 名 / kind / key / model 标识）再向 Manager 要 Client。
 	// provider 的探测 / 模型同步走直连轻量 GET（NewJSONClient + 共享 transport），不经 Manager
 	// ——元数据请求不产生 token 消费，不占 bulkhead / 熔断。
-	_ = llmManager
 	_ = llmTransport
 	// TODO: platform/budget（每用户限流 + 每日预算熔断，fail-open + 80% 告警）
 
@@ -111,9 +111,15 @@ func Run(cfg *config.Config) error {
 	agentCache := cache.New(rdb, cache.DefaultConfig()) // agent-cache：TTL 30min + 写时删 key
 	agentSvc := agentsvc.New(agentStore, modelSvc, agentCache)
 
-	// 其余模块当前为空壳，构造函数待业务实现后按下序填入：
-	// 顺序：mcp → rag → workflow → chat（chat 最后，依赖图最外层、零被依赖）；
-	// 上游模块 service.New 的入参直接传 providerSvc / agentSvc（api 接口注入）。
+	// chat：对话引擎（依赖图最外层，零被依赖——将来可整体拆成独立服务）。
+	// 依赖方向：chat → agent（agentGetter）→ provider（llmConfigResolver）→ platform/llm（llmClientFactory）
+	//           chat → platform/logging（executionWriter）。
+	// v1 范围：会话 CRUD + 上下文组装 + SSE 两模式 + executions 落库；ToolIDs/KB 读到不执行。
+	chatStore := chatstore.New(gormDB)
+	execStore := logging.NewExecutionStore(gormDB) // executions 表写入（每次 LLM 调用一行）
+	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore)
+
+	// mcp / rag / workflow 后续批次再接入。
 
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()
@@ -140,7 +146,8 @@ func Run(cfg *config.Config) error {
 	demohandler.New(demoSvc).RegisterRoutes(v1)                   // demo 参照实现（受登录中间件保护）
 	providerhandler.New(providerSvc, modelSvc).RegisterRoutes(v1) // provider：providers + models 双组 12 端点
 	agenthandler.New(agentSvc).RegisterRoutes(v1)                 // agent：agents 一组 5 端点
-	// TODO: 其余模块 handler.RegisterRoutes(v1)（mcp / rag / workflow / chat）
+	chathandler.New(chatSvc).RegisterRoutes(v1)                   // chat：conversations + messages 5 端点
+	// TODO: 其余模块 handler.RegisterRoutes(v1)（mcp / rag / workflow）
 
 	// ── ⑤ 启动（§组合根步骤 5）──────────────────────────────────────
 	slog.Info("hify ready", slog.String("addr", ":"+cfg.Server.Port), slog.String("version", version))

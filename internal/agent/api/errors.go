@@ -11,4 +11,9 @@ var (
 	// ErrToolNotFound 绑定的工具不存在（404；tool_ids 撞 FK 23503 的翻译——
 	// mcp 模块未建时这是工具存在性的唯一校验，建成后作为兜底保留）。
 	ErrToolNotFound = errors.New("TOOL_NOT_FOUND")
+
+	// ErrAgentDisabled Agent 已停用（503）：保留配置、新会话被拒——区别于 ErrAgentNotFound
+	//（不存在 / 软删）。仅跨模块消费方（chat 建会话 / 发消息）产生与判断；
+	// agent 模块自身无对应端点（enabled 是可设置字段，不是错误）。
+	ErrAgentDisabled = errors.New("AGENT_DISABLED")
 )
