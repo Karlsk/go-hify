@@ -6,9 +6,10 @@
 // 请求级 trace_id（httpmw.RequestID 在请求入口注入）成为日志字段，调用方零感知。
 // 组合根（internal/app）把 [Init] 放在 platform 初始化第一步，其余一切（db/redis/业务）才都有日志可用。
 //
-// 本包不含（属业务 / 横切层，后续任务接）：
-//   - executions 表（LLM 调用审计：provider/model/token/耗时/错误类）—— 归 chat/llm 模块、落 DB，
-//     CLAUDE.md「执行日志在流结束后的短连接里写」；本包只提供 slog 句柄供其记录。
+// executions 运行日志（LLM 调用审计：provider/model/token/耗时/错误类）的 model 与 store
+// 也落在本包（见 model.go / store.go）：platform 定位使 chat 与将来的 workflow 都能写
+// （workflow 禁止依赖 chat，executions 不能归 chat 模块）；「执行日志在流结束后的短连接里写」
+// 由消费方保证，store 只提供 append-only 写入。
 package logging
 
 import (
