@@ -73,6 +73,10 @@ type LoggingCfg struct {
 	Level  string // debug/info/warn/error（LOG_LEVEL）
 	Format string // json / text（LOG_FORMAT）
 	File   string // 日志文件路径，空 = 只 stdout（LOG_FILE）
+	// ExecutionsRetentionDays executions 分区在线保留天数（EXECUTIONS_RETENTION_DAYS，默认 90；
+	// 应用内后台任务每日维护：建当月/下月分区、删 分区end+保留期 早于 now 的旧分区）。
+	// <=0 关闭维护（不建不删）；「永不删除」用超大值（如 36500）表达，不设第三态。
+	ExecutionsRetentionDays int
 }
 
 // MustLoad 从环境变量加载配置；必填项缺失即 panic。
@@ -107,9 +111,10 @@ func MustLoad() *Config {
 			UserRPM:             envInt("USER_RPM", 60),
 		},
 		Logging: LoggingCfg{
-			Level:  envStr("LOG_LEVEL", "info"),
-			Format: envStr("LOG_FORMAT", "json"),
-			File:   envStr("LOG_FILE", "logs/hify.log"),
+			Level:                   envStr("LOG_LEVEL", "info"),
+			Format:                  envStr("LOG_FORMAT", "json"),
+			File:                    envStr("LOG_FILE", "logs/hify.log"),
+			ExecutionsRetentionDays: envInt("EXECUTIONS_RETENTION_DAYS", 90),
 		},
 	}
 	cfg.mustValidate()

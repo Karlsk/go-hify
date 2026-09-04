@@ -154,7 +154,7 @@
 |---|---|---|---|
 | `conversations` | 可变表（有 updated_at） | 中等 | 常规索引，keyset 分页 |
 | `messages` | **append-only** | 次快（一年几十万行） | 监控，~10M 行再分区 |
-| `executions` | append-only 日志 | 最快（每次 LLM 调用一行） | **建表即按月分区 + 90 天保留** |
+| `executions` | append-only 日志 | 最快（每次 LLM 调用一行） | **建表即按月分区 + 90 天保留（`EXECUTIONS_RETENTION_DAYS` 可配）** |
 
 不存在的表：没有「上下文表」（上下文每次现拼）、没有「历史缓存表」（Redis 只放 session/缓存/计数，历史的事实源是 PG）——上下文策略与历史存储选型的讨论、判据见 [context_and_history_storage.md](./context_and_history_storage.md)。
 
@@ -214,7 +214,7 @@
 | `error_class` | text | NULL，CHECK 七类 | `Timeout/RateLimited/Overloaded/Network/InvalidRequest/Auth/ProviderDown`；NULL=成功 |
 | `created_at` | timestamptz | NOT NULL | 分区键 |
 
-- 按月 `PARTITION BY RANGE (created_at)`；月底由 deploy/backup/partition_maintenance.sql 建下月分区、drop 90 天前的。
+- 按月 `PARTITION BY RANGE (created_at)`；分区由**应用内后台任务**维护（`internal/platform/logging/partition.go`，启动首轮 + 每 24h 一轮，dev/prod 同路径）：建当月/下月分区，删 分区end + `EXECUTIONS_RETENTION_DAYS`（默认 90 天）早于 now 的旧分区（在线窗口恒 ≥ 保留期；`<=0` 关闭）。曾由 backup 容器 cron SQL 维护（已下线，dev 不生效）。
 - 索引（父表建自动传播分区）：`(conversation_id, created_at)` + `(model_id)`。
 
 ### 2.4 DDL 摘录（migrations/00006 / 00007）
@@ -282,7 +282,7 @@ CREATE TABLE executions (
 **executions 的三个决策：**
 - **弱引用不建 FK**（conversation_id / model_id）：90 天保留的日志表不能反过来挡住会话/模型删除；引用完整性由业务层哨兵（`MODEL_IN_USE`）挡。分区表建 FK 也麻烦。
 - **建表即分区**：时间序列 + append-only + 明确保留期，后来再转分区要整表重写，所以 00007 直接 `PARTITION BY RANGE`。
-- 两个「保留」不同义：**PG 每日备份 7-14 天**是灾难恢复（所有数据）；**executions 在线 90 天**是查询窗口——超期 drop 分区，历史仍可从备份恢复。
+- 两个「保留」不同义：**PG 每日备份 7-14 天**是灾难恢复（所有数据）；**executions 在线保留 `EXECUTIONS_RETENTION_DAYS` 天（默认 90）**是查询窗口——超期 drop 分区，历史仍可从备份恢复。
 
 **读写约定：**
 - 流式路径只读不写、不持事务；所有落库压到流结束后的短连接里（P8，防 100 并发流打爆连接池）。

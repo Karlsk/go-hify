@@ -822,13 +822,13 @@ DDL 与表结构演进：
 
 | 表 | 增长 | 策略 |
 |---|---|---|
-| `executions` | 最快（每次 LLM 调用一行，含工具轮次） | **按月分区 + 90 天保留** |
+| `executions` | 最快（每次 LLM 调用一行，含工具轮次） | **按月分区 + 90 天保留（`EXECUTIONS_RETENTION_DAYS` 可配）** |
 | `messages` | 次快（append-only） | 监控，~10M 行再分区 |
 | `chunks` | 受文档量约束；受限于 HNSW 索引内存 | 监控索引大小 vs 内存（见《pgvector 索引规范》） |
 | `conversations`/`documents` | 中等 | 常规索引 |
 | 配置表（providers/agents/models/...） | 极小、静态 | PK + 业务唯一键即可 |
 
-**① executions —— 唯一值得"建表即分区"的表。** 时间序列、append-only、有明确保留期（排障窗口 90 天）。分区好处：drop 旧分区瞬间完成、每分区索引小、autovacuum 友好。**后来再转分区要整表重写**，所以现在就做：
+**① executions —— 唯一值得"建表即分区"的表。** 时间序列、append-only、有明确保留期（排障窗口默认 90 天，`EXECUTIONS_RETENTION_DAYS` 可配）。分区好处：drop 旧分区瞬间完成、每分区索引小、autovacuum 友好。**后来再转分区要整表重写**，所以现在就做：
 
 ```sql
 CREATE TABLE executions (

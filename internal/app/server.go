@@ -81,7 +81,7 @@ func Run(cfg *config.Config) error {
 	_ = llmTransport
 	// TODO: platform/budget（每用户限流 + 每日预算熔断，fail-open + 80% 告警）
 
-	// appCtx：随 SIGINT / SIGTERM 取消，喂给长生命周期 goroutine（provider 定时探测）与关停流程。
+	// appCtx：随 SIGINT / SIGTERM 取消，喂给长生命周期 goroutine（provider 定时探测、executions 分区维护）与关停流程。
 	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -103,6 +103,16 @@ func Run(cfg *config.Config) error {
 	providerSvc, prober := providersvc.NewProviderService(providerStore, providerCache, cfg.Provider.MasterKey)
 	modelSvc := providersvc.NewModelService(providerStore, providerCache, cfg.Provider.MasterKey)
 	go prober.StartProber(appCtx) // 定时健康探测：60s 一轮，随 appCtx 取消退出（db_model §2.3.1）
+
+	// executions 分区维护后台任务（platform/logging/partition.go）：启动首轮 + 每 24h 一轮，
+	// 建当月/下月分区、删 分区end+保留期 早于 now 的旧分区（在线窗口恒 ≥ 保留期）。
+	// dev 与 prod 同路径生效；单实例部署假设不加锁；首轮毫秒级完成、而 executions 写入发生在
+	// LLM 流结束后（秒级），监听竞态窗口实际不可达。<=0 关闭（不建不删，仅此处 WARN）。
+	if cfg.Logging.ExecutionsRetentionDays > 0 {
+		go logging.NewPartitionMaintainer(gormDB, cfg.Logging.ExecutionsRetentionDays).Start(appCtx)
+	} else {
+		slog.Warn("executions partition maintenance disabled (EXECUTIONS_RETENTION_DAYS <= 0); partitions are neither created nor dropped")
+	}
 
 	// agent：依赖 provider 的 ModelService（主/备用模型存在性预检，api 接口注入）。
 	// cache 用独立实例（NameAgent 命名空间隔离）；失效矩阵只有 detail:{id} 一条边——
@@ -168,7 +178,7 @@ func Run(cfg *config.Config) error {
 			slog.Warn("http shutdown incomplete", "err", err)
 		}
 	}
-	// prober 随 appCtx 退出（在途探测单轮 ≤10s，极端未收尾只记一条错误日志，不阻断关停）。
+	// prober / 分区维护 goroutine 随 appCtx 退出（在途单轮有界，极端未收尾只记一条错误日志，不阻断关停）。
 	if sqlDB, err := gormDB.DB(); err != nil {
 		slog.Warn("get sql db handle", "err", err)
 	} else if err := sqlDB.Close(); err != nil {

@@ -39,10 +39,11 @@ func TestMustLoad_OK(t *testing.T) {
 // 可选数值 / 布尔 env：合法值生效，非法值回退默认（不 panic）。
 func TestMustLoad_OptionalNumericAndBool(t *testing.T) {
 	setRequiredExcept(t, "")
-	t.Setenv("REDIS_DB", "7")                      // envInt 合法
-	t.Setenv("USER_RPM", "not-a-number")           // envInt 非法 → 默认 60
-	t.Setenv("DAILY_BUDGET_USD_CENTS", "2500")     // envInt64 合法
-	t.Setenv("AUTH_COOKIE_SECURE", "true")         // envBool 合法
+	t.Setenv("REDIS_DB", "7")                  // envInt 合法
+	t.Setenv("USER_RPM", "not-a-number")       // envInt 非法 → 默认 60
+	t.Setenv("DAILY_BUDGET_USD_CENTS", "2500") // envInt64 合法
+	t.Setenv("AUTH_COOKIE_SECURE", "true")     // envBool 合法
+	t.Setenv("EXECUTIONS_RETENTION_DAYS", "180")
 
 	cfg, recovered := mustLoadOrPanic(t)
 	if recovered != nil {
@@ -59,6 +60,38 @@ func TestMustLoad_OptionalNumericAndBool(t *testing.T) {
 	}
 	if !cfg.Auth.CookieSecure {
 		t.Error("CookieSecure = false, want true")
+	}
+	if cfg.Logging.ExecutionsRetentionDays != 180 {
+		t.Errorf("ExecutionsRetentionDays = %d, want 180", cfg.Logging.ExecutionsRetentionDays)
+	}
+}
+
+func TestMustLoad_ExecutionsRetentionDays(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string // 空串 = 不设
+		want int
+	}{
+		{"未设走默认 90", "", 90},
+		{"非法值回退默认 90", "not-a-number", 90},
+		{"自定义 365", "365", 365},
+		{"0 是合法值（关闭维护，语义必须透传）", "0", 0},
+		{"负数同理透传（关闭）", "-1", -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredExcept(t, "")
+			if tc.env != "" {
+				t.Setenv("EXECUTIONS_RETENTION_DAYS", tc.env)
+			}
+			cfg, recovered := mustLoadOrPanic(t)
+			if recovered != nil {
+				t.Fatalf("panic: %v", recovered)
+			}
+			if cfg.Logging.ExecutionsRetentionDays != tc.want {
+				t.Errorf("ExecutionsRetentionDays = %d, want %d", cfg.Logging.ExecutionsRetentionDays, tc.want)
+			}
+		})
 	}
 }
 
