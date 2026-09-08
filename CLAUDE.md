@@ -771,8 +771,8 @@ Hify 索引地图（建表时照抄；向量索引细节见《pgvector 索引规
 | `agent_tools` | id PK + `uq(agent_id, tool_id)` + 反查 `(tool_id)` |
 | `agent_knowledge_bases` | PK `(agent_id, knowledge_base_id)` + 反查 `(knowledge_base_id)` |
 | `knowledge_bases` | `(embedding_model_id)` |
-| `documents` | `(knowledge_base_id)` + partial `(status) WHERE status='processing'` |
-| `chunks` | HNSW 向量索引（见《pgvector 索引规范》） + `(document_id)` |
+| `documents` | `(knowledge_base_id)` + partial `(status) WHERE status IN ('pending','processing')`（入库中扫描，00011 起） |
+| `document_chunks` | HNSW 向量索引（见《pgvector 索引规范》） + `(document_id)` + `(knowledge_base_id)`（冗余 KB 归属，检索单表过滤免 JOIN，00011 起） |
 | `conversations` | `(user_id, updated_at DESC, id DESC)`（列表分页）、`(agent_id)` |
 | `messages` | `(conversation_id, id)`（上下文按序取） |
 | `executions` | `(conversation_id, created_at)`、`(model_id)`；规模上来后 `BRIN (created_at)` + partial `(error_class) WHERE error_class IS NOT NULL` |

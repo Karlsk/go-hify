@@ -23,6 +23,8 @@ const (
 	NameProvider = "provider-cache"
 	// NameAgent agent 配置缓存。
 	NameAgent = "agent-cache"
+	// NameRag rag 配置缓存（知识库配置，静态低频变更）。
+	NameRag = "rag-cache"
 )
 
 // TTL 约定（CLAUDE.md《部署架构》：配置类 Cache-Aside，TTL 30 分钟 + 写时删 key）。
@@ -39,13 +41,14 @@ type Config struct {
 }
 
 // DefaultConfig 返回带已知配置类缓存名 TTL 的默认装配配置
-// （provider-cache / agent-cache 均 30 min，等于默认）。业务模块若需不同 TTL，覆盖对应项。
+// （provider-cache / agent-cache / rag-cache 均 30 min，等于默认）。业务模块若需不同 TTL，覆盖对应项。
 func DefaultConfig() Config {
 	return Config{
 		DefaultTTL: DefaultTTL,
 		TTLs: map[string]time.Duration{
 			NameProvider: DefaultTTL,
 			NameAgent:    DefaultTTL,
+			NameRag:      DefaultTTL,
 		},
 	}
 }

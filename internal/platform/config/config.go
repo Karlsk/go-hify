@@ -23,6 +23,7 @@ type Config struct {
 	Provider ProviderCfg
 	Budget   BudgetCfg
 	Logging  LoggingCfg
+	Rag      RagCfg
 }
 
 // ServerCfg HTTP 服务监听。
@@ -79,6 +80,17 @@ type LoggingCfg struct {
 	ExecutionsRetentionDays int
 }
 
+// RagCfg rag 模块配置（分块 / 检索 / 入库管线，spec 01 §5）。
+type RagCfg struct {
+	ChunkSize         int   // 分块目标尺寸（rune，递归分割）；RAG_CHUNK_SIZE
+	ChunkOverlap      int   // 相邻块重叠（上一块尾部前缀，rune）；RAG_CHUNK_OVERLAP
+	EmbedBatchSize    int   // embedding 单批条数；RAG_EMBED_BATCH_SIZE
+	TopK              int   // 召回 top-k（LIMIT 封顶 100，对齐仓规分页封顶）；RAG_TOP_K
+	EFSearch          int   // HNSW ef_search（会话级 SET LOCAL）；RAG_EF_SEARCH
+	MaxUploadBytes    int64 // 上传上限（字节，钉内存峰值）；RAG_MAX_UPLOAD_BYTES
+	IngestConcurrency int   // 入库管线并发（每文档一个槽）；RAG_INGEST_CONCURRENCY
+}
+
 // MustLoad 从环境变量加载配置；必填项缺失即 panic。
 func MustLoad() *Config {
 	cfg := &Config{
@@ -116,6 +128,15 @@ func MustLoad() *Config {
 			File:                    envStr("LOG_FILE", "logs/hify.log"),
 			ExecutionsRetentionDays: envInt("EXECUTIONS_RETENTION_DAYS", 90),
 		},
+		Rag: RagCfg{
+			ChunkSize:         envInt("RAG_CHUNK_SIZE", 500),
+			ChunkOverlap:      envInt("RAG_CHUNK_OVERLAP", 80),
+			EmbedBatchSize:    envInt("RAG_EMBED_BATCH_SIZE", 32),
+			TopK:              envInt("RAG_TOP_K", 5),
+			EFSearch:          envInt("RAG_EF_SEARCH", 80),
+			MaxUploadBytes:    envInt64("RAG_MAX_UPLOAD_BYTES", 2<<20),
+			IngestConcurrency: envInt("RAG_INGEST_CONCURRENCY", 2),
+		},
 	}
 	cfg.mustValidate()
 	return cfg
@@ -135,6 +156,37 @@ func (c *Config) mustValidate() {
 	}
 	if len(missing) > 0 {
 		panic(fmt.Sprintf("config: missing required env vars: %s", strings.Join(missing, ", ")))
+	}
+
+	// rag 非法组合同样启动即拦（spec 01 §5：fail-fast，照 PROVIDER_MASTER_KEY 惯例）。
+	var invalid []string
+	r := c.Rag
+	if r.ChunkSize <= 0 {
+		invalid = append(invalid, "RAG_CHUNK_SIZE 必须为正")
+	}
+	if r.ChunkOverlap < 0 {
+		invalid = append(invalid, "RAG_CHUNK_OVERLAP 不能为负")
+	}
+	if r.ChunkOverlap >= r.ChunkSize {
+		invalid = append(invalid, "RAG_CHUNK_OVERLAP 必须小于 RAG_CHUNK_SIZE（重叠≥块大小无法分割）")
+	}
+	if r.EmbedBatchSize <= 0 {
+		invalid = append(invalid, "RAG_EMBED_BATCH_SIZE 必须为正")
+	}
+	if r.TopK < 1 || r.TopK > 100 {
+		invalid = append(invalid, "RAG_TOP_K 必须在 1..100（LIMIT 服务端封顶）")
+	}
+	if r.EFSearch <= 0 {
+		invalid = append(invalid, "RAG_EF_SEARCH 必须为正")
+	}
+	if r.MaxUploadBytes <= 0 {
+		invalid = append(invalid, "RAG_MAX_UPLOAD_BYTES 必须为正")
+	}
+	if r.IngestConcurrency <= 0 {
+		invalid = append(invalid, "RAG_INGEST_CONCURRENCY 必须为正")
+	}
+	if len(invalid) > 0 {
+		panic(fmt.Sprintf("config: invalid rag settings: %s", strings.Join(invalid, ", ")))
 	}
 }
 

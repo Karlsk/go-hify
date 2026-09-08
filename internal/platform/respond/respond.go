@@ -58,6 +58,13 @@ func Created(c *gin.Context, data any) {
 	c.JSON(http.StatusCreated, Result{Success: true, Data: data, Meta: nil})
 }
 
+// Accepted 写 202 + 成功信封（异步受理：请求已入队但结果未就绪——rag 文档上传 /
+// 重索引落 pending 后受理即返回，进度由前端轮询资源状态获取）。
+func Accepted(c *gin.Context, data any) {
+	noStore(c)
+	c.JSON(http.StatusAccepted, Result{Success: true, Data: data, Meta: nil})
+}
+
 // OKWithMeta 写 200 + 成功信封，附带 meta（如分页信息）。
 func OKWithMeta(c *gin.Context, data any, meta any) {
 	noStore(c)

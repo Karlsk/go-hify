@@ -95,6 +95,110 @@ func TestMustLoad_ExecutionsRetentionDays(t *testing.T) {
 	}
 }
 
+// RagCfg 默认值钉死（spec 01 §5 表）。
+func TestMustLoad_RagDefaults(t *testing.T) {
+	setRequiredExcept(t, "")
+	cfg, recovered := mustLoadOrPanic(t)
+	if recovered != nil {
+		t.Fatalf("panic: %v", recovered)
+	}
+	want := RagCfg{
+		ChunkSize:         500,
+		ChunkOverlap:      80,
+		EmbedBatchSize:    32,
+		TopK:              5,
+		EFSearch:          80,
+		MaxUploadBytes:    2 << 20,
+		IngestConcurrency: 2,
+	}
+	if cfg.Rag != want {
+		t.Errorf("Rag = %+v, want %+v", cfg.Rag, want)
+	}
+}
+
+// RagCfg env 透传（合法值生效）。
+func TestMustLoad_RagEnvOverrides(t *testing.T) {
+	setRequiredExcept(t, "")
+	t.Setenv("RAG_CHUNK_SIZE", "800")
+	t.Setenv("RAG_CHUNK_OVERLAP", "120")
+	t.Setenv("RAG_EMBED_BATCH_SIZE", "64")
+	t.Setenv("RAG_TOP_K", "10")
+	t.Setenv("RAG_EF_SEARCH", "120")
+	t.Setenv("RAG_MAX_UPLOAD_BYTES", "10485760")
+	t.Setenv("RAG_INGEST_CONCURRENCY", "4")
+
+	cfg, recovered := mustLoadOrPanic(t)
+	if recovered != nil {
+		t.Fatalf("panic: %v", recovered)
+	}
+	r := cfg.Rag
+	if r.ChunkSize != 800 || r.ChunkOverlap != 120 || r.EmbedBatchSize != 64 ||
+		r.TopK != 10 || r.EFSearch != 120 || r.MaxUploadBytes != 10485760 || r.IngestConcurrency != 4 {
+		t.Errorf("Rag = %+v, want 全部透传自定义值", r)
+	}
+}
+
+// TopK 边界（用户拍板 1 ≤ TopK ≤ 100，对齐仓规 LIMIT 封顶 100）。
+func TestMustLoad_RagTopKBoundary(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want int
+	}{
+		{"下界 1 合法", "1", 1},
+		{"上界 100 合法", "100", 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredExcept(t, "")
+			t.Setenv("RAG_TOP_K", tc.env)
+			cfg, recovered := mustLoadOrPanic(t)
+			if recovered != nil {
+				t.Fatalf("panic: %v", recovered)
+			}
+			if cfg.Rag.TopK != tc.want {
+				t.Errorf("TopK = %d, want %d", cfg.Rag.TopK, tc.want)
+			}
+		})
+	}
+}
+
+// RagCfg 非法组合启动即 panic（fail-fast），消息点名对应 env key（spec 01 §5）。
+func TestMustLoad_RagInvalid(t *testing.T) {
+	cases := []struct {
+		name string
+		envs map[string]string
+		want string // panic 消息应点名的 env key
+	}{
+		{"ChunkSize 为 0", map[string]string{"RAG_CHUNK_SIZE": "0"}, "RAG_CHUNK_SIZE"},
+		{"ChunkSize 为负", map[string]string{"RAG_CHUNK_SIZE": "-100"}, "RAG_CHUNK_SIZE"},
+		{"Overlap 为负", map[string]string{"RAG_CHUNK_OVERLAP": "-1"}, "RAG_CHUNK_OVERLAP"},
+		{"Overlap 等于 ChunkSize", map[string]string{"RAG_CHUNK_OVERLAP": "500"}, "RAG_CHUNK_OVERLAP"},
+		{"Overlap 大于 ChunkSize", map[string]string{"RAG_CHUNK_OVERLAP": "600"}, "RAG_CHUNK_OVERLAP"},
+		{"EmbedBatchSize 为 0", map[string]string{"RAG_EMBED_BATCH_SIZE": "0"}, "RAG_EMBED_BATCH_SIZE"},
+		{"TopK 为 0（低于下界）", map[string]string{"RAG_TOP_K": "0"}, "RAG_TOP_K"},
+		{"TopK 超上限 100", map[string]string{"RAG_TOP_K": "101"}, "RAG_TOP_K"},
+		{"EFSearch 为 0", map[string]string{"RAG_EF_SEARCH": "0"}, "RAG_EF_SEARCH"},
+		{"MaxUploadBytes 为 0", map[string]string{"RAG_MAX_UPLOAD_BYTES": "0"}, "RAG_MAX_UPLOAD_BYTES"},
+		{"IngestConcurrency 为 0", map[string]string{"RAG_INGEST_CONCURRENCY": "0"}, "RAG_INGEST_CONCURRENCY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredExcept(t, "")
+			for k, v := range tc.envs {
+				t.Setenv(k, v)
+			}
+			_, recovered := mustLoadOrPanic(t)
+			if recovered == nil {
+				t.Fatalf("%s 应 panic", tc.name)
+			}
+			if msg, ok := recovered.(string); !ok || !strings.Contains(msg, tc.want) {
+				t.Fatalf("panic 消息应点名 %s, got %v", tc.want, recovered)
+			}
+		})
+	}
+}
+
 func TestMustLoad_MissingPGDSN(t *testing.T) {
 	setRequiredExcept(t, "PG_DSN")
 	_, recovered := mustLoadOrPanic(t)

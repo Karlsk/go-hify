@@ -94,6 +94,30 @@ func TestCreated(t *testing.T) {
 	}
 }
 
+// Accepted 写 202（异步受理：rag 上传/重索引落 pending 后受理即返回，spec 01 §5）。
+func TestAccepted(t *testing.T) {
+	r := newTestEngine(t)
+	r.GET("/x", func(c *gin.Context) { Accepted(c, gin.H{"status": "pending"}) })
+
+	rec := serve(t, r, http.MethodGet, "/x", "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	env := parseEnv(t, rec)
+	if !env.Success {
+		t.Fatal("success should be true")
+	}
+	if !strings.Contains(string(env.Data), "pending") {
+		t.Fatalf("data = %s, want status=pending passthrough", env.Data)
+	}
+	if !isJSONNull(env.Meta) {
+		t.Fatalf("meta = %s, want null", env.Meta)
+	}
+}
+
 func TestOKWithMeta(t *testing.T) {
 	r := newTestEngine(t)
 	r.GET("/x", func(c *gin.Context) { OKWithMeta(c, []int{1, 2}, gin.H{"page": 1}) })
