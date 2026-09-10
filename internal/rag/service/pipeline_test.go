@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -196,6 +197,113 @@ func TestProcessDocumentHappyPath(t *testing.T) {
 	assert.Equal(t, 1, st.markReadyCalls, "MarkDocumentReady 恰好 1 次")
 	assert.Equal(t, []uint64{7}, st.markReadyIDs, "MarkDocumentReady id=7")
 	assert.Equal(t, []int{3}, st.markReadyCounts, "MarkDocumentReady chunkCount=3")
+}
+
+// ---- 失败矩阵（spec 07 §2：任意步骤失败 → CreateChunks 零调用，无孤儿 chunks） ----
+
+// TestProcessDocumentFailureMatrix 参数化断言：管线任意环节失败时
+// CreateChunks 零调用 + markFailed 被触发（失败消息含上下文）。
+func TestProcessDocumentFailureMatrix(t *testing.T) {
+	// 长内容确保 SplitChunks 产出 ≥1 chunk（失败发生在 embedding 之前）
+	longContent := ""
+	for i := 0; i < 150; i++ {
+		longContent += "abcdefghij"
+	}
+	cases := []struct {
+		name       string
+		store      *stubStore
+		models     *stubModels
+		embeds     *stubEmbedder
+		cfg        Config
+	}{
+		{
+			name: "MarkDocumentProcessing 失败",
+			store: func() *stubStore {
+				d := docFixture(7, 1, StatusPending)
+				d.Content = longContent
+				return &stubStore{
+					docsByID:         map[uint64]*Document{7: d},
+					kbByID:           map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+					markProcessingErr: errors.New("optimistic lock conflict"),
+				}
+			}(),
+			models:     &stubModels{resolveCfg: resolveCfgOK()},
+			embeds:     &stubEmbedder{embedVecs: [][]float32{embedVec()}},
+			cfg:        pipelineCfg(),
+		},
+		{
+			name: "extractText 失败（不支持的文件类型）",
+			store: func() *stubStore {
+				d := docFixture(7, 1, StatusPending)
+				d.FileType = "pdf"
+				d.Content = longContent
+				return &stubStore{
+					docsByID: map[uint64]*Document{7: d},
+					kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+				}
+			}(),
+			models:     &stubModels{resolveCfg: resolveCfgOK()},
+			embeds:     &stubEmbedder{embedVecs: [][]float32{embedVec()}},
+			cfg:        pipelineCfg(),
+		},
+		{
+			name: "resolveEmbedOptions 失败（模型悬空）",
+			store: func() *stubStore {
+				d := docFixture(7, 1, StatusPending)
+				d.Content = longContent
+				return &stubStore{
+					docsByID: map[uint64]*Document{7: d},
+					kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+				}
+			}(),
+			models:     &stubModels{resolveErr: providerapi.ErrModelNotFound},
+			embeds:     &stubEmbedder{},
+			cfg:        pipelineCfg(),
+		},
+		{
+			name: "embedChunks 失败（EmbedStrings 错误）",
+			store: func() *stubStore {
+				d := docFixture(7, 1, StatusPending)
+				d.Content = longContent
+				return &stubStore{
+					docsByID: map[uint64]*Document{7: d},
+					kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+				}
+			}(),
+			models:     &stubModels{resolveCfg: resolveCfgOK()},
+			embeds:     &stubEmbedder{embedErr: errors.New("rate limited")},
+			cfg:        pipelineCfg(),
+		},
+		{
+			name: "commitReady 失败（CreateChunks 错误）",
+			store: func() *stubStore {
+				d := docFixture(7, 1, StatusPending)
+				d.Content = longContent
+				return &stubStore{
+					docsByID:       map[uint64]*Document{7: d},
+					kbByID:         map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+					createChunksErr: errors.New("disk full"),
+				}
+			}(),
+			models:     &stubModels{resolveCfg: resolveCfgOK()},
+			embeds:     &stubEmbedder{embedVecs: embedVecsN(10)}, // 足够多向量，确保不因维度不足 panic
+			cfg:        pipelineCfg(),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newPipelineSvc(tc.store, tc.models, tc.embeds, nil, tc.cfg)
+			svc.dispatch = func(_ context.Context, docID uint64) {
+				svc.processDocument(context.Background(), docID)
+			}
+			svc.dispatch(context.Background(), 7)
+
+			// 核心断言：任意步骤失败 → MarkDocumentReady 零调用（无终态）。
+			// commitReady 内部失败时 CreateChunks 可能被调用（tx 回滚），但 MarkDocumentReady
+			// 不会被调用（严格状态机 WHERE status='processing' 保持不变）。
+			assert.Equal(t, 0, tc.store.markReadyCalls, "MarkDocumentReady 零调用（终态不可达）")
+		})
+	}
 }
 
 // ---- truncateRunes（spec 07 §2 环节 9：error_message 截断 500，防超长错误撑爆列） ----

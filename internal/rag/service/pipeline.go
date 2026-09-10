@@ -56,17 +56,20 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 	// 环节 2：loadDocument——not found 只记日志返回（可能已被删）。
 	doc, err := s.store.GetDocumentByID(ctx, docID)
 	if err != nil {
+		slog.ErrorContext(ctx, "pipeline: loadDocument failed", "document_id", docID, "err", err)
 		return
 	}
 
 	// 环节 3：MarkDocumentProcessing（严格状态机 WHERE status='pending'）。
 	if err := s.store.MarkDocumentProcessing(ctx, docID); err != nil {
+		slog.ErrorContext(ctx, "pipeline: MarkDocumentProcessing failed", "document_id", docID, "err", err)
 		return
 	}
 
 	// 环节 4：extractText（TXT/MD 纯文本直取，二进制拒之门外已在 UploadDocument.Validate）。
 	text, err := extractText(doc)
 	if err != nil {
+		slog.ErrorContext(ctx, "pipeline: extractText failed", "document_id", docID, "err", err)
 		return
 	}
 
@@ -76,6 +79,7 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 	// 环节 6：resolveEmbedOptions（ResolveLLMConfig → 明文凭据瞬间存在，用后即弃）。
 	embedOpts, err := s.resolveEmbedOptions(ctx, doc.KnowledgeBaseID)
 	if err != nil {
+		slog.ErrorContext(ctx, "pipeline: resolveEmbedOptions failed", "document_id", docID, "err", err)
 		return
 	}
 
@@ -83,6 +87,7 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 	// prompt_tokens）。embedding 永不进事务——超时/重试/熔断在 platform/llm 内。
 	vectors, promptTokens, err := s.embedChunks(ctx, embedOpts, rawChunks)
 	if err != nil {
+		slog.ErrorContext(ctx, "pipeline: embedChunks failed", "document_id", docID, "err", err)
 		return
 	}
 
@@ -92,6 +97,7 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 
 	// 环节 9：commitReady（终态事务原子：CreateChunks + MarkDocumentReady）。
 	if err := s.commitReady(ctx, docID, chunks, promptTokens); err != nil {
+		slog.ErrorContext(ctx, "pipeline: commitReady failed", "document_id", docID, "err", err)
 		return
 	}
 }

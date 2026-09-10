@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,8 @@ import (
 type stubStore struct {
 	Store
 
+	mu sync.Mutex // 保护记录字段的并发读写（pipeline goroutine 写，test goroutine 读）
+
 	createErr error          // CreateKnowledgeBase 注入错误（23505 / 23503 / 普通错误）
 	nextID    uint64         // 模拟 DB RETURNING 回填主键
 	created   *KnowledgeBase // 落库实体快照
@@ -50,15 +53,15 @@ type stubStore struct {
 	countIDsGot []uint64         // 查收批量计数的 id 集合
 
 	// 列表
-	listKBs   page.OffsetResult[KnowledgeBase]
-	listName  string // 查收 name 过滤参数（透传断言）
+	listKBs  page.OffsetResult[KnowledgeBase]
+	listName string // 查收 name 过滤参数（透传断言）
 
 	// 文档路径
 	docsByID       map[uint64]*Document // GetDocumentByID 数据集（无键 = NotFound）
 	getDocCalls    int
-	createDocErr   error    // CreateDocument 注入错误（23503 / 普通）
+	createDocErr   error     // CreateDocument 注入错误（23503 / 普通）
 	createdDoc     *Document // 落库实体快照
-	softDelErr     error    // SoftDeleteDocument 注入错误（NotFound / 普通）
+	softDelErr     error     // SoftDeleteDocument 注入错误（NotFound / 普通）
 	softDelID      uint64
 	softDelDone    bool
 	listDocs       []Document // ListDocumentsByKB 固定返回集
@@ -71,15 +74,33 @@ type stubStore struct {
 	txCalls        int
 
 	// 检索（spec 05）
-	searchHits   []ChunkHit       // SearchChunks 返回集
-	searchErr    error            // SearchChunks 注入错误
-	searchGotKBs []uint64         // 查收 kbIDs（disabled 剔除断言）
-	searchGotQ   []float32        // 查收查询向量
-	searchGotLim int              // 查收 limit（TopK 默认 / clamp 断言）
-	searchGotEF  int              // 查收 efSearch（cfg 透传断言）
+	searchHits   []ChunkHit        // SearchChunks 返回集
+	searchErr    error             // SearchChunks 注入错误
+	searchGotKBs []uint64          // 查收 kbIDs（disabled 剔除断言）
+	searchGotQ   []float32         // 查收查询向量
+	searchGotLim int               // 查收 limit（TopK 默认 / clamp 断言）
+	searchGotEF  int               // 查收 efSearch（cfg 透传断言）
 	docMetas     map[uint64]string // GetDocumentMetasByIDs 返回集（无键 = 悬空 ""）
 	docMetasErr  error
 	docMetasGot  []uint64 // 查收 ids
+
+	// 管线（spec 07）：状态翻转 / chunks 写入 / Recovery 扫描的调用记录。
+	markProcessingCalls int      // MarkDocumentProcessing 命中计数
+	markProcessingIDs   []uint64 // 查收 id（翻转时机断言）
+	markProcessingErr   error    // 注入错误（0 行 ErrRecordNotFound 等）
+	markReadyCalls      int
+	markReadyIDs        []uint64 // MarkDocumentReady 查收（id, chunkCount）原子对
+	markReadyCounts     []int
+	markReadyErr        error
+	markFailedCalls     int      // MarkDocumentFailed 命中计数
+	markFailedIDs       []uint64 // 查收 id
+	markFailedMsgs      []string // 查收 message（失败矩阵断言）
+	markFailedErr       error
+	createChunksCalls   int             // CreateChunks 批次计数（逐批 ≤ EmbedBatchSize）
+	createChunksGot     []DocumentChunk // 全量收到的 chunks（内容 / 冗余列断言）
+	createChunksErr     error           // 注入错误（事务回滚路径）
+	ingestingDocs       []Document      // ListIngestingDocuments 返回集（Recovery 用）
+	ingestingErr        error
 }
 
 func (s *stubStore) CreateKnowledgeBase(_ context.Context, kb *KnowledgeBase) error {
@@ -141,7 +162,9 @@ func (s *stubStore) ListKnowledgeBases(_ context.Context, _ page.OffsetParams, n
 }
 
 func (s *stubStore) GetDocumentByID(_ context.Context, id uint64) (*Document, error) {
+	s.mu.Lock()
 	s.getDocCalls++
+	s.mu.Unlock()
 	if d, ok := s.docsByID[id]; ok {
 		cp := *d // 副本模拟 DB 读隔离
 		return &cp, nil
@@ -203,6 +226,28 @@ func (s *stubStore) WithTx(_ context.Context, fn func(tx Store) error) error {
 	return fn(s) // tx 即同一 stub：序列经 ops 记录
 }
 
+// ---- 管线记录字段线程安全读（spec 07：dispatchIngest goroutine 写，test goroutine 读） ----
+
+func (s *stubStore) numGetDocCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getDocCalls
+}
+
+func (s *stubStore) numMarkFailedCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.markFailedCalls
+}
+
+func (s *stubStore) markFailedSnapshot() (ids []uint64, msgs []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids = append(ids, s.markFailedIDs...)
+	msgs = append(msgs, s.markFailedMsgs...)
+	return ids, msgs
+}
+
 // stubModels 内嵌 providerapi.ModelService，按需覆写（Get 预检 / ListByIDs 聚合 /
 // ResolveLLMConfig 检索向量化前置——spec 05）。
 type stubModels struct {
@@ -213,8 +258,8 @@ type stubModels struct {
 	listIDs []providerapi.ListModelsByIDsReq
 	listErr error
 
-	resolveCfg *providerapi.LLMConfig        // ResolveLLMConfig 返回集
-	resolveErr error                         // 注入错误（ModelNotFound 等）
+	resolveCfg *providerapi.LLMConfig          // ResolveLLMConfig 返回集
+	resolveErr error                           // 注入错误（ModelNotFound 等）
 	resolveGot providerapi.ResolveLLMConfigReq // 查收请求（KB 模型 id 断言）
 }
 
@@ -241,9 +286,9 @@ func (s *stubModels) ResolveLLMConfig(_ context.Context, req providerapi.Resolve
 
 // stubCache 实现 cacheManager：JSON 往返模拟真实缓存序列化（载荷形状漂移即暴露）。
 type stubCache struct {
-	getErr error
-	setErr error
-	delErr error
+	getErr  error
+	setErr  error
+	delErr  error
 	seed    map[string]any // Get 命中数据（key → 载荷）
 	stored  map[string]any // Set 收到的载荷
 	deleted []string       // Delete 收到的 key
@@ -289,12 +334,14 @@ func pgErr(code string) error { return &pgconn.PgError{Code: code} }
 // newSvc 构造被测服务（无缓存路径：Create 等不触缓存的用例）；embeds 本篇仅持有
 // 不调用（spec 04 §1），传 nil。
 func newSvc(st Store, models providerapi.ModelService) ragapi.KnowledgeBaseService {
-	return New(st, models, nil, nil, Config{})
+	svc, _ := New(st, models, nil, nil, Config{})
+	return svc
 }
 
 // newSvcWithCache 带缓存构造（Cache-Aside / evict 用例）。
 func newSvcWithCache(st Store, models providerapi.ModelService, cm cacheManager) ragapi.KnowledgeBaseService {
-	return New(st, models, nil, cm, Config{})
+	svc, _ := New(st, models, nil, cm, Config{})
+	return svc
 }
 
 // dimPtr 测试辅助（*int32 构造）。
@@ -428,7 +475,7 @@ func TestGetKnowledgeBaseCacheHit(t *testing.T) {
 // 缓存 miss：查库 → 计数现读 → Set 回填 → 返回。
 func TestGetKnowledgeBaseCacheMiss(t *testing.T) {
 	st := &stubStore{
-		kbByID:     map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+		kbByID:      map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
 		docsByKBIDs: map[uint64]int64{1: 3},
 	}
 	cm := &stubCache{seed: map[string]any{}}
@@ -538,7 +585,7 @@ func TestUpdateKnowledgeBaseErrors(t *testing.T) {
 func TestListKnowledgeBases(t *testing.T) {
 	kb1, kb2 := kbFixture(1, 5, true), kbFixture(2, 9, false)
 	st := &stubStore{
-		listKBs:    page.OffsetResult[KnowledgeBase]{Items: []KnowledgeBase{*kb1, *kb2}, Page: 1, PageSize: 20, Total: 2},
+		listKBs:     page.OffsetResult[KnowledgeBase]{Items: []KnowledgeBase{*kb1, *kb2}, Page: 1, PageSize: 20, Total: 2},
 		docsByKBIDs: map[uint64]int64{1: 3},
 	}
 	m := providerapi.ModelSchema{Name: "text-embedding-x"}
@@ -705,7 +752,7 @@ func TestGetDocument(t *testing.T) {
 func TestListDocuments(t *testing.T) {
 	kb := map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)}
 	st := &stubStore{
-		kbByID:  kb,
+		kbByID:   kb,
 		listDocs: []Document{*docFixture(3, 1, StatusReady), *docFixture(2, 1, StatusReady)},
 	}
 	svc := newSvcWithCache(st, &stubModels{}, &stubCache{})
@@ -863,7 +910,8 @@ func (s *stubEmbedder) EmbedStrings(_ context.Context, opts llm.EmbedOptions, in
 
 // newRetrieveSvc 检索路径构造（embeds 非 nil；无缓存路径）。
 func newRetrieveSvc(st Store, models providerapi.ModelService, embeds embedder, cfg Config) ragapi.KnowledgeBaseService {
-	return New(st, models, embeds, nil, cfg)
+	svc, _ := New(st, models, embeds, nil, cfg)
+	return svc
 }
 
 // embedVec 1536 维查询向量（维度校验的 happy 路径）。
@@ -873,6 +921,15 @@ func embedVec() []float32 {
 		v[i] = 0.01
 	}
 	return v
+}
+
+// embedVecsN 生成 n 个1536 维向量（管线失败矩阵等需要足量向量的测试）。
+func embedVecsN(n int) [][]float32 {
+	vecs := make([][]float32, n)
+	for i := range vecs {
+		vecs[i] = embedVec()
+	}
+	return vecs
 }
 
 // resolveCfgOK stub LLMConfig（明文四不：stub 值不涉真实凭据）。
@@ -976,8 +1033,8 @@ func TestRetrieveLLMSentinelPassthrough(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
-		is   error            // errors.Is 断言目标（哨兵）
-		as   *llm.Error       // errors.As 断言目标（分类错误）
+		is   error      // errors.Is 断言目标（哨兵）
+		as   *llm.Error // errors.As 断言目标（分类错误）
 		want llm.Class
 	}{
 		{"unsupported", llm.ErrEmbeddingUnsupported, llm.ErrEmbeddingUnsupported, nil, ""},
