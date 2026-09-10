@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/pgvector/pgvector-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
@@ -443,6 +445,115 @@ func TestWithTxRollback(t *testing.T) {
 	err := s.WithTx(context.Background(), func(tx ragsvc.Store) error {
 		return boom // fn 出错整笔回滚（删 chunks + 重置同生共死）
 	})
+	assert.ErrorIs(t, err, boom)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ---- spec 05：检索（SearchChunks / GetDocumentMetasByIDs） ----
+
+// chunkHitCols SearchChunks 返回列（与 ChunkHit 字段 snake_case 对应）。
+var chunkHitCols = []string{"id", "document_id", "knowledge_base_id", "chunk_index", "content", "token_count", "distance"}
+
+// getDocMetasSQL 引用名解析（spec 05 §2）：只取 id/name，不碰 content；
+// 软删行被 DeletedAt 过滤自然成"悬空"（无键 = ""）。
+const getDocMetasSQL = `SELECT id, name FROM "documents" WHERE id IN ($1,$2) AND "documents"."deleted_at" IS NULL`
+
+// TestGetDocumentMetasByIDs IN 展开两参；悬空（软删 / 不存在）无键。
+func TestGetDocumentMetasByIDs(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectQuery(regexp.QuoteMeta(getDocMetasSQL)).
+		WithArgs(uint64(9), uint64(10)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(9, "manual.txt"))
+
+	metas, err := s.GetDocumentMetasByIDs(context.Background(), []uint64{9, 10})
+	assert.NoError(t, err)
+	assert.Equal(t, map[uint64]string{9: "manual.txt"}, metas, "10 号悬空无键")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestGetDocumentMetasByIDsEmpty 空 id 列表零 SQL（IN () 非法）。
+func TestGetDocumentMetasByIDsEmpty(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+
+	metas, err := s.GetDocumentMetasByIDs(context.Background(), nil)
+	assert.NoError(t, err)
+	assert.Empty(t, metas)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// searchChunksWantSQL spec 05 §2 冻结形态：单表（无 JOIN / 无 documents 表）、显式列 +
+// 余弦距离、kbIDs IN 展开、embedding IS NOT NULL 纯防御、ORDER BY 表达式本体（与
+// vector_cosine_ops 配对铁律）、LIMIT。向量参数传两次（SELECT 列 + ORDER BY）。
+const searchChunksWantSQL = `SELECT id, document_id, knowledge_base_id, chunk_index, content, token_count, (embedding <=> $1) AS distance FROM document_chunks WHERE knowledge_base_id IN ($2,$3) AND embedding IS NOT NULL ORDER BY embedding <=> $4 LIMIT $5`
+
+// searchChunkSQLFrozen 冻结断言：SQL 无 JOIN、无 documents 表字样（单表召回）。
+func TestSearchChunkSQLFrozen(t *testing.T) {
+	assert.NotContains(t, searchChunksWantSQL, "JOIN", "单表查询，不 JOIN documents")
+	assert.NotContains(t, searchChunksWantSQL, "documents", "documents 表不进 ANN SQL（kb_id 冗余免 JOIN）")
+}
+
+// TestSearchChunks 事务序列（spec 05 §2 / §4）：Begin → SET LOCAL ef_search（Exec）→
+// 单表 ANN Query（向量参数两次、kbIDs IN 展开、LIMIT）→ Commit。
+func TestSearchChunks(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	q := []float32{0.1, 0.2}
+	vec, err := pgvector.NewVector(q).Value() // 传参形态：driver.Valuer → "[0.1,0.2]"
+	require.NoError(t, err)
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SET LOCAL hnsw.ef_search = 80`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(searchChunksWantSQL)).
+		WithArgs(vec, uint64(1), uint64(2), vec, 5).
+		WillReturnRows(sqlmock.NewRows(chunkHitCols).
+			AddRow(9, 100, 1, 0, "正文一", 12, 0.25).
+			AddRow(10, 100, 1, 1, "正文二", 10, 0.5))
+	mock.ExpectCommit()
+
+	hits, err := s.SearchChunks(context.Background(), []uint64{1, 2}, q, 5, 80)
+	assert.NoError(t, err)
+	require.Len(t, hits, 2)
+	assert.Equal(t, uint64(9), hits[0].ID)
+	assert.Equal(t, uint64(100), hits[0].DocumentID)
+	assert.Equal(t, "正文一", hits[0].Content)
+	assert.InDelta(t, 0.25, hits[0].Distance, 1e-9, "distance 直达 ChunkHit")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestSearchChunksSetLocalError SET LOCAL 失败 → 整笔回滚，错误原样上抛（翻译在 service）。
+func TestSearchChunksSetLocalError(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	boom := errors.New("set local failed")
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SET LOCAL hnsw.ef_search = 80`)).
+		WillReturnError(boom)
+	mock.ExpectRollback()
+
+	_, err := s.SearchChunks(context.Background(), []uint64{1}, []float32{0.1}, 5, 80)
+	assert.ErrorIs(t, err, boom)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestSearchChunksQueryError ANN 查询失败 → 回滚，错误原样上抛（向量参数仍传两次）。
+func TestSearchChunksQueryError(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	q := []float32{0.1}
+	vec, err := pgvector.NewVector(q).Value()
+	require.NoError(t, err)
+	boom := errors.New("ann query failed")
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`SET LOCAL hnsw.ef_search = 80`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(searchChunksWantSQL)).
+		WithArgs(vec, uint64(1), uint64(2), vec, 5).
+		WillReturnError(boom)
+	mock.ExpectRollback()
+
+	_, err = s.SearchChunks(context.Background(), []uint64{1, 2}, q, 5, 80)
 	assert.ErrorIs(t, err, boom)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

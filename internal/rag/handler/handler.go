@@ -1,4 +1,4 @@
-// Package handler 是 rag 模块的 HTTP 层（spec 04 端点 1-10；11 retrieve 属 05）：
+// Package handler 是 rag 模块的 HTTP 层（spec 04 端点 1-10 + spec 05 端点 11 retrieve）：
 // gin 路由与绑定。薄绑定，无业务逻辑——参数校验（binding tag + Validate）、调本模块
 // api 接口、哨兵 errors.Is → 状态码、respond 信封包装。
 package handler
@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Karlsk/go-hify/internal/platform/errs"
+	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/respond"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
@@ -41,6 +42,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	kbs.DELETE("/:id", h.deleteKB)
 	kbs.POST("/:id/documents", h.uploadDocument)
 	kbs.GET("/:id/documents", h.listDocuments)
+	kbs.POST("/:id/retrieve", h.retrieve)
 
 	docs := rg.Group("/documents")
 	docs.GET("/:id", h.getDocument)
@@ -244,7 +246,8 @@ func (h *Handler) reindexDocument(c *gin.Context) {
 }
 
 // failRag 映射 rag 侧业务哨兵。KB 操作也可能翻出 provider 哨兵（建库撞不存在 /
-// 停用的嵌入模型）——service 透传，此处一并映射（agent failAgent 同款；rag →
+// 停用的嵌入模型）、retrieve 翻出 llm 哨兵（spec 05 §3：Unsupported 400 / Busy 503 /
+// RateLimited 429）——service 透传，此处一并映射（agent failAgent 同款；rag →
 // provider 是白名单依赖方向且只 import api 包）。errs.ErrValidationFailed 等通用
 // 哨兵由兜底 FailFromSentinel 自动映射。
 func failRag(c *gin.Context, err error) {
@@ -257,6 +260,8 @@ func failRag(c *gin.Context, err error) {
 		respond.Fail(c, http.StatusConflict, ragapi.ErrKnowledgeBaseInUse.Error(), "知识库下仍有文档，先删除文档")
 	case errors.Is(err, ragapi.ErrEmbeddingDimMismatch):
 		respond.Fail(c, http.StatusBadRequest, ragapi.ErrEmbeddingDimMismatch.Error(), "嵌入模型须为 embedding 能力且维度 1536")
+	case errors.Is(err, ragapi.ErrEmbeddingModelMismatch):
+		respond.Fail(c, http.StatusBadRequest, ragapi.ErrEmbeddingModelMismatch.Error(), "所选知识库绑定了不同的嵌入模型")
 	case errors.Is(err, ragapi.ErrDocumentNotFound):
 		respond.Fail(c, http.StatusNotFound, ragapi.ErrDocumentNotFound.Error(), "文档不存在")
 	case errors.Is(err, ragapi.ErrDocumentProcessing):
@@ -265,7 +270,37 @@ func failRag(c *gin.Context, err error) {
 		respond.Fail(c, http.StatusNotFound, providerapi.ErrModelNotFound.Error(), "模型不存在")
 	case errors.Is(err, providerapi.ErrModelDisabled):
 		respond.Fail(c, http.StatusServiceUnavailable, providerapi.ErrModelDisabled.Error(), "模型已停用")
+	case errors.Is(err, llm.ErrEmbeddingUnsupported):
+		respond.Fail(c, http.StatusBadRequest, llm.ErrEmbeddingUnsupported.Error(), "该模型提供商不支持 embedding")
+	case errors.Is(err, llm.ErrProviderBusy):
+		respond.Fail(c, http.StatusServiceUnavailable, llm.ErrProviderBusy.Error(), "供应商忙，请稍后再试")
 	default:
+		// RateLimited 不是哨兵（*llm.Error 分类错误）：Classify 判类后映射通用
+		// errs.ErrRateLimited 429（供应商 429 透传，接口规范错误码表）。
+		if class, ok := llm.Classify(err); ok && class == llm.ClassRateLimited {
+			respond.Fail(c, http.StatusTooManyRequests, errs.ErrRateLimited.Error(), "供应商限流，请稍后再试")
+			return
+		}
 		respond.FailFromSentinel(c, err)
 	}
+}
+
+// retrieve 检索（端点 11，spec 05 §3）：BindUri 绑 KB id → 程序内预填 KBIDs 单元素 →
+// BindJSON query/top_k（Validate 时 KBIDs 已就位；KBIDs 带 json:"-"，body 无法注入或
+// 覆盖——跨 KB 契约由 chat 注入复用）→ 200 数组信封（service 保证空检索也返 [] 非 null）。
+func (h *Handler) retrieve(c *gin.Context) {
+	var idReq ragapi.GetKnowledgeBaseReq
+	if !respond.BindUri(c, &idReq) {
+		return
+	}
+	req := ragapi.RetrieveReq{KBIDs: []uint64{idReq.ID}}
+	if !respond.BindJSON(c, &req) {
+		return
+	}
+	chunks, err := h.kbs.Retrieve(c.Request.Context(), req)
+	if err != nil {
+		failRag(c, err)
+		return
+	}
+	respond.OK(c, chunks)
 }

@@ -18,6 +18,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/Karlsk/go-hify/internal/platform/errs"
+	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/page"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
@@ -68,6 +69,17 @@ type stubStore struct {
 	resetErr       error
 	ops            []string // 操作序列日志（事务顺序断言："delChunks:9" / "reset:9"）
 	txCalls        int
+
+	// 检索（spec 05）
+	searchHits   []ChunkHit       // SearchChunks 返回集
+	searchErr    error            // SearchChunks 注入错误
+	searchGotKBs []uint64         // 查收 kbIDs（disabled 剔除断言）
+	searchGotQ   []float32        // 查收查询向量
+	searchGotLim int              // 查收 limit（TopK 默认 / clamp 断言）
+	searchGotEF  int              // 查收 efSearch（cfg 透传断言）
+	docMetas     map[uint64]string // GetDocumentMetasByIDs 返回集（无键 = 悬空 ""）
+	docMetasErr  error
+	docMetasGot  []uint64 // 查收 ids
 }
 
 func (s *stubStore) CreateKnowledgeBase(_ context.Context, kb *KnowledgeBase) error {
@@ -191,7 +203,8 @@ func (s *stubStore) WithTx(_ context.Context, fn func(tx Store) error) error {
 	return fn(s) // tx 即同一 stub：序列经 ops 记录
 }
 
-// stubModels 内嵌 providerapi.ModelService，按需覆写（Get 预检 / ListByIDs 聚合）。
+// stubModels 内嵌 providerapi.ModelService，按需覆写（Get 预检 / ListByIDs 聚合 /
+// ResolveLLMConfig 检索向量化前置——spec 05）。
 type stubModels struct {
 	providerapi.ModelService
 	model   *providerapi.ModelSchema
@@ -199,6 +212,10 @@ type stubModels struct {
 	byIDs   []providerapi.ModelSchema // ListByIDs 返回集
 	listIDs []providerapi.ListModelsByIDsReq
 	listErr error
+
+	resolveCfg *providerapi.LLMConfig        // ResolveLLMConfig 返回集
+	resolveErr error                         // 注入错误（ModelNotFound 等）
+	resolveGot providerapi.ResolveLLMConfigReq // 查收请求（KB 模型 id 断言）
 }
 
 func (s *stubModels) Get(_ context.Context, _ providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
@@ -211,6 +228,15 @@ func (s *stubModels) ListByIDs(_ context.Context, req providerapi.ListModelsByID
 		return nil, s.listErr
 	}
 	return s.byIDs, nil
+}
+
+// ResolveLLMConfig spec 05 Retrieve 的向量化前置（预检不走此路——Get 已单独覆写）。
+func (s *stubModels) ResolveLLMConfig(_ context.Context, req providerapi.ResolveLLMConfigReq) (*providerapi.LLMConfig, error) {
+	s.resolveGot = req
+	if s.resolveErr != nil {
+		return nil, s.resolveErr
+	}
+	return s.resolveCfg, nil
 }
 
 // stubCache 实现 cacheManager：JSON 往返模拟真实缓存序列化（载荷形状漂移即暴露）。
@@ -792,4 +818,276 @@ func TestReindexDocument(t *testing.T) {
 	_, err = svc.ReindexDocument(context.Background(), ragapi.ReindexDocumentReq{ID: 9})
 	assert.ErrorIs(t, err, boom)
 	assert.NotErrorIs(t, err, ragapi.ErrDocumentNotFound)
+}
+
+// ---- 检索 Retrieve（spec 05） ----
+
+// stubStore 检索两方法覆写（spec 05 §1 六/七步）。
+func (s *stubStore) SearchChunks(_ context.Context, kbIDs []uint64, query []float32, limit, efSearch int) ([]ChunkHit, error) {
+	s.searchGotKBs = kbIDs
+	s.searchGotQ = query
+	s.searchGotLim = limit
+	s.searchGotEF = efSearch
+	if s.searchErr != nil {
+		return nil, s.searchErr
+	}
+	return s.searchHits, nil
+}
+
+func (s *stubStore) GetDocumentMetasByIDs(_ context.Context, ids []uint64) (map[uint64]string, error) {
+	s.docMetasGot = ids
+	if s.docMetasErr != nil {
+		return nil, s.docMetasErr
+	}
+	return s.docMetas, nil
+}
+
+// stubEmbedder 实现 embedder 窄接口：记录收到的 opts/inputs，返回可配置结果。
+type stubEmbedder struct {
+	embedErr   error
+	embedVecs  [][]float32
+	embedCalls int
+	gotOpts    llm.EmbedOptions
+	gotInputs  []string
+}
+
+func (s *stubEmbedder) EmbedStrings(_ context.Context, opts llm.EmbedOptions, inputs []string) (llm.EmbedResult, error) {
+	s.embedCalls++
+	s.gotOpts = opts
+	s.gotInputs = inputs
+	if s.embedErr != nil {
+		return llm.EmbedResult{}, s.embedErr
+	}
+	return llm.EmbedResult{Vectors: s.embedVecs}, nil
+}
+
+// newRetrieveSvc 检索路径构造（embeds 非 nil；无缓存路径）。
+func newRetrieveSvc(st Store, models providerapi.ModelService, embeds embedder, cfg Config) ragapi.KnowledgeBaseService {
+	return New(st, models, embeds, nil, cfg)
+}
+
+// embedVec 1536 维查询向量（维度校验的 happy 路径）。
+func embedVec() []float32 {
+	v := make([]float32, ragapi.RequiredEmbeddingDim)
+	for i := range v {
+		v[i] = 0.01
+	}
+	return v
+}
+
+// resolveCfgOK stub LLMConfig（明文四不：stub 值不涉真实凭据）。
+func resolveCfgOK() *providerapi.LLMConfig {
+	return &providerapi.LLMConfig{ProviderName: "openai 主力", Kind: "openai_compatible", BaseURL: "https://api.example.com/v1", APIKey: "sk-test", ModelID: "text-embedding-3-small"}
+}
+
+func TestRetrieveHappyPath(t *testing.T) {
+	q := embedVec()
+	st := &stubStore{
+		kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true), 2: kbFixture(2, 5, true)},
+		searchHits: []ChunkHit{
+			{ID: 9, DocumentID: 100, KnowledgeBaseID: 1, ChunkIndex: 0, Content: "正文一", TokenCount: 12, Distance: 0.25},
+			{ID: 10, DocumentID: 101, KnowledgeBaseID: 2, ChunkIndex: 3, Content: "正文二", TokenCount: 10, Distance: 0.5},
+		},
+		docMetas: map[uint64]string{100: "手册.txt", 101: "faq.md"},
+	}
+	models := &stubModels{resolveCfg: resolveCfgOK()}
+	embeds := &stubEmbedder{embedVecs: [][]float32{q}}
+	svc := newRetrieveSvc(st, models, embeds, Config{TopK: 5, EFSearch: 80})
+
+	chunks, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "怎么创建 Agent", KBIDs: []uint64{1, 2}})
+	require.NoError(t, err)
+	require.Len(t, chunks, 2)
+
+	// 编排断言：KB 直读 → ResolveLLMConfig（KB 的模型 id）→ EmbedStrings（query 单条）→
+	// SearchChunks（enabled kbIDs + 向量 + limit + efSearch）→ GetDocumentMetasByIDs → 组装。
+	assert.Equal(t, providerapi.ResolveLLMConfigReq{ModelID: 5}, models.resolveGot)
+	assert.Equal(t, 1, embeds.embedCalls)
+	assert.Equal(t, []string{"怎么创建 Agent"}, embeds.gotInputs)
+	assert.Equal(t, llm.ProviderKind("openai_compatible"), embeds.gotOpts.Kind)
+	assert.Equal(t, "text-embedding-3-small", embeds.gotOpts.Model)
+	assert.Equal(t, []uint64{1, 2}, st.searchGotKBs)
+	assert.Equal(t, q, st.searchGotQ)
+	assert.Equal(t, 5, st.searchGotLim)
+	assert.Equal(t, 80, st.searchGotEF)
+	assert.Equal(t, []uint64{100, 101}, st.docMetasGot)
+
+	// RetrievedChunk 组装：id 字符串化 + DocumentName 解析 + similarity = 1 - distance。
+	assert.Equal(t, "9", chunks[0].ChunkID)
+	assert.Equal(t, "100", chunks[0].DocumentID)
+	assert.Equal(t, "1", chunks[0].KnowledgeBaseID)
+	assert.Equal(t, "手册.txt", chunks[0].DocumentName)
+	assert.Equal(t, 0, chunks[0].ChunkIndex)
+	assert.Equal(t, "正文一", chunks[0].Content)
+	assert.InDelta(t, 0.75, chunks[0].Similarity, 1e-9)
+	assert.InDelta(t, 0.5, chunks[1].Similarity, 1e-9)
+}
+
+// disabled 静默剔除：部分剔除继续检索；全部 disabled → 空 []（非 nil）、零 embedding 调用。
+func TestRetrieveDisabledPruned(t *testing.T) {
+	st := &stubStore{
+		kbByID:     map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true), 2: kbFixture(2, 5, false)},
+		searchHits: []ChunkHit{{ID: 9, DocumentID: 100, KnowledgeBaseID: 1, ChunkIndex: 0, Content: "正文", Distance: 0.2}},
+		docMetas:   map[uint64]string{100: "手册.txt"},
+	}
+	embeds := &stubEmbedder{embedVecs: [][]float32{embedVec()}}
+	svc := newRetrieveSvc(st, &stubModels{resolveCfg: resolveCfgOK()}, embeds, Config{TopK: 5, EFSearch: 80})
+
+	chunks, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1, 2}})
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+	assert.Equal(t, []uint64{1}, st.searchGotKBs, "disabled KB 剔除后进 ANN")
+
+	// 全 disabled → 空 [] 非 nil，不触 embedding / ANN。
+	st2 := &stubStore{kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, false)}}
+	embeds2 := &stubEmbedder{embedVecs: [][]float32{embedVec()}}
+	svc2 := newRetrieveSvc(st2, &stubModels{resolveCfg: resolveCfgOK()}, embeds2, Config{TopK: 5, EFSearch: 80})
+	got, err := svc2.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1}})
+	require.NoError(t, err)
+	assert.NotNil(t, got, "空结果初始化空 slice，不返 nil")
+	assert.Empty(t, got)
+	assert.Zero(t, embeds2.embedCalls)
+	assert.Nil(t, st2.searchGotKBs)
+}
+
+// 任一 KB 404 → ErrKnowledgeBaseNotFound（先于 disabled 剔除）。
+func TestRetrieveKBNotFound(t *testing.T) {
+	st := &stubStore{kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)}}
+	svc := newRetrieveSvc(st, &stubModels{}, &stubEmbedder{}, Config{})
+
+	_, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1, 999}})
+	assert.ErrorIs(t, err, ragapi.ErrKnowledgeBaseNotFound)
+}
+
+// 混嵌入模型 → ErrEmbeddingModelMismatch（向量空间不可比）。
+func TestRetrieveEmbeddingModelMismatch(t *testing.T) {
+	st := &stubStore{kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true), 2: kbFixture(2, 6, true)}}
+	embeds := &stubEmbedder{}
+	svc := newRetrieveSvc(st, &stubModels{}, embeds, Config{})
+
+	_, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1, 2}})
+	assert.ErrorIs(t, err, ragapi.ErrEmbeddingModelMismatch)
+	assert.Zero(t, embeds.embedCalls, "不一致即止，不发 embedding")
+}
+
+// llm 哨兵透传（spec 05 §1 第 4 步）：Unsupported / Busy（wrapped）/ RateLimited（*llm.Error）。
+func TestRetrieveLLMSentinelPassthrough(t *testing.T) {
+	busy := fmt.Errorf("wrap: %w", llm.ErrProviderBusy)
+	rateLimited := &llm.Error{Class: llm.ClassRateLimited, Err: errors.New("HTTP 429")}
+	cases := []struct {
+		name string
+		err  error
+		is   error            // errors.Is 断言目标（哨兵）
+		as   *llm.Error       // errors.As 断言目标（分类错误）
+		want llm.Class
+	}{
+		{"unsupported", llm.ErrEmbeddingUnsupported, llm.ErrEmbeddingUnsupported, nil, ""},
+		{"busy wrapped", busy, llm.ErrProviderBusy, nil, ""},
+		{"rate limited", rateLimited, nil, rateLimited, llm.ClassRateLimited},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &stubStore{kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)}}
+			svc := newRetrieveSvc(st, &stubModels{resolveCfg: resolveCfgOK()}, &stubEmbedder{embedErr: tc.err}, Config{})
+
+			_, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1}})
+			require.Error(t, err)
+			if tc.is != nil {
+				assert.ErrorIs(t, err, tc.is)
+			}
+			if tc.as != nil {
+				var le *llm.Error
+				assert.ErrorAs(t, err, &le)
+				assert.Equal(t, tc.want, le.Class)
+			}
+		})
+	}
+}
+
+// 维度 ≠ 1536 → 包装 errs.ErrInternal（服务端配置错，不暴露细节）。
+func TestRetrieveDimMismatch(t *testing.T) {
+	st := &stubStore{kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)}}
+	embeds := &stubEmbedder{embedVecs: [][]float32{make([]float32, 1535)}} // 差一维
+	svc := newRetrieveSvc(st, &stubModels{resolveCfg: resolveCfgOK()}, embeds, Config{})
+
+	_, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1}})
+	assert.ErrorIs(t, err, errs.ErrInternal)
+	assert.NotErrorIs(t, err, errs.ErrValidationFailed, "服务端配置错不是用户输入错")
+}
+
+// TopK=0 取 cfg.TopK；cfg 越界 clamp 到 [TopKMin, TopKMax]。
+func TestRetrieveTopKDefaultAndClamp(t *testing.T) {
+	cases := []struct {
+		name    string
+		reqTopK int
+		cfgTopK int
+		wantLim int
+	}{
+		{"req 0 → cfg 默认", 0, 5, 5},
+		{"cfg 超 max clamp 20", 0, 25, ragapi.TopKMax},
+		{"cfg 低于 min clamp 1", 0, 0, ragapi.TopKMin},
+		{"显式 req 直传（域内）", 12, 5, 12},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &stubStore{
+				kbByID:     map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+				searchHits: []ChunkHit{{ID: 9, DocumentID: 100, KnowledgeBaseID: 1, ChunkIndex: 0, Content: "正文", Distance: 0.2}},
+				docMetas:   map[uint64]string{100: "a.txt"},
+			}
+			svc := newRetrieveSvc(st, &stubModels{resolveCfg: resolveCfgOK()}, &stubEmbedder{embedVecs: [][]float32{embedVec()}}, Config{TopK: tc.cfgTopK, EFSearch: 80})
+			_, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", TopK: tc.reqTopK, KBIDs: []uint64{1}})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantLim, st.searchGotLim)
+		})
+	}
+}
+
+// 悬空文档（软删 / 不存在）DocumentName = ""；零命中返回空非 nil。
+func TestRetrieveDanglingNameAndEmptyHits(t *testing.T) {
+	st := &stubStore{
+		kbByID:     map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+		searchHits: []ChunkHit{{ID: 9, DocumentID: 777, KnowledgeBaseID: 1, ChunkIndex: 0, Content: "正文", Distance: 0.2}},
+		docMetas:   map[uint64]string{}, // 777 悬空
+	}
+	svc := newRetrieveSvc(st, &stubModels{resolveCfg: resolveCfgOK()}, &stubEmbedder{embedVecs: [][]float32{embedVec()}}, Config{TopK: 5, EFSearch: 80})
+
+	chunks, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1}})
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+	assert.Equal(t, "", chunks[0].DocumentName)
+
+	// 零命中（空 KB 检索）→ 空 [] 非 nil。
+	st2 := &stubStore{kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)}}
+	svc2 := newRetrieveSvc(st2, &stubModels{resolveCfg: resolveCfgOK()}, &stubEmbedder{embedVecs: [][]float32{embedVec()}}, Config{TopK: 5, EFSearch: 80})
+	got, err := svc2.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1}})
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
+}
+
+// 请求校验：query 空 / KBIDs 空 / KBIDs 超 MaxRetrieveKBs。
+func TestRetrieveValidate(t *testing.T) {
+	svc := newRetrieveSvc(&stubStore{}, &stubModels{}, &stubEmbedder{}, Config{})
+
+	_, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{KBIDs: []uint64{1}})
+	assert.Error(t, err, "query 空")
+
+	_, err = svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q"})
+	assert.Error(t, err, "kb_ids 空")
+
+	ids := make([]uint64, ragapi.MaxRetrieveKBs+1)
+	for i := range ids {
+		ids[i] = uint64(i + 1)
+	}
+	_, err = svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: ids})
+	assert.Error(t, err, "kb_ids 超 10")
+}
+
+// ResolveLLMConfig 失败（模型悬空）原样上抛（provider 哨兵由 handler 映射）。
+func TestRetrieveResolveError(t *testing.T) {
+	st := &stubStore{kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)}}
+	svc := newRetrieveSvc(st, &stubModels{resolveErr: providerapi.ErrModelNotFound}, &stubEmbedder{}, Config{})
+
+	_, err := svc.Retrieve(context.Background(), ragapi.RetrieveReq{Query: "q", KBIDs: []uint64{1}})
+	assert.ErrorIs(t, err, providerapi.ErrModelNotFound)
 }

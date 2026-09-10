@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Karlsk/go-hify/internal/platform/errs"
+	"github.com/Karlsk/go-hify/internal/platform/llm"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 )
@@ -40,6 +43,10 @@ type fakeSvc struct {
 	gotListName   string
 	gotListDocsKB uint64
 	gotListDocs   ragapi.ListDocumentsReq
+	gotRetrieve   *ragapi.RetrieveReq
+
+	// 检索返回集（spec 05）：空检索用初始化空 slice（非 nil——信封 [] 断言）
+	retChunks []ragapi.RetrievedChunk
 }
 
 func newFakeSvc() *fakeSvc {
@@ -172,6 +179,16 @@ func (f *fakeSvc) ReindexDocument(_ context.Context, req ragapi.ReindexDocumentR
 	d.Status = "pending"
 	s := d.DocumentSchema
 	return &s, nil
+}
+
+// Retrieve 检索覆写（spec 05 端点 11）：查收请求（KBIDs 程序内填充断言）+ 返回可配置集。
+func (f *fakeSvc) Retrieve(_ context.Context, req ragapi.RetrieveReq) ([]ragapi.RetrievedChunk, error) {
+	if f.injected != nil {
+		return nil, f.injected
+	}
+	cp := req
+	f.gotRetrieve = &cp
+	return f.retChunks, nil
 }
 
 func newTestRouter(svc *fakeSvc, maxUploadBytes int) *gin.Engine {
@@ -656,4 +673,94 @@ func fmtBool(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// ---- 端点 11：POST /knowledge-bases/:id/retrieve（spec 05 §3） ----
+
+// 200 数组信封：路径 id 进 KBIDs（程序内填充）、query/top_k 透传、字段完整。
+func TestRetrieveEndpoint(t *testing.T) {
+	svc := newFakeSvc()
+	svc.retChunks = []ragapi.RetrievedChunk{{
+		ChunkID: "9", DocumentID: "100", KnowledgeBaseID: "1",
+		DocumentName: "手册.txt", ChunkIndex: 0, Content: "正文", Similarity: 0.75,
+	}}
+	r := newTestRouter(svc, 1024)
+
+	w := doReq(t, r, http.MethodPost, "/api/v1/knowledge-bases/1/retrieve", `{"query":"怎么创建 Agent","top_k":8}`)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.True(t, e.Success)
+	chunks := decodeData[[]ragapi.RetrievedChunk](t, e)
+	require.Len(t, chunks, 1)
+	assert.Equal(t, "9", chunks[0].ChunkID)
+	assert.Equal(t, "手册.txt", chunks[0].DocumentName)
+	assert.InDelta(t, 0.75, chunks[0].Similarity, 1e-9)
+
+	// 单 KB 路径参数进 KBIDs；body 的 query / top_k 原样透传（TopK 0=默认合法）。
+	require.NotNil(t, svc.gotRetrieve)
+	assert.Equal(t, []uint64{1}, svc.gotRetrieve.KBIDs)
+	assert.Equal(t, "怎么创建 Agent", svc.gotRetrieve.Query)
+	assert.Equal(t, 8, svc.gotRetrieve.TopK)
+}
+
+// 空检索 → data 为 []（非 null——前端免空判断）。
+func TestRetrieveEmptyArray(t *testing.T) {
+	svc := newFakeSvc()
+	svc.retChunks = []ragapi.RetrievedChunk{} // service 保证非 nil
+	r := newTestRouter(svc, 1024)
+
+	w := doReq(t, r, http.MethodPost, "/api/v1/knowledge-bases/1/retrieve", `{"query":"冷门问题"}`)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.True(t, e.Success)
+	assert.Equal(t, "[]", strings.TrimSpace(string(e.Data)), "空列表序列化为 []，不返 null")
+}
+
+// query 缺失 / top_k 越界 → 400（binding tag）。
+func TestRetrieveBindErrors(t *testing.T) {
+	r := newTestRouter(newFakeSvc(), 1024)
+
+	w := doReq(t, r, http.MethodPost, "/api/v1/knowledge-bases/1/retrieve", `{"top_k":5}`)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	w = doReq(t, r, http.MethodPost, "/api/v1/knowledge-bases/1/retrieve", `{"query":"q","top_k":21}`)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, errs.ErrValidationFailed.Error(), e.Error.Code)
+
+	w = doReq(t, r, http.MethodPost, "/api/v1/knowledge-bases/1/retrieve", `{"query":"q","top_k":-1}`)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// 哨兵 → 状态码全表（spec 05 §3）：KB 404 / Mismatch 400 / Unsupported 400 /
+// Busy 503 / RateLimited 429（*llm.Error 分类，非哨兵）/ ErrInternal 500。
+func TestRetrieveSentinelMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code int
+		want string
+	}{
+		{"kb not found", ragapi.ErrKnowledgeBaseNotFound, http.StatusNotFound, "KNOWLEDGE_BASE_NOT_FOUND"},
+		{"embedding model mismatch", ragapi.ErrEmbeddingModelMismatch, http.StatusBadRequest, "EMBEDDING_MODEL_MISMATCH"},
+		{"embedding unsupported", llm.ErrEmbeddingUnsupported, http.StatusBadRequest, "EMBEDDING_UNSUPPORTED"},
+		{"provider busy wrapped", fmt.Errorf("wrap: %w", llm.ErrProviderBusy), http.StatusServiceUnavailable, "PROVIDER_BUSY"},
+		{"rate limited class", &llm.Error{Class: llm.ClassRateLimited, Err: errors.New("HTTP 429")}, http.StatusTooManyRequests, "RATE_LIMITED"},
+		{"dim mismatch internal", fmt.Errorf("retrieve: dim 1535: %w", errs.ErrInternal), http.StatusInternalServerError, "INTERNAL_ERROR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newFakeSvc()
+			svc.injected = tc.err
+			r := newTestRouter(svc, 1024)
+
+			w := doReq(t, r, http.MethodPost, "/api/v1/knowledge-bases/1/retrieve", `{"query":"q"}`)
+			require.Equal(t, tc.code, w.Code)
+			e := parseEnvelope(t, w.Body.Bytes())
+			require.NotNil(t, e.Error)
+			assert.Equal(t, tc.want, e.Error.Code)
+		})
+	}
 }

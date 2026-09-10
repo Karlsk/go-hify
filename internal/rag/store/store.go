@@ -5,7 +5,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/pgvector/pgvector-go"
 	"gorm.io/gorm"
 
 	"github.com/Karlsk/go-hify/internal/platform/page"
@@ -211,4 +213,62 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx ragsvc.Store) error) erro
 	return s.db.WithContext(ctx).Transaction(func(gtx *gorm.DB) error {
 		return fn(&Store{db: gtx})
 	})
+}
+
+// ---- 检索（spec 05） ----
+
+// searchChunksSQL 跨 KB 单表 ANN 召回（spec 05 §2 冻结形态）：显式列 + 余弦距离；
+// kbIDs IN 展开；embedding IS NOT NULL 纯防御（不变量：终态事务保证行必带向量）；
+// 正确性不依赖 status/deleted_at 过滤——01 §3 不变量换来的简化。ORDER BY 用表达式
+// 本体（与 vector_cosine_ops 索引配对铁律，改写 distance 别名会绕开索引）；向量参数
+// 传两次（SELECT 列 + ORDER BY 各一）。
+const searchChunksSQL = `SELECT id, document_id, knowledge_base_id, chunk_index, content, token_count, (embedding <=> ?) AS distance
+FROM document_chunks
+WHERE knowledge_base_id IN ?
+  AND embedding IS NOT NULL
+ORDER BY embedding <=> ?
+LIMIT ?`
+
+// GetDocumentMetasByIDs 批量取文档名（引用名解析，spec 05 §2）：只读 id/name 不碰
+// content（大文本 TOAST 零成本）；软删 / 不存在的 id 无键（悬空 → ""）；空 ids 返回
+// 空 map 不发 SQL（IN () 非法）。
+func (s *Store) GetDocumentMetasByIDs(ctx context.Context, ids []uint64) (map[uint64]string, error) {
+	metas := make(map[uint64]string, len(ids))
+	if len(ids) == 0 {
+		return metas, nil
+	}
+	var rows []struct {
+		ID   uint64
+		Name string
+	}
+	err := s.db.WithContext(ctx).Model(&ragsvc.Document{}).
+		Select("id, name").
+		Where("id IN ?", ids).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		metas[r.ID] = r.Name
+	}
+	return metas, nil
+}
+
+// SearchChunks 跨 KB 单表 ANN 召回（kbIDs ≤ MaxRetrieveKBs）：db.Transaction 包裹——
+// 先 SET LOCAL hnsw.ef_search（SET 不支持绑定参数只能拼接；efSearch 来自服务端 config
+// 已 clamp，非用户输入），再 Raw 执行召回（向量以 pgvector.Vector 传参，GORM 展开
+// IN slice 与 ? → $N）。Scan 目标 ChunkHit，返回 service 前不解析名称。
+func (s *Store) SearchChunks(ctx context.Context, kbIDs []uint64, query []float32, limit int, efSearch int) ([]ragsvc.ChunkHit, error) {
+	v := pgvector.NewVector(query)
+	var hits []ragsvc.ChunkHit
+	err := s.db.WithContext(ctx).Transaction(func(gtx *gorm.DB) error {
+		if err := gtx.Exec(fmt.Sprintf("SET LOCAL hnsw.ef_search = %d", efSearch)).Error; err != nil {
+			return err
+		}
+		return gtx.Raw(searchChunksSQL, v, kbIDs, v, limit).Scan(&hits).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return hits, nil
 }

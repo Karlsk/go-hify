@@ -57,6 +57,13 @@ type Store interface {
 	// error_message='' + chunk_count=0；软删行不可见；RowsAffected=0 返回 gorm.ErrRecordNotFound。
 	ResetDocumentForReindex(ctx context.Context, id uint64) error
 
+	// SearchChunks 跨 KB 单表 ANN 召回（spec 05 §2）：事务内 SET LOCAL ef_search 后
+	// 余弦距离排序取 top limit；kbIDs ≤ MaxRetrieveKBs；Scan 目标 ChunkHit，不解析名称。
+	SearchChunks(ctx context.Context, kbIDs []uint64, query []float32, limit int, efSearch int) ([]ChunkHit, error)
+	// GetDocumentMetasByIDs 批量取文档名（引用名解析，spec 05 §2）：只读 id/name 不碰
+	// content；软删 / 不存在的 id 无键（悬空 → ""）；空 ids 返回空 map 不发 SQL。
+	GetDocumentMetasByIDs(ctx context.Context, ids []uint64) (map[uint64]string, error)
+
 	// WithTx 事务包装：fn 拿到共享同一 tx 句柄的 Store（仍以 Store 接口身份传入）。
 	WithTx(ctx context.Context, fn func(tx Store) error) error
 }
@@ -75,9 +82,16 @@ type cacheManager interface {
 }
 
 // Config rag 模块配置（组合根从 platform/config.RagCfg 映射构造，仓内无业务模块
-// 直接 import platform/config 的先例）。本篇 CRUD 不消费字段；05（Retrieve：
-// TopK / EFSearch）/ 07（管线：分块与并发）按各自 spec 增补。
-type Config struct{}
+// 直接 import platform/config 的先例）。05 Retrieve 消费 TopK / EFSearch；
+// 07（管线：分块与并发）按其 spec 增补。
+type Config struct {
+	// TopK 检索默认 top_k：请求未设（0）时取此值；最终 clamp 到 [TopKMin, TopKMax]
+	// （RAG_TOP_K，默认 5）。
+	TopK int
+	// EFSearch HNSW 查询时 ef_search（召回率 vs 延迟旋钮；服务端 config 已 clamp，
+	// 非用户输入——RAG_EF_SEARCH，默认 80）。
+	EFSearch int
+}
 
 // cacheKeyDetail KB 详情缓存 key 模板（NameRag 命名空间内，agent cacheKeyDetail 同款）。
 const cacheKeyDetail = "detail:%d"
@@ -99,10 +113,6 @@ func isFKViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == pgCodeFKViolation
 }
-
-// errNotImplemented 本篇未实施方法的统一占位（Retrieve 属 05）；handler 侧
-// FailFromSentinel 映射 503——占位 503 而非 500，不误导排障（module-delivery 踩坑 #9）。
-var errNotImplemented = errs.ErrServiceUnavailable
 
 // kbService 实现 ragapi.KnowledgeBaseService。
 type kbService struct {
@@ -447,9 +457,106 @@ func (s *kbService) ReindexDocument(ctx context.Context, req ragapi.ReindexDocum
 	return &schema, nil
 }
 
-// Retrieve 检索：query 向量化 → pgvector 余弦 top-k（spec 05 实施）。
+// Retrieve 检索编排（spec 05 §1 七步）：校验 → 逐 KB 直读预检（任一 404 → NotFound；
+// disabled 静默剔除）→ 嵌入模型一致性 → ResolveLLMConfig + query 向量化（llm 哨兵
+// 原样上抛）→ 维度校验 → 单表 ANN 召回 → 引用名解析组装（Similarity = 1 - Distance）。
 func (s *kbService) Retrieve(ctx context.Context, req ragapi.RetrieveReq) ([]ragapi.RetrievedChunk, error) {
-	return nil, errNotImplemented
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("validate retrieve: %w", err)
+	}
+	// ① 逐 KB store 直读（不走 api Get 缓存——UploadDocument 预检同款）；② disabled
+	// 静默剔除：管理员下架某库，绑它的 Agent 用剩余库继续工作，不报错。
+	kbs := make([]*KnowledgeBase, 0, len(req.KBIDs))
+	for _, id := range req.KBIDs {
+		kb, err := s.store.GetKnowledgeBaseByID(ctx, id)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ragapi.ErrKnowledgeBaseNotFound
+			}
+			return nil, fmt.Errorf("get knowledge base %d: %w", id, err)
+		}
+		if !kb.Enabled {
+			continue
+		}
+		kbs = append(kbs, kb)
+	}
+	if len(kbs) == 0 {
+		return []ragapi.RetrievedChunk{}, nil // 初始化空 slice，不返 nil（信封 []）
+	}
+	// ③ 全部 KB 同一嵌入模型（向量空间可比性前提）。
+	modelID := kbs[0].EmbeddingModelID
+	kbIDs := make([]uint64, len(kbs))
+	for i, kb := range kbs {
+		if kb.EmbeddingModelID != modelID {
+			return nil, ragapi.ErrEmbeddingModelMismatch
+		}
+		kbIDs[i] = kb.ID
+	}
+	// ④ 明文凭据只在调用瞬间存在（ResolveLLMConfig → EmbedOptions，用后即弃，
+	// 不入日志 / 缓存）。llm 哨兵（ErrEmbeddingUnsupported / ErrProviderBusy）与
+	// RateLimited（*llm.Error）原样上抛，handler 负责映射。
+	cfg, err := s.models.ResolveLLMConfig(ctx, providerapi.ResolveLLMConfigReq{ModelID: modelID})
+	if err != nil {
+		return nil, fmt.Errorf("resolve llm config for model %d: %w", modelID, err) // %w 保 provider 哨兵链
+	}
+	res, err := s.embeds.EmbedStrings(ctx, llm.EmbedOptions{
+		Kind:    llm.ProviderKind(cfg.Kind),
+		BaseURL: cfg.BaseURL,
+		APIKey:  cfg.APIKey,
+		Model:   cfg.ModelID,
+	}, []string{req.Query})
+	if err != nil {
+		return nil, err
+	}
+	// ⑤ 维度 ≠ 1536 = 服务端配置错（KB 建库预检过 dim，走到这说明配置漂移）——
+	// 包装 errs.ErrInternal，细节只进日志不给前端。
+	dim := 0
+	if len(res.Vectors) > 0 {
+		dim = len(res.Vectors[0])
+	}
+	if dim != ragapi.RequiredEmbeddingDim {
+		return nil, fmt.Errorf("retrieve: embedding dim %d != %d: %w", dim, ragapi.RequiredEmbeddingDim, errs.ErrInternal)
+	}
+	// ⑥ TopK=0 取默认（cfg.TopK）并 clamp 到 [TopKMin, TopKMax]（binding 只护 HTTP
+	// 路径，跨模块调用方不经 binding，clamp 是 service 层防线）。
+	topK := req.TopK
+	if topK == 0 {
+		topK = s.cfg.TopK
+	}
+	topK = max(ragapi.TopKMin, min(ragapi.TopKMax, topK))
+	hits, err := s.store.SearchChunks(ctx, kbIDs, res.Vectors[0], topK, s.cfg.EFSearch)
+	if err != nil {
+		return nil, fmt.Errorf("search chunks in kbs %v: %w", kbIDs, err)
+	}
+	// ⑦ 引用名解析（二次小查询，去重后 ≤ top-k 行）+ 组装。
+	chunks := make([]ragapi.RetrievedChunk, 0, len(hits)) // 空 slice 非 nil
+	if len(hits) == 0 {
+		return chunks, nil
+	}
+	docIDs := make([]uint64, 0, len(hits))
+	seen := make(map[uint64]struct{}, len(hits))
+	for _, h := range hits {
+		if _, ok := seen[h.DocumentID]; !ok {
+			seen[h.DocumentID] = struct{}{}
+			docIDs = append(docIDs, h.DocumentID)
+		}
+	}
+	metas, err := s.store.GetDocumentMetasByIDs(ctx, docIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get document metas %v: %w", docIDs, err)
+	}
+	for _, h := range hits {
+		chunks = append(chunks, ragapi.RetrievedChunk{
+			ChunkID:         strconv.FormatUint(h.ID, 10),
+			DocumentID:      strconv.FormatUint(h.DocumentID, 10),
+			KnowledgeBaseID: strconv.FormatUint(h.KnowledgeBaseID, 10),
+			DocumentName:    metas[h.DocumentID], // 悬空（文档已删）无键 = ""
+			ChunkIndex:      h.ChunkIndex,
+			Content:         h.Content,
+			Similarity:      1 - h.Distance, // 余弦距离 → 相似度（越大越近）
+		})
+	}
+	return chunks, nil
 }
 
 // toKBSchema KB model → schema（id / 外键字符串化——JS 2^53 精度保护）。
