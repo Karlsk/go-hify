@@ -58,6 +58,7 @@ type stubStore struct {
 
 	// 文档路径
 	docsByID       map[uint64]*Document // GetDocumentByID 数据集（无键 = NotFound）
+	getDocByIDFn   func(ctx context.Context, id uint64) (*Document, error) // 覆写 GetDocumentByID 行为（panic 注入等）
 	getDocCalls    int
 	createDocErr   error     // CreateDocument 注入错误（23503 / 普通）
 	createdDoc     *Document // 落库实体快照
@@ -161,10 +162,13 @@ func (s *stubStore) ListKnowledgeBases(_ context.Context, _ page.OffsetParams, n
 	return s.listKBs, nil
 }
 
-func (s *stubStore) GetDocumentByID(_ context.Context, id uint64) (*Document, error) {
+func (s *stubStore) GetDocumentByID(ctx context.Context, id uint64) (*Document, error) {
 	s.mu.Lock()
 	s.getDocCalls++
 	s.mu.Unlock()
+	if s.getDocByIDFn != nil {
+		return s.getDocByIDFn(ctx, id)
+	}
 	if d, ok := s.docsByID[id]; ok {
 		cp := *d // 副本模拟 DB 读隔离
 		return &cp, nil

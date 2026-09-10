@@ -306,6 +306,34 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 	}
 }
 
+// ---- panic 兜底（spec 07 §2 环节 1：recover→failed "internal panic"） ----
+
+// TestProcessDocumentPanicRecovery 管线内 panic 被 recover 捕获 → markFailed
+// "internal panic: ..."，文档不卡在 processing（spec 07 §2 环节 1）。
+func TestProcessDocumentPanicRecovery(t *testing.T) {
+	d := docFixture(7, 1, StatusPending)
+	d.Content = "正常内容"
+	st := &stubStore{
+		docsByID: map[uint64]*Document{7: d},
+		kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+		// 覆写 GetDocumentByID 使其 panic
+		getDocByIDFn: func(_ context.Context, id uint64) (*Document, error) {
+			panic("unexpected nil pointer")
+		},
+	}
+	svc := newPipelineSvc(st, &stubModels{}, nil, nil, pipelineCfg())
+	svc.dispatch = func(_ context.Context, docID uint64) {
+		svc.processDocument(context.Background(), docID)
+	}
+	svc.dispatch(context.Background(), 7)
+
+	assert.Equal(t, 1, st.numMarkFailedCalls(), "panic 被 recover 捕获 → markFailed 1 次")
+	ids, msgs := st.markFailedSnapshot()
+	assert.Equal(t, []uint64{7}, ids)
+	assert.Contains(t, msgs[0], "internal panic", "失败消息含 internal panic 前缀")
+	assert.Contains(t, msgs[0], "unexpected nil pointer", "失败消息含 panic 原因")
+}
+
 // ---- truncateRunes（spec 07 §2 环节 9：error_message 截断 500，防超长错误撑爆列） ----
 
 func TestTruncateRunes(t *testing.T) {
