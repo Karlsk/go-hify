@@ -6,8 +6,8 @@
 ## 1. service/service.go
 
 - `Store` 接口（本篇子集）：
-  - **KB 6**：CRUD + `CountAllDocumentsByKB`【Unscoped 含软删——删除护栏】+ `CountDocumentsByKBIDs`【活跃——列表聚合】；List 带 `name ILIKE '%kw%'` 参数化过滤（小表豁免前导通配红线，注释说明；用户输入 `%`/`_` 视作通配符不转义）；
-  - **documents 5**：`GetDocumentByID` / `CreateDocument`（pending + 元数据）/ `SoftDeleteDocument`【事务内联动删 chunks】/ keyset `ListDocumentsByKB` / `DeleteChunksByDocument`【规则 2/3 共用】；reindex 的"删 chunks + 置 pending"经 `WithTx` 组合现有方法实现；
+  - **KB 7**：CRUD + `CountAllDocumentsByKB`【Unscoped 含软删——删除护栏】+ `CountDocumentsByKBIDs`【活跃——列表聚合】；List 带 `name ILIKE '%kw%'` 参数化过滤（小表豁免前导通配红线，注释说明；用户输入 `%`/`_` 视作通配符不转义）；
+  - **documents 6**：`GetDocumentByID` / `CreateDocument`（pending + 元数据）/ `SoftDeleteDocument`【事务内联动删 chunks】/ keyset `ListDocumentsByKB` / `DeleteChunksByDocument`【规则 2/3 共用】/ `ResetDocumentForReindex`【规则 3：置 pending + 清 error_message + chunk_count=0，软删行不可见】；reindex 事务 = `WithTx{ DeleteChunksByDocument; ResetDocumentForReindex }`（实施澄清：重置是独立 UPDATE 方法，非纯组合）；
   - `WithTx`。
 - 下游收窄小接口（chat `llmConfigResolver` 先例）：`embedder`（单方法 EmbedStrings，本篇仅持有不调用——Retrieve 在 05）+ `cacheManager`（Get/Set/Delete）。
 - `New(store, models providerapi.ModelService, embeds embedder, cm cacheManager, cfg Config) ragapi.KnowledgeBaseService`——**本篇单返回**；07 加 pipeline 后改 `(api, *Recovery)` 双返回（照 provider `(api, Prober)` 先例）。
@@ -16,7 +16,7 @@
   - `Get` Cache-Aside（`NameRag` + `detail:%d`，Set 失败仅 WARN）；`Update`（name/desc/enabled）→ Save → 写时 evict（含 enabled 翻转）；
   - `List` 偏移分页 + `models.ListByIDs` 聚合模型名 + `CountDocumentsByKBIDs` 批量计数（防 N+1）；
   - `Delete`：`CountAllDocumentsByKB>0` → InUse（硬删交给 store CASCADE 清 agent 绑定）；
-  - `UploadDocument`：`CreateDocument`（pending + FileType/FileSize/Content）→ 返回快照；**无 dispatch 调用行**；
+  - `UploadDocument`：`CreateDocument`（pending + FileType/FileSize/Content）→ evict KB detail（DocumentCount 变化，写时失效——实施澄清拍板）→ 返回快照；**无 dispatch 调用行**；
   - `DeleteDocument`：`SoftDeleteDocument`（store 内事务：软删 + DeleteChunksByDocument——不变量规则 2）；
   - `ReindexDocument`：Get（404）→ status ∈ {pending, processing} → ErrDocumentProcessing → `WithTx{ DeleteChunksByDocument; 置 pending + 清 error_message + chunk_count=0 }`（规则 3）→ 返回快照；**无 dispatch 调用行**。
 - `isFKViolation`/`isUniqueViolation`（23503/23505）照 agent/service/service.go:305 复制，包内私有。
