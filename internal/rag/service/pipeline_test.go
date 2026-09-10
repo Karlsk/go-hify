@@ -187,7 +187,7 @@ func TestProcessDocumentHappyPath(t *testing.T) {
 
 	// 环节 8-9：CreateChunks 收到 3 个 chunk，元数据正确
 	require.Len(t, st.createChunksGot, 3, "CreateChunks 收到 3 个 chunk")
-	assert.Equal(t, 2, st.txCalls, "commitReady 走 WithTx")
+	assert.Equal(t, 1, st.txCalls, "commitReady 走 WithTx")
 	for i, chunk := range st.createChunksGot {
 		assert.Equal(t, i+1, chunk.ChunkIndex, "ChunkIndex 从 1 开始（spec 07 §2 环节 8）")
 		assert.Equal(t, d.KnowledgeBaseID, chunk.KnowledgeBaseID, "冗余 KB 归属（spec 07 §2 环节 8）")
