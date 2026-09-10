@@ -47,7 +47,7 @@ func TestGetByUsername(t *testing.T) {
 	db, mock := newMockDB(t)
 	s := New(db)
 	now := time.Now()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users" WHERE username = $1 ORDER BY "users"."id" LIMIT $2`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, username, password_hash, created_at, updated_at FROM "users" WHERE username = $1 ORDER BY "users"."id" LIMIT $2`)).
 		WithArgs("alice", 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "created_at", "updated_at"}).
 			AddRow(1, "alice", "hash", now, now))
@@ -61,7 +61,7 @@ func TestGetByUsername(t *testing.T) {
 func TestGetByUsernameNotFound(t *testing.T) {
 	db, mock := newMockDB(t)
 	s := New(db)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users" WHERE username = $1 ORDER BY "users"."id" LIMIT $2`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, username, password_hash, created_at, updated_at FROM "users" WHERE username = $1 ORDER BY "users"."id" LIMIT $2`)).
 		WithArgs("ghost", 1).
 		WillReturnError(gorm.ErrRecordNotFound)
 
@@ -74,7 +74,7 @@ func TestGetByID(t *testing.T) {
 	db, mock := newMockDB(t)
 	s := New(db)
 	now := time.Now()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users" WHERE "users"."id" = $1 ORDER BY "users"."id" LIMIT $2`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, username, password_hash, created_at, updated_at FROM "users" WHERE "users"."id" = $1 ORDER BY "users"."id" LIMIT $2`)).
 		WithArgs(uint64(1), 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "created_at", "updated_at"}).
 			AddRow(1, "alice", "hash", now, now))

@@ -28,11 +28,14 @@ type Store interface {
 type authService struct {
 	store Store
 	rdb   *redis.Client
+	// hashCost bcrypt cost（New 默认 DefaultCost）；测试注入 MinCost 提速——
+	// cost 10 哈希 ~100ms/次，全量 -race 跑 auth service 曾达 ~9s。
+	hashCost int
 }
 
 // New 返回 api 接口类型：组合根拿到后可直接注入任何消费方。
 func New(store Store, rdb *redis.Client) authapi.AuthService {
-	return &authService{store: store, rdb: rdb}
+	return &authService{store: store, rdb: rdb, hashCost: bcrypt.DefaultCost}
 }
 
 // sessionKey session 在 Redis 的键（统一 hify: 前缀，经 redisx.Key 拼接）。
@@ -54,7 +57,7 @@ func (s *authService) Register(ctx context.Context, req authapi.RegisterReq) (*a
 		return nil, fmt.Errorf("check username %s: %w", req.Username, err)
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), s.hashCost)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
 	}

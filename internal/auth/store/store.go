@@ -16,6 +16,10 @@ type Store struct{ db *gorm.DB }
 // New 创建 Store。
 func New(db *gorm.DB) *Store { return &Store{db: db} }
 
+// selectUser users 表显式列清单（禁 SELECT *；列与 migrations/00001_auth.sql 一致，
+// rag store selectKB 先例）。
+const selectUser = "id, username, password_hash, created_at, updated_at"
+
 // Create 插入新用户。
 func (s *Store) Create(ctx context.Context, u *authsvc.User) error {
 	return s.db.WithContext(ctx).Create(u).Error
@@ -24,7 +28,7 @@ func (s *Store) Create(ctx context.Context, u *authsvc.User) error {
 // GetByUsername 按用户名查询；未找到返回 gorm.ErrRecordNotFound。
 func (s *Store) GetByUsername(ctx context.Context, username string) (*authsvc.User, error) {
 	var u authsvc.User
-	err := s.db.WithContext(ctx).Where("username = ?", username).First(&u).Error
+	err := s.db.WithContext(ctx).Select(selectUser).Where("username = ?", username).First(&u).Error
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +38,7 @@ func (s *Store) GetByUsername(ctx context.Context, username string) (*authsvc.Us
 // GetByID 按 ID 查询；未找到返回 gorm.ErrRecordNotFound。
 func (s *Store) GetByID(ctx context.Context, id uint64) (*authsvc.User, error) {
 	var u authsvc.User
-	err := s.db.WithContext(ctx).First(&u, id).Error
+	err := s.db.WithContext(ctx).Select(selectUser).First(&u, id).Error
 	if err != nil {
 		return nil, err
 	}

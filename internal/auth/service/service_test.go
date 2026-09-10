@@ -60,7 +60,9 @@ func newTestSvc(t *testing.T, st *stubStore) authapi.AuthService {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { rdb.Close() })
-	return New(st, rdb)
+	// 同包直构注入 MinCost（New 默认 DefaultCost 不变）：哈希/比对从 ~100ms 降到
+	// ~0 量级，测试断言的是哈希存在与可校验性，不是 cost 强度。
+	return &authService{store: st, rdb: rdb, hashCost: bcrypt.MinCost}
 }
 
 // withTestUser 注入测试用户身份（模拟中间件）。
