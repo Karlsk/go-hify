@@ -355,3 +355,41 @@ func TestTruncateRunes(t *testing.T) {
 		})
 	}
 }
+
+// ---- Recovery.MarkInterruptedFailed（spec 07 §4） ----
+
+// TestRecoveryMarkInterruptedFailed 服务重启后扫残留 pending/processing 文档 →
+// 逐个 markFailed「服务重启中断，请重新索引」。
+func TestRecoveryMarkInterruptedFailed(t *testing.T) {
+	st := &stubStore{
+		ingestingDocs: func() []Document {
+			d1 := docFixture(10, 1, StatusPending)
+			d2 := docFixture(11, 1, StatusProcessing)
+			d3 := docFixture(12, 1, StatusPending)
+			return []Document{*d1, *d2, *d3}
+		}(),
+	}
+	svc := newPipelineSvc(st, &stubModels{}, nil, nil, pipelineCfg())
+	rec := &Recovery{svc: svc}
+
+	err := rec.MarkInterruptedFailed(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, st.numMarkFailedCalls(), "3 个残留文档逐个 markFailed")
+	ids, msgs := st.markFailedSnapshot()
+	assert.Equal(t, []uint64{10, 11, 12}, ids)
+	for _, msg := range msgs {
+		assert.Contains(t, msg, "服务重启中断", "失败消息含「服务重启中断」")
+	}
+}
+
+// TestRecoveryMarkInterruptedFailedEmpty 无残留文档 → 零 markFailed 调用。
+func TestRecoveryMarkInterruptedFailedEmpty(t *testing.T) {
+	st := &stubStore{ingestingDocs: []Document{}}
+	svc := newPipelineSvc(st, &stubModels{}, nil, nil, pipelineCfg())
+	rec := &Recovery{svc: svc}
+
+	err := rec.MarkInterruptedFailed(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, st.numMarkFailedCalls(), "无残留文档 → 零 markFailed")
+}

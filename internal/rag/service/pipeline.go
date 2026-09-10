@@ -218,3 +218,26 @@ func truncateRunes(s string, n int) string {
 type Recovery struct {
 	svc *kbService
 }
+
+// restartFailMessage 服务重启中断的统一失败消息（spec 07 §4）。
+const restartFailMessage = "服务重启中断，请重新索引"
+
+// MarkInterruptedFailed 扫描全部入库中文档（ListIngestingDocuments）→ 逐个
+// MarkDocumentFailed。尽力而为：单个失败不阻断其余文档；返回首个非 nil error
+// 供调用方记 WARN。
+func (r *Recovery) MarkInterruptedFailed(ctx context.Context) error {
+	docs, err := r.svc.store.ListIngestingDocuments(ctx)
+	if err != nil {
+		return fmt.Errorf("list ingesting documents: %w", err)
+	}
+	var firstErr error
+	for _, doc := range docs {
+		if err := r.svc.store.MarkDocumentFailed(ctx, doc.ID, restartFailMessage); err != nil {
+			slog.ErrorContext(ctx, "recovery: mark document failed", "document_id", doc.ID, "err", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
