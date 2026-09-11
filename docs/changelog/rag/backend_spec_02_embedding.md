@@ -1,11 +1,12 @@
 # RAG spec 02 · embedding 能力（backend_spec_02_embedding）
 
-> 状态：**实施 spec**（2026-09-07），8 篇之 02；决策依据见总览 [backend_module_spec.md](backend_module_spec.md)。前置依赖：无硬依赖（可与 01 并行）；消费方 = spec 05（查询向量化）与 spec 07（入库向量化）。
+> 状态：**实施 spec**（2026-09-07；2026-09-11 修订：EmbedOptions 增 Dimensions 输出维度参数），8 篇之 02；决策依据见总览 [backend_module_spec.md](backend_module_spec.md)。前置依赖：无硬依赖（可与 01 并行）；消费方 = spec 05（查询向量化）与 spec 07（入库向量化）。
 > 交付：`internal/platform/llm/embed.go`——embedding 统一薄 adapter。**独立单测**（httptest 按 kind 打桩，不依赖 rag 任何代码）。
 
 ## 1. 类型与构造
 
-- `EmbedOptions{Kind, BaseURL, APIKey, Model}`、`EmbedResult{Vectors [][]float32, PromptTokens int}`、哨兵 `ErrEmbeddingUnsupported`（claude 无 embedding API，HTTP 400）。
+- `EmbedOptions{Kind, BaseURL, APIKey, Model, Dimensions}`、`EmbedResult{Vectors [][]float32, PromptTokens int}`、哨兵 `ErrEmbeddingUnsupported`（claude 无 embedding API，HTTP 400）。
+  - **Dimensions（2026-09-11 修订）**：输出维度截断参数（Matryoshka）。`>0` 时 openai_compatible 请求体附 `dimensions` 字段，零值不发（老网关对未知字段可能 4xx，按需显式开启）；探针实测 SiliconFlow `Qwen/Qwen3-Embedding-4B`（原生 2560）与 OpenAI `text-embedding-3-*` 均支持截断。**值由调用方注入**（rag 侧填 `RequiredEmbeddingDim=1536` 对齐向量列 `vector(1536)`）——platform 不 import 业务常量，维度校验仍在调用方（05/07）。原生维度低于 1536 的模型（如 bge-m3 1024）无法上采，建库预检已挡。
 - `Embedder`：`NewEmbedder(t http.RoundTripper)`（内部 `NewJSONClient(t, 5s)`——复用 llm 包既有 JSON client）。
 - 包内常量：`embedTimeout=5s`、`embedBulkhead=4`（**独立信号量，不占 chat bulkhead**）、`embedAcquireWait=2s`（超时→既有 `llm.ErrProviderBusy`）、`embedMaxRetries=1`、`embedMaxInputs=2048`。
 
@@ -13,7 +14,7 @@
 
 | kind | 端点 | 鉴权 | 响应解析 |
 |---|---|---|---|
-| openai_compatible | `POST {base}/embeddings` | Bearer | `data[].index` **归位**（不假设返回顺序）+ `usage.prompt_tokens` |
+| openai_compatible | `POST {base}/embeddings`（`Dimensions>0` 时请求体带 `dimensions`） | Bearer | `data[].index` **归位**（不假设返回顺序）+ `usage.prompt_tokens` |
 | ollama | `POST {base}/api/embed` | 无 | `{"embeddings"}` 数组 |
 | gemini | `POST {base}/models/{model}:batchEmbedContents` | x-goog-api-key | `embeddings[].values` |
 | claude | — | — | 直接 `ErrEmbeddingUnsupported`，请求都不发 |

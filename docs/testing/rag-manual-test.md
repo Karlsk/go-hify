@@ -18,7 +18,7 @@
 |---|---|---|
 | Docker | 临时 PG（pgvector）/ Redis 容器 | `docker version` |
 | curl / jq | 接口调用与字段提取 | `curl --version && jq --version` |
-| 真实 embedding API key | 检索语义验收（§7）需要真实向量化；`.env` 的 `OPENAI_API_KEY` 即可 | `grep -c '^OPENAI_API_KEY=..*' .env` |
+| 真实 embedding API key | 检索语义验收（§7）需要真实向量化；任意 OpenAI 兼容供应商（SiliconFlow / OpenAI），模型须能输出 1536 维（见 §3 选型约束） | 自行 export `BASE`/`KEY` |
 
 无真实 key 时可用**本地 stub** 替代（2026-09-11 首轮走查即此形态）：任意 OpenAI 兼容
 `POST {base}/embeddings` 服务返回 1536 维确定性向量即可（报文契约见 `platform/llm/embed.go`
@@ -29,9 +29,10 @@
 ## 1. 启动依赖容器 + 迁移 + 启动服务
 
 ```bash
+# PG：宿主 5433 → 容器 5432（注释独立成行——行尾注释在 GUI run 对话框里会被当容器参数）
 docker run -d --name hify-pg-test \
   -e POSTGRES_USER=hify -e POSTGRES_PASSWORD=hify -e POSTGRES_DB=hify \
-  -p 5433:5432 pgvector/pgvector:pg17          # 宿主 5433 → 容器 5432
+  -p 5433:5432 pgvector/pgvector:pg17
 docker run -d --name hify-redis-test -p 6379:6379 redis:7-alpine
 until docker exec hify-pg-test pg_isready -U hify >/dev/null 2>&1; do sleep 1; done && echo "pg ready"
 ```
@@ -70,20 +71,25 @@ curl -s localhost:8081/api/v1/knowledge-bases | jq .error.code               # �
 
 ## 3. 造前置数据（provider + embedding 模型）
 
-知识库绑定 embedding 模型（建库预检 capability=embedding + dim=1536；检索验收要真实向量化）。
-真实 key 从 `.env` 读入 shell 变量，**不落命令历史之外的任何地方**；本地 stub 形态则
-`base_url` 指 stub、`api_key` 任意非空值：
+知识库绑定 embedding 模型（建库预检 capability=embedding + **dim=1536**——向量列
+`vector(1536)` 钉死；原生维度更高的模型靠请求 `dimensions` 截断到 1536，spec 02 修订）。
+`BASE`/`KEY` 手动 export（供应商自选：SiliconFlow Qwen3-Embedding / OpenAI 均可；
+key 不落命令历史之外的任何地方）；本地 stub 形态则 `base_url` 指 stub、`api_key` 任意非空值。
+
+**选型约束**：模型必须能输出 1536 维——原生 ≥1536 且支持 `dimensions` 截断（SiliconFlow
+`Qwen/Qwen3-Embedding-4B` 原生 2560 ✅、`8B` 4096 ✅、OpenAI `text-embedding-3-small` 原生
+1536 ✅）；**原生 <1536 的不行**（bge-m3 1024 无法上采，建库预检 `EMBEDDING_DIM_MISMATCH` 挡）。
 
 ```bash
-set -a; source .env; set +a    # 真实 key 形态：OPENAI_API_KEY 进环境（curl 引用，绝不回显）
 # stub 形态：BASE=http://127.0.0.1:18789 KEY=stub-key（先起 stub，见 §0）
 curl -s -b /tmp/rag-jar -X POST localhost:8081/api/v1/providers -H 'Content-Type: application/json' \
   -d "{\"name\":\"openai-embed\",\"kind\":\"openai_compatible\",\"base_url\":\"$BASE\",\"api_key\":\"$KEY\"}" | jq -c '{id: .data.id, name: .data.name}'
 # → {"id":"N","name":"openai-embed"}（记下 provider_id=$PID；注意 kind 枚举是 openai_compatible）
 curl -s -b /tmp/rag-jar -X POST localhost:8081/api/v1/models -H 'Content-Type: application/json' \
-  -d "{\"provider_id\":$PID,\"name\":\"text-embedding-3-small\",\"model_id\":\"text-embedding-3-small\",\"capability\":\"embedding\",\"embedding_dim\":1536}" \
+  -d "{\"provider_id\":$PID,\"name\":\"qwen3-embedding\",\"model_id\":\"Qwen/Qwen3-Embedding-4B\",\"capability\":\"embedding\",\"embedding_dim\":1536}" \
   | jq -c '{id: .data.id, capability: .data.capability, dim: .data.embedding_dim}'
-# → {"id":"M","capability":"embedding","dim":1536}（记下 embedding_model_id=$MID；真实 OpenAI 用 text-embedding-3-small）
+# → {"id":"M","capability":"embedding","dim":1536}（记下 embedding_model_id=$MID；
+#   embedding_dim 填 1536=输出维度：模型原生 2560 由服务端 dimensions 参数截断）
 ```
 
 ## 4. 建 KB（POST /knowledge-bases）

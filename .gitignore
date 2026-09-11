@@ -69,3 +69,7 @@ Thumbs.db
 # ===== Claude Code 本地配置（项目级共享配置仍提交）=====
 .claude/settings.local.json
 .qoder
+
+# 本地密钥脚本（真实 key，禁入 Git）
+embedding-provider.sh
+
