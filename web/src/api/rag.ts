@@ -128,3 +128,27 @@ export function deleteDocument(id: string) {
 export function reindexDocument(id: string) {
   return post<DocumentItem>(`/documents/${id}/reindex`)
 }
+
+// ---- retrieve 检索 ----
+
+/** 检索命中片段（对齐 rag/api/schema.go RetrievedChunk） */
+export interface RetrievedChunk {
+  chunk_id: string
+  document_id: string
+  knowledge_base_id: string
+  document_name: string
+  chunk_index: number
+  content: string
+  similarity: number
+}
+
+/** 检索请求参数 */
+export interface RetrieveParams {
+  query: string
+  top_k?: number
+}
+
+/** 检索（POST /knowledge-bases/:id/retrieve） */
+export function retrieveChunks(kbId: string, params: RetrieveParams) {
+  return post<RetrievedChunk[]>(`/knowledge-bases/${kbId}/retrieve`, params)
+}
