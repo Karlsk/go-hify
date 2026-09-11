@@ -549,6 +549,9 @@ func (s *kbService) Retrieve(ctx context.Context, req ragapi.RetrieveReq) ([]rag
 		BaseURL: cfg.BaseURL,
 		APIKey:  cfg.APIKey,
 		Model:   cfg.ModelID,
+		// 与管线 resolveEmbedOptions 同款：输出维度截断到向量列 1536（端到端实测
+		// 回归——漏带时 Qwen3-Embedding 返原生 2560，步骤⑤维度校验 500）。
+		Dimensions: ragapi.RequiredEmbeddingDim,
 	}, []string{req.Query})
 	if err != nil {
 		return nil, err

@@ -59,7 +59,6 @@ type stubStore struct {
 	// 文档路径
 	docsByID       map[uint64]*Document // GetDocumentByID 数据集（无键 = NotFound）
 	getDocByIDFn   func(ctx context.Context, id uint64) (*Document, error) // 覆写 GetDocumentByID 行为（panic 注入等）
-	getDocCalls    int
 	createDocErr   error     // CreateDocument 注入错误（23503 / 普通）
 	createdDoc     *Document // 落库实体快照
 	softDelErr     error     // SoftDeleteDocument 注入错误（NotFound / 普通）
@@ -163,9 +162,6 @@ func (s *stubStore) ListKnowledgeBases(_ context.Context, _ page.OffsetParams, n
 }
 
 func (s *stubStore) GetDocumentByID(ctx context.Context, id uint64) (*Document, error) {
-	s.mu.Lock()
-	s.getDocCalls++
-	s.mu.Unlock()
 	if s.getDocByIDFn != nil {
 		return s.getDocByIDFn(ctx, id)
 	}
@@ -231,12 +227,6 @@ func (s *stubStore) WithTx(_ context.Context, fn func(tx Store) error) error {
 }
 
 // ---- 管线记录字段线程安全读（spec 07：dispatchIngest goroutine 写，test goroutine 读） ----
-
-func (s *stubStore) numGetDocCalls() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.getDocCalls
-}
 
 func (s *stubStore) numMarkFailedCalls() int {
 	s.mu.Lock()
@@ -966,6 +956,9 @@ func TestRetrieveHappyPath(t *testing.T) {
 	assert.Equal(t, []string{"怎么创建 Agent"}, embeds.gotInputs)
 	assert.Equal(t, llm.ProviderKind("openai_compatible"), embeds.gotOpts.Kind)
 	assert.Equal(t, "text-embedding-3-small", embeds.gotOpts.Model)
+	// 检索路径同样带 Dimensions（端到端实测回归：漏带时 Qwen3-Embedding 返原生 2560，
+	// 步骤⑤维度校验 500——入库有、检索无即两路分叉）。
+	assert.Equal(t, ragapi.RequiredEmbeddingDim, embeds.gotOpts.Dimensions)
 	assert.Equal(t, []uint64{1, 2}, st.searchGotKBs)
 	assert.Equal(t, q, st.searchGotQ)
 	assert.Equal(t, 5, st.searchGotLim)

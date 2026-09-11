@@ -116,8 +116,9 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 }
 
 // resolveEmbedOptions 环节 6：ResolveLLMConfig → EmbedOptions（明文凭据
-// 用后即弃，不入日志/缓存）。KB 的 embedding_model_id 绑定嵌入模型——
-// Retrieve 与 Pipeline 共用同一条 resolve 路径。
+// 用后即弃，不入日志/缓存）。KB 的 embedding_model_id 绑定嵌入模型——入库管线
+// 专用；Retrieve（spec 05）因需先做多 KB 模型一致性检查，自行内联 resolve 但
+// 必须同样填 Dimensions（两条路径，改 EmbedOptions 构造时两处都要对齐）。
 func (s *kbService) resolveEmbedOptions(ctx context.Context, kbID uint64) (llm.EmbedOptions, error) {
 	kb, err := s.store.GetKnowledgeBaseByID(ctx, kbID)
 	if err != nil {
@@ -132,6 +133,10 @@ func (s *kbService) resolveEmbedOptions(ctx context.Context, kbID uint64) (llm.E
 		BaseURL: cfg.BaseURL,
 		APIKey:  cfg.APIKey,
 		Model:   cfg.ModelID,
+		// dimensions 输出维度截断（Matryoshka）：向量列 vector(1536) 钉死，原生维度
+		// 更高的模型（Qwen3-Embedding-4B 2560 / 8B 4096）截到 1536 才能入库；原生低于
+		// 1536 的模型（bge-m3 1024）无法上采——建库预检 dim==1536 已挡。
+		Dimensions: api.RequiredEmbeddingDim,
 	}, nil
 }
 
