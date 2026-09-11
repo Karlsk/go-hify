@@ -27,6 +27,10 @@
           <el-icon><User /></el-icon>
           <template #title>Agent 管理</template>
         </el-menu-item>
+        <el-menu-item index="/knowledge-bases">
+          <el-icon><Document /></el-icon>
+          <template #title>知识库管理</template>
+        </el-menu-item>
         <el-menu-item index="/chat">
           <el-icon><ChatDotRound /></el-icon>
           <template #title>对话</template>
@@ -92,6 +96,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDown,
   ChatDotRound,
+  Document,
   Expand,
   Fold,
   Setting,
