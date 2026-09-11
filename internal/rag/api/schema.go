@@ -43,6 +43,8 @@ type CreateKnowledgeBaseReq struct {
 	Name             string `json:"name" binding:"required,min=1,max=128"`
 	Description      string `json:"description" binding:"omitempty,max=512"`
 	EmbeddingModelID uint64 `json:"embedding_model_id" binding:"required"`
+	// ChunkStrategy 切分策略配置（可选）：nil 时用全局默认（RAG_CHUNK_SIZE / RAG_CHUNK_OVERLAP）。
+	ChunkStrategy *ChunkStrategy `json:"chunk_strategy"`
 }
 
 // Validate 跨字段校验（无跨字段规则，binding tag 管字段格式）。
@@ -190,11 +192,25 @@ func (r ReindexDocumentReq) Validate() error { return nil }
 // （创建时为 0）；EmbeddingModelID 为字符串化外键。
 type KnowledgeBaseSchema struct {
 	schema.BaseSchema
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	EmbeddingModelID string `json:"embedding_model_id"`
-	Enabled          bool   `json:"enabled"`
-	DocumentCount    int64  `json:"document_count"`
+	Name             string        `json:"name"`
+	Description      string        `json:"description"`
+	EmbeddingModelID string        `json:"embedding_model_id"`
+	ChunkStrategy    ChunkStrategy `json:"chunk_strategy"`
+	Enabled          bool          `json:"enabled"`
+	DocumentCount    int64         `json:"document_count"`
+}
+
+// ChunkStrategy 切分策略配置（jsonb 序列化到 knowledge_bases.chunk_strategy）。
+// 一期仅支持 type="fixed_length"，二期可扩展新策略类型（jsonb 天然前向兼容）。
+type ChunkStrategy struct {
+	// Type 策略类型枚举：一期仅 "fixed_length"（段落→句子→硬截三级降级，MD 围栏原子保护）。
+	Type string `json:"type"`
+	// ChunkSize 目标块大小（rune），0=用全局默认（RAG_CHUNK_SIZE）。
+	ChunkSize int `json:"chunk_size"`
+	// ChunkOverlap 块间重叠尾缀（rune），0=用全局默认（RAG_CHUNK_OVERLAP）。
+	ChunkOverlap int `json:"chunk_overlap"`
+	// Separator 段落分隔符（字符串），""=用默认 "\n\n"；"\n"=单换行切；" "=空格切。
+	Separator string `json:"separator"`
 }
 
 // KnowledgeBaseListItem 列表项：KnowledgeBaseSchema + 当页批量现读的聚合列，

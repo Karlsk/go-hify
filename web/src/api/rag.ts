@@ -14,6 +14,18 @@ import type { PageQuery } from '@/types'
 /** 文档状态枚举（DB CHECK 约束：pending/processing/ready/failed） */
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'failed'
 
+/** 切分策略配置（jsonb，一期仅 fixed_length） */
+export interface ChunkStrategy {
+  /** 策略类型：一期仅 "fixed_length" */
+  type: 'fixed_length'
+  /** 目标块大小（rune），0=用全局默认 */
+  chunk_size: number
+  /** 块间重叠尾缀（rune），0=用全局默认 */
+  chunk_overlap: number
+  /** 段落分隔符：""="\n\n"、"\n"=单换行、" "=空格 */
+  separator: string
+}
+
 /** 知识库列表项（聚合列 + 基础字段） */
 export interface KnowledgeBaseItem {
   id: string
@@ -21,6 +33,7 @@ export interface KnowledgeBaseItem {
   description: string
   embedding_model_id: string
   embedding_model_name: string
+  chunk_strategy: ChunkStrategy
   enabled: boolean
   document_count: number
   created_at: string
@@ -35,6 +48,7 @@ export interface CreateKnowledgeBaseData {
   name: string
   description?: string
   embedding_model_id: number
+  chunk_strategy?: ChunkStrategy
 }
 
 /** 更新知识库请求（PUT 全量；enabled 必带——漏发会被后端置回启用） */

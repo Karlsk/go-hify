@@ -12,9 +12,10 @@ import (
 // 无软删——删除即硬删，且被文档（含软删，Unscoped 计数）占用时挡删（ErrKnowledgeBaseInUse）。
 type KnowledgeBase struct {
 	db.BaseMutable
-	Name             string `gorm:"not null"`
-	Description      string `gorm:"not null"`
-	EmbeddingModelID uint64 `gorm:"not null"`
+	Name             string        `gorm:"not null"`
+	Description      string        `gorm:"not null"`
+	EmbeddingModelID uint64        `gorm:"not null"`
+	ChunkStrategy    ChunkStrategy `gorm:"type:jsonb;not null;default:'{}'"`
 	// Enabled 启用开关：false = 检索范围静默剔除（service 层过滤），管理面仍可见可编辑。
 	// 布尔/数值字段一律不加 gorm default tag（provider 模块踩坑 #1：零值会被 GORM 默认值写回替换）。
 	Enabled bool `gorm:"not null"`

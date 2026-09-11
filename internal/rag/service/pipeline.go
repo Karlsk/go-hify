@@ -77,7 +77,18 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 	}
 
 	// 环节 5：SplitChunks（递归段落→句子→硬截三级降级，MD 围栏原子保护）。
-	rawChunks := SplitChunks(text, s.cfg.ChunkSize, s.cfg.ChunkOverlap)
+	// 读取 KB 的切分策略（jsonb），降级读全局默认（RagCfg）。
+	kb, err := s.store.GetKnowledgeBaseByID(ctx, doc.KnowledgeBaseID)
+	if err != nil {
+		slog.ErrorContext(ctx, "pipeline: loadKnowledgeBase failed", "document_id", docID, "kb_id", doc.KnowledgeBaseID, "err", err)
+		s.markFailed(ctx, docID, "加载知识库配置失败")
+		return
+	}
+	size, overlap, sep := kb.ChunkStrategy.Resolve(ChunkConfig{
+		DefaultSize:    s.cfg.ChunkSize,
+		DefaultOverlap: s.cfg.ChunkOverlap,
+	})
+	rawChunks := SplitChunksWithSep(text, size, overlap, sep)
 	if len(rawChunks) == 0 {
 		s.markFailed(ctx, docID, "文档内容为空")
 		return

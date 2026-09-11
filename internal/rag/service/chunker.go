@@ -41,18 +41,28 @@ func estimateTokens(content string) int {
 // 零 goroutine。非法参数（size≤0 / overlap<0 / overlap≥size）与空 / 全空白输入返
 // 回 nil——config 已校验，此处兜底不可达。
 func SplitChunks(content string, size, overlap int) []string {
+	return SplitChunksWithSep(content, size, overlap, "\n\n")
+}
+
+// SplitChunksWithSep 递归分割（自定义段落分隔符）：与 SplitChunks 相同逻辑，但段落
+// 切分使用指定的 separator（而非固定的 "\n\n"）。separator 影响 splitParagraphs 的
+// 首优先级切分，句子降级和硬截逻辑不变。
+func SplitChunksWithSep(content string, size, overlap int, separator string) []string {
 	if size <= 0 || overlap < 0 || overlap >= size {
 		return nil
 	}
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
+	if separator == "" {
+		separator = "\n\n" // 默认双换行
+	}
 	content = strings.ReplaceAll(content, "\r\n", "\n") // CRLF 归一（规则 1）
 	// 整体不超限：单块直通（唯一块，无 overlap 前缀）。
 	if utf8.RuneCountInString(content) <= size {
 		return []string{content}
 	}
-	chunks := packUnits(buildUnits(content, size), size)
+	chunks := packUnits(buildUnitsWithSep(content, size, separator), size)
 	if len(chunks) == 0 {
 		return nil
 	}
@@ -68,10 +78,16 @@ type unit struct {
 }
 
 // buildUnits 把已归一的内容切成原子单元序列（规则 4 围栏预扫描 + 规则 1 段落切分），
-// 超长单元降级：段落走句子组（规则 2/3），围栏只硬截。
+// 超长单元降级：段落走句子组（规则 2/3），围栏只硬截。使用默认 "\n\n" 分隔符。
 func buildUnits(content string, size int) []unit {
+	return buildUnitsWithSep(content, size, "\n\n")
+}
+
+// buildUnitsWithSep 把已归一的内容切成原子单元序列（自定义段落分隔符）：围栏预扫描 +
+// 按 separator 切段落 + 超长降级。separator 影响段落切分的首优先级。
+func buildUnitsWithSep(content string, size int, separator string) []unit {
 	var units []unit
-	for _, u := range splitUnits(content) {
+	for _, u := range splitUnitsWithSep(content, separator) {
 		if runeLen(u.text) <= size {
 			units = append(units, u)
 			continue
@@ -95,8 +111,14 @@ func buildUnits(content string, size int) []unit {
 
 // splitUnits 围栏预扫描（规则 4）：行 TrimSpace 后以 ``` 开头即围栏行（容忍缩进与
 // info string），开—闭两行（含内部全部行）构成一个原子围栏单元——块内 \n\n 不触发
-// 段落切分；未闭合则其后全部保守视为围栏。围栏外文本走段落切分。
+// 段落切分；未闭合则其后全部保守视为围栏。围栏外文本走段落切分。使用默认 "\n\n" 分隔符。
 func splitUnits(content string) []unit {
+	return splitUnitsWithSep(content, "\n\n")
+}
+
+// splitUnitsWithSep 围栏预扫描（自定义段落分隔符）：与 splitUnits 相同逻辑，但段落
+// 切分使用指定的 separator（而非固定的 "\n\n"）。
+func splitUnitsWithSep(content string, separator string) []unit {
 	lines := strings.Split(content, "\n")
 	var units []unit
 	var plain []string
@@ -106,7 +128,7 @@ func splitUnits(content string) []unit {
 		if len(plain) == 0 {
 			return
 		}
-		units = append(units, splitParagraphs(strings.Join(plain, "\n"))...)
+		units = append(units, splitParagraphsWithSep(strings.Join(plain, "\n"), separator)...)
 		plain = plain[:0]
 	}
 
@@ -114,7 +136,7 @@ func splitUnits(content string) []unit {
 		isFenceLine := strings.HasPrefix(strings.TrimSpace(line), "```")
 		switch {
 		case fenceStart >= 0 && isFenceLine: // 闭合围栏
-			units = append(units, unit{text: strings.Join(lines[fenceStart:i+1], "\n"), sep: "\n\n", isFence: true})
+			units = append(units, unit{text: strings.Join(lines[fenceStart:i+1], "\n"), sep: separator, isFence: true})
 			fenceStart = -1
 		case fenceStart >= 0: // 围栏内部：整块保留
 		case isFenceLine: // 开围栏
@@ -125,7 +147,7 @@ func splitUnits(content string) []unit {
 		}
 	}
 	if fenceStart >= 0 { // 未闭合：其后全部保守视为围栏
-		units = append(units, unit{text: strings.Join(lines[fenceStart:], "\n"), sep: "\n\n", isFence: true})
+		units = append(units, unit{text: strings.Join(lines[fenceStart:], "\n"), sep: separator, isFence: true})
 	}
 	flushPlain()
 	return units
@@ -204,15 +226,21 @@ func hardCut(text string, size int) []string {
 }
 
 // splitParagraphs 段落切分（规则 1）：按 \n\n 切段、空段丢弃、段落外空白剥离
-// （段内换行 / 缩进保留）。
+// （段内换行 / 缩进保留）。使用默认 "\n\n" 分隔符。
 func splitParagraphs(content string) []unit {
+	return splitParagraphsWithSep(content, "\n\n")
+}
+
+// splitParagraphsWithSep 段落切分（自定义分隔符）：按 separator 切段、空段丢弃、
+// 段落外空白剥离。separator 影响段落切分的首优先级。
+func splitParagraphsWithSep(content string, separator string) []unit {
 	var units []unit
-	for _, para := range strings.Split(content, "\n\n") {
+	for _, para := range strings.Split(content, separator) {
 		para = strings.TrimSpace(para)
 		if para == "" {
 			continue
 		}
-		units = append(units, unit{text: para, sep: "\n\n"})
+		units = append(units, unit{text: para, sep: separator})
 	}
 	return units
 }

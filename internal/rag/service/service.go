@@ -200,6 +200,15 @@ func (s *kbService) Create(ctx context.Context, req ragapi.CreateKnowledgeBaseRe
 		EmbeddingModelID: req.EmbeddingModelID,
 		Enabled:          true, // 显式设值：布尔无 gorm default tag（provider 踩坑 #1）
 	}
+	// 切分策略：请求未传时用全局默认（空 ChunkStrategy{}，Resolve 降级读 cfg）
+	if req.ChunkStrategy != nil {
+		kb.ChunkStrategy = ChunkStrategy{
+			Type:         req.ChunkStrategy.Type,
+			ChunkSize:    req.ChunkStrategy.ChunkSize,
+			ChunkOverlap: req.ChunkStrategy.ChunkOverlap,
+			Separator:    req.ChunkStrategy.Separator,
+		}
+	}
 	if err := s.store.CreateKnowledgeBase(ctx, kb); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ragapi.ErrKnowledgeBaseNameConflict
@@ -613,8 +622,14 @@ func toKBSchema(kb *KnowledgeBase, documentCount int64) ragapi.KnowledgeBaseSche
 		Name:             kb.Name,
 		Description:      kb.Description,
 		EmbeddingModelID: strconv.FormatUint(kb.EmbeddingModelID, 10),
-		Enabled:          kb.Enabled,
-		DocumentCount:    documentCount,
+		ChunkStrategy: ragapi.ChunkStrategy{
+			Type:         kb.ChunkStrategy.Type,
+			ChunkSize:    kb.ChunkStrategy.ChunkSize,
+			ChunkOverlap: kb.ChunkStrategy.ChunkOverlap,
+			Separator:    kb.ChunkStrategy.Separator,
+		},
+		Enabled:       kb.Enabled,
+		DocumentCount: documentCount,
 	}
 	s.ID = strconv.FormatUint(kb.ID, 10)
 	s.CreatedAt = kb.CreatedAt

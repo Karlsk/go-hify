@@ -91,6 +91,45 @@
         <el-form-item v-if="isEdit" label="启用" prop="enabled">
           <el-switch v-model="form.enabled" />
         </el-form-item>
+        <!-- 切分策略配置（高级选项，默认折叠） -->
+        <el-divider content-position="left">切分策略（高级）</el-divider>
+        <el-form-item label="策略类型">
+          <el-select v-model="form.chunkStrategy.type" :disabled="isEdit" style="width: 100%">
+            <el-option label="固定长度（段落→句子→硬截三级降级）" value="fixed_length" />
+          </el-select>
+          <el-text v-if="isEdit" size="small" type="info">
+            策略类型在创建时确定，后续不可更改
+          </el-text>
+        </el-form-item>
+        <el-form-item label="块大小（rune）">
+          <el-input-number
+            v-model="form.chunkStrategy.chunk_size"
+            :disabled="isEdit"
+            :min="100"
+            :max="2000"
+            :step="50"
+          />
+          <el-text size="small" type="info">目标块大小，0=使用全局默认（500）</el-text>
+        </el-form-item>
+        <el-form-item label="重叠大小（rune）">
+          <el-input-number
+            v-model="form.chunkStrategy.chunk_overlap"
+            :disabled="isEdit"
+            :min="0"
+            :max="form.chunkStrategy.chunk_size > 0 ? form.chunkStrategy.chunk_size - 1 : 499"
+            :step="10"
+          />
+          <el-text size="small" type="info">块间重叠，0=使用全局默认（80）</el-text>
+        </el-form-item>
+        <el-form-item label="段落分隔符">
+          <el-select v-model="form.chunkStrategy.separator" :disabled="isEdit" style="width: 100%">
+            <el-option label="双换行（\\n\\n）——默认" value="\n\n" />
+            <el-option label="单换行（\\n）" value="\n" />
+            <el-option label="空格" value=" " />
+            <el-option label="无（纯硬截）" value="" />
+          </el-select>
+          <el-text size="small" type="info">影响段落切分的首优先级</el-text>
+        </el-form-item>
       </template>
     </HifyFormDialog>
   </div>
@@ -173,6 +212,12 @@ interface KBForm {
   description: string
   embeddingModelId: string
   enabled: boolean
+  chunkStrategy: {
+    type: 'fixed_length'
+    chunk_size: number
+    chunk_overlap: number
+    separator: string
+  }
 }
 
 const dialogRef = ref<{ open: (data?: KBForm) => void }>()
@@ -185,6 +230,12 @@ const emptyForm = (): KBForm => ({
   description: '',
   embeddingModelId: '',
   enabled: true,
+  chunkStrategy: {
+    type: 'fixed_length',
+    chunk_size: 0, // 0 = 使用全局默认
+    chunk_overlap: 0,
+    separator: '',
+  },
 })
 
 const rules: FormRules = {
@@ -208,6 +259,12 @@ function openEdit(row: KnowledgeBaseItem): void {
       description: row.description,
       embeddingModelId: row.embedding_model_id,
       enabled: row.enabled,
+      chunkStrategy: {
+        type: row.chunk_strategy?.type || 'fixed_length',
+        chunk_size: row.chunk_strategy?.chunk_size || 0,
+        chunk_overlap: row.chunk_strategy?.chunk_overlap || 0,
+        separator: row.chunk_strategy?.separator || '',
+      },
     })
   })
 }
@@ -215,10 +272,18 @@ function openEdit(row: KnowledgeBaseItem): void {
 function onSubmit(form: KBForm, done: (ok?: boolean) => void): void {
   // 请求体 id 类字段转数值（后端 Go uint64；字符串会 400——agent.ts 踩坑 #8）
   if (form.id === '') {
+    // 创建时传切分策略（0 值字段后端降级读全局默认）
+    const chunkStrategy = {
+      type: form.chunkStrategy.type,
+      chunk_size: form.chunkStrategy.chunk_size,
+      chunk_overlap: form.chunkStrategy.chunk_overlap,
+      separator: form.chunkStrategy.separator,
+    }
     void createKnowledgeBase({
       name: form.name,
       description: form.description,
       embedding_model_id: Number(form.embeddingModelId),
+      chunk_strategy: chunkStrategy,
     })
       .then(() => {
         notifySuccess('创建成功')

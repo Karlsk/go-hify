@@ -17,7 +17,7 @@ import (
 // 显式列清单（禁 SELECT *）。content 是大文本列（自动 TOAST），仅详情路径取——
 // 列表 / 快照路径不取，零 TOAST 解压成本。
 const (
-	selectKB = "id, name, description, embedding_model_id, enabled, created_at, updated_at"
+	selectKB = "id, name, description, embedding_model_id, chunk_strategy, enabled, created_at, updated_at"
 	// selectDocument 列表列（不含 content）；deleted_at 一并取回（软删 mixin 字段，可见行恒为 NULL）。
 	selectDocument = "id, knowledge_base_id, name, status, file_type, file_size, error_message, chunk_count, created_at, updated_at, deleted_at"
 	// selectDocumentDetail 详情列 = 列表列 + content 原文。
