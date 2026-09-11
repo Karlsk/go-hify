@@ -557,3 +557,151 @@ func TestSearchChunksQueryError(t *testing.T) {
 	assert.ErrorIs(t, err, boom)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
+
+// ---- spec 07：管线方法族（状态翻转 / CreateChunks / ListIngestingDocuments） ----
+
+// Mark* 严格状态机（spec 07 §3，实施拍板）：Processing WHERE status='pending'、
+// Ready WHERE status='processing'、Failed WHERE status IN ('pending','processing')。
+// 软删模型自动追加 deleted_at IS NULL（软删行不参与状态翻转）；map Updates 的 SET
+// 列序随迭代不定——正则通配 SET、锁死 WHERE 形态（占位符用 \$[0-9]+ 防编号耦合）；
+// 尾锚防 IN 被 = 前缀误匹配。
+var (
+	markProcessingRe = `UPDATE "documents" SET .* WHERE id = \$[0-9]+ AND status = \$[0-9]+ AND "documents"."deleted_at" IS NULL$`
+	markReadyRe      = `UPDATE "documents" SET .* WHERE id = \$[0-9]+ AND status = \$[0-9]+ AND "documents"."deleted_at" IS NULL$`
+	markFailedRe     = `UPDATE "documents" SET .* WHERE id = \$[0-9]+ AND status IN \(\$[0-9]+,\$[0-9]+\) AND "documents"."deleted_at" IS NULL$`
+)
+
+// listIngestingSQL Recovery 扫描（spec 07 §4）：显式列（无 content 大文本）、
+// status IN 命中 partial idx idx_documents_ingesting、软删行过滤。
+const listIngestingSQL = `SELECT id, knowledge_base_id, name, status, file_type, file_size, error_message, chunk_count, created_at, updated_at, deleted_at FROM "documents" WHERE status IN ($1,$2) AND "documents"."deleted_at" IS NULL`
+
+func TestMarkDocumentProcessing(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectExec(markProcessingRe).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err := s.MarkDocumentProcessing(context.Background(), 9)
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 非 pending（0 行）→ ErrRecordNotFound：管线中止（文档已不在待处理态）。
+func TestMarkDocumentProcessingNotPending(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectExec(markProcessingRe).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err := s.MarkDocumentProcessing(context.Background(), 9)
+	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMarkDocumentReady(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectExec(markReadyRe).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err := s.MarkDocumentReady(context.Background(), 9, 42)
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 非 processing（0 行）→ ErrRecordNotFound：终态事务回滚，chunks 不落孤儿。
+func TestMarkDocumentReadyNotProcessing(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectExec(markReadyRe).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err := s.MarkDocumentReady(context.Background(), 9, 42)
+	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMarkDocumentFailed(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectExec(markFailedRe).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err := s.MarkDocumentFailed(context.Background(), 9, "服务重启中断，请重新索引")
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 已终态 / 已删（0 行）→ nil 静默：markFailed 是尽力而为的最后一步，不构成错误路径。
+func TestMarkDocumentFailedTerminalState(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectBegin()
+	mock.ExpectExec(markFailedRe).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err := s.MarkDocumentFailed(context.Background(), 9, "x")
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestCreateChunks 切片插入 = 单语句多 VALUES（仓规批量写），RETURNING 回填
+// id / created_at；断言含两组 VALUES（正则 `\),\(`）。
+func TestCreateChunks(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO "document_chunks".*VALUES.*\),\(.*`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(100, now).AddRow(101, now))
+	mock.ExpectCommit()
+
+	cs := []ragsvc.DocumentChunk{
+		{DocumentID: 9, KnowledgeBaseID: 1, ChunkIndex: 1, Content: "第一块", TokenCount: 3, Embedding: pgvector.NewVector([]float32{0.1, 0.2})},
+		{DocumentID: 9, KnowledgeBaseID: 1, ChunkIndex: 2, Content: "第二块", TokenCount: 3, Embedding: pgvector.NewVector([]float32{0.3, 0.4})},
+	}
+	err := s.CreateChunks(context.Background(), cs)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(100), cs[0].ID, "RETURNING 回填 id")
+	assert.Equal(t, uint64(101), cs[1].ID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 空切片直返防御：零 SQL（终态事务逐批调用，空批不发 INSERT）。
+func TestCreateChunksEmpty(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+
+	err := s.CreateChunks(context.Background(), nil)
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet()) // 无期望 = 无 SQL 发出
+}
+
+func TestListIngestingDocuments(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(listIngestingSQL)).
+		WithArgs(ragsvc.StatusPending, ragsvc.StatusProcessing).
+		WillReturnRows(sqlmock.NewRows(docCols).
+			AddRow(docVals(9, 1, ragsvc.StatusPending, 0, now)...).
+			AddRow(docVals(10, 1, ragsvc.StatusProcessing, 0, now)...))
+
+	docs, err := s.ListIngestingDocuments(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, docs, 2)
+	assert.Equal(t, ragsvc.StatusPending, docs[0].Status)
+	assert.Equal(t, ragsvc.StatusProcessing, docs[1].Status)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}

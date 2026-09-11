@@ -272,3 +272,77 @@ func (s *Store) SearchChunks(ctx context.Context, kbIDs []uint64, query []float3
 	}
 	return hits, nil
 }
+
+// ---- 管线（spec 07） ----
+
+// MarkDocumentProcessing pending→processing 翻转（严格状态机：WHERE 含 status='pending'
+// 前置条件）；RowsAffected=0（非 pending / 不存在）返回 gorm.ErrRecordNotFound——
+// 管线中止。updated_at 由 autoUpdateTime 维护。
+func (s *Store) MarkDocumentProcessing(ctx context.Context, id uint64) error {
+	res := s.db.WithContext(ctx).Model(&ragsvc.Document{}).
+		Where("id = ?", id).
+		Where("status = ?", ragsvc.StatusPending).
+		Update("status", ragsvc.StatusProcessing)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// MarkDocumentReady processing→ready 终态（严格状态机：WHERE 含 status='processing'
+// 前置条件），chunk_count 与 ready 原子同写（不变量规则 1：终态事务内调用）；0 行
+// 返回 gorm.ErrRecordNotFound——事务回滚，已插入的 chunks 不落孤儿。
+func (s *Store) MarkDocumentReady(ctx context.Context, id uint64, chunkCount int) error {
+	res := s.db.WithContext(ctx).Model(&ragsvc.Document{}).
+		Where("id = ?", id).
+		Where("status = ?", ragsvc.StatusProcessing).
+		Updates(map[string]any{
+			"status":      ragsvc.StatusReady,
+			"chunk_count": chunkCount,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// MarkDocumentFailed 置 failed + error_message（WHERE status IN ('pending','processing')
+// ——覆盖 pending 态失败与 Recovery 扫描）；0 行返回 nil 静默：markFailed 是尽力而为
+// 的最后一步，文档已终态 / 已删不构成错误路径。
+func (s *Store) MarkDocumentFailed(ctx context.Context, id uint64, message string) error {
+	res := s.db.WithContext(ctx).Model(&ragsvc.Document{}).
+		Where("id = ?", id).
+		Where("status IN ?", []string{ragsvc.StatusPending, ragsvc.StatusProcessing}).
+		Updates(map[string]any{
+			"status":        ragsvc.StatusFailed,
+			"error_message": message,
+		})
+	return res.Error // 0 行静默（spec 07 §3 拍板）
+}
+
+// CreateChunks 批量插入分块：db.Create 切片 = 单语句多 VALUES（仓规批量写）；空切片
+// 直返防御（终态事务逐批调用，空批不发 INSERT）。append-only 表无 updated_at。
+func (s *Store) CreateChunks(ctx context.Context, cs []ragsvc.DocumentChunk) error {
+	if len(cs) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).Create(&cs).Error
+}
+
+// ListIngestingDocuments 扫全部入库中文档（Recovery 用，spec 07 §4）：WHERE status IN
+// ('pending','processing') 命中 partial idx idx_documents_ingesting；软删行被
+// DeletedAt 过滤；无分页（单实例内部工具量级可控）。
+func (s *Store) ListIngestingDocuments(ctx context.Context) ([]ragsvc.Document, error) {
+	var docs []ragsvc.Document
+	err := s.db.WithContext(ctx).Model(&ragsvc.Document{}).
+		Where("status IN ?", []string{ragsvc.StatusPending, ragsvc.StatusProcessing}).
+		Select(selectDocument).
+		Find(&docs).Error
+	return docs, err
+}

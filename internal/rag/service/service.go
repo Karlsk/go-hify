@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"golang.org/x/sync/semaphore"
 	"gorm.io/gorm"
 
 	"github.com/Karlsk/go-hify/internal/platform/cache"
@@ -64,6 +66,25 @@ type Store interface {
 	// content；软删 / 不存在的 id 无键（悬空 → ""）；空 ids 返回空 map 不发 SQL。
 	GetDocumentMetasByIDs(ctx context.Context, ids []uint64) (map[uint64]string, error)
 
+	// MarkDocumentProcessing pending→processing 翻转（spec 07 §3，严格状态机：
+	// WHERE id AND status='pending'）；RowsAffected=0 返回 gorm.ErrRecordNotFound
+	//（文档已不在待处理态，管线中止）。
+	MarkDocumentProcessing(ctx context.Context, id uint64) error
+	// MarkDocumentReady processing→ready 终态（spec 07 §3，严格状态机：WHERE id AND
+	// status='processing'），chunk_count 与 ready 原子同写（不变量规则 1）；RowsAffected=0
+	// 返回 gorm.ErrRecordNotFound——终态事务回滚，chunks 不落孤儿。
+	MarkDocumentReady(ctx context.Context, id uint64, chunkCount int) error
+	// MarkDocumentFailed 置 failed + error_message（spec 07 §3，WHERE id AND status IN
+	// ('pending','processing')——覆盖 pending 态失败与 Recovery 扫描）；RowsAffected=0
+	// 返回 nil 静默：markFailed 是尽力而为的最后一步，文档已终态 / 已删不构成错误。
+	MarkDocumentFailed(ctx context.Context, id uint64, message string) error
+	// CreateChunks 批量插入分块（spec 07 §3）：切片插入 = 单语句多 VALUES（仓规批量
+	// 写；终态事务内逐批调用，每批 ≤ EmbedBatchSize 行）；空切片直返不发 SQL。
+	CreateChunks(ctx context.Context, cs []DocumentChunk) error
+	// ListIngestingDocuments 扫全部入库中文档（spec 07 §4）：WHERE status IN
+	// ('pending','processing') 命中 partial idx idx_documents_ingesting；Recovery 用。
+	ListIngestingDocuments(ctx context.Context) ([]Document, error)
+
 	// WithTx 事务包装：fn 拿到共享同一 tx 句柄的 Store（仍以 Store 接口身份传入）。
 	WithTx(ctx context.Context, fn func(tx Store) error) error
 }
@@ -91,6 +112,15 @@ type Config struct {
 	// EFSearch HNSW 查询时 ef_search（召回率 vs 延迟旋钮；服务端 config 已 clamp，
 	// 非用户输入——RAG_EF_SEARCH，默认 80）。
 	EFSearch int
+	// ChunkSize 分块目标尺寸（rune，递归分割，spec 06 §2；RAG_CHUNK_SIZE，默认 500）。
+	ChunkSize int
+	// ChunkOverlap 相邻块重叠（上一块尾部前缀，rune；RAG_CHUNK_OVERLAP，默认 80）。
+	ChunkOverlap int
+	// EmbedBatchSize embedding 单批条数（spec 07 §2 环节 7；RAG_EMBED_BATCH_SIZE，
+	// 默认 32）。
+	EmbedBatchSize int
+	// IngestConcurrency 入库管线并发（每文档一个槽；RAG_INGEST_CONCURRENCY，默认 2）。
+	IngestConcurrency int
 }
 
 // cacheKeyDetail KB 详情缓存 key 模板（NameRag 命名空间内，agent cacheKeyDetail 同款）。
@@ -118,15 +148,28 @@ func isFKViolation(err error) bool {
 type kbService struct {
 	store  Store
 	models providerapi.ModelService // 建库时嵌入模型预检（provider api 注入）
-	embeds embedder                  // 检索向量化（05 消费；本篇仅持有）
-	cache  cacheManager              // KB 配置缓存（NameRag，Cache-Aside）
+	embeds embedder                 // 检索 / 入库向量化（05 Retrieve 与 07 管线共用）
+	cache  cacheManager             // KB 配置缓存（NameRag，Cache-Aside）
 	cfg    Config
+
+	// 入库管线（spec 07 §1）：dispatch 可注入（测试同步直调），sem 限并发文档数；
+	// acquireWait 抢槽超时（默认 2s 常量，测试注入短值防慢）。
+	dispatch    func(ctx context.Context, docID uint64)
+	sem         *semaphore.Weighted
+	acquireWait time.Duration
 }
 
-// New 构造 KnowledgeBaseService。本篇单返回；07 加 pipeline 后改 (api, *Recovery)
-// 双返回（provider (api, Prober) 先例）。
-func New(store Store, models providerapi.ModelService, embeds embedder, cm cacheManager, cfg Config) ragapi.KnowledgeBaseService {
-	return &kbService{store: store, models: models, embeds: embeds, cache: cm, cfg: cfg}
+// New 构造 KnowledgeBaseService 与 Recovery（provider (api, Prober) 双返回先例）：
+// api 面注入 handler / 上游模块；*Recovery 由组合根调 MarkInterruptedFailed
+// （08 装配）——服务重启把残留 pending/processing 置 failed 的自愈入口。
+func New(store Store, models providerapi.ModelService, embeds embedder, cm cacheManager, cfg Config) (ragapi.KnowledgeBaseService, *Recovery) {
+	s := &kbService{
+		store: store, models: models, embeds: embeds, cache: cm, cfg: cfg,
+		sem:         semaphore.NewWeighted(int64(max(cfg.IngestConcurrency, 1))),
+		acquireWait: ingestAcquireWait,
+	}
+	s.dispatch = s.dispatchIngest
+	return s, &Recovery{svc: s}
 }
 
 // Create 建库：嵌入模型预检（capability / dim / enabled，预检顺序即 spec 端点 1 错误
@@ -351,6 +394,7 @@ func (s *kbService) UploadDocument(ctx context.Context, req ragapi.UploadDocumen
 	}
 	// pending 恒 0 chunks / 空 error_message；DocumentCount 变化 → evict KB detail（澄清拍板）
 	s.evict(ctx, fmt.Sprintf(cacheKeyDetail, req.KnowledgeBaseID))
+	s.dispatch(ctx, d.ID) // 异步入库管线（spec 07 §5 接线；dispatchIngest 内部脱钩请求 ctx）
 	schema := toDocumentSchema(d)
 	return &schema, nil
 }
@@ -453,6 +497,7 @@ func (s *kbService) ReindexDocument(ctx context.Context, req ragapi.ReindexDocum
 	if err != nil {
 		return nil, fmt.Errorf("reload document %d after reindex: %w", req.ID, err)
 	}
+	s.dispatch(ctx, req.ID) // 重跑入库管线（spec 07 §5 接线）
 	schema := toDocumentSchema(fresh)
 	return &schema, nil
 }
