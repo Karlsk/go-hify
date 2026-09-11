@@ -67,9 +67,12 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 	}
 
 	// 环节 4：extractText（TXT/MD 纯文本直取，二进制拒之门外已在 UploadDocument.Validate）。
+	// 认领 processing 后的失败（环节 4-9）一律 markFailed（spec 07 §2 环节 9「失败统一
+	// markFailed」）——否则文档永久卡 processing（reindex 恒 409，只能靠重启 Recovery 收尸）。
 	text, err := extractText(doc)
 	if err != nil {
 		slog.ErrorContext(ctx, "pipeline: extractText failed", "document_id", docID, "err", err)
+		s.markFailed(ctx, docID, err.Error())
 		return
 	}
 
@@ -84,14 +87,17 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 	embedOpts, err := s.resolveEmbedOptions(ctx, doc.KnowledgeBaseID)
 	if err != nil {
 		slog.ErrorContext(ctx, "pipeline: resolveEmbedOptions failed", "document_id", docID, "err", err)
+		s.markFailed(ctx, docID, err.Error())
 		return
 	}
 
 	// 环节 7：embedChunks（按 EmbedBatchSize 分批 + 每向量校验 len==1536 + 累计
 	// prompt_tokens）。embedding 永不进事务——超时/重试/熔断在 platform/llm 内。
+	// 批次失败不跳过（spec 07 §2）：整文档 failed（error_message 带批次号）。
 	vectors, promptTokens, err := s.embedChunks(ctx, embedOpts, rawChunks)
 	if err != nil {
 		slog.ErrorContext(ctx, "pipeline: embedChunks failed", "document_id", docID, "err", err)
+		s.markFailed(ctx, docID, err.Error())
 		return
 	}
 
@@ -102,8 +108,11 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 	// 环节 9：commitReady（终态事务原子：CreateChunks + MarkDocumentReady）。
 	if err := s.commitReady(ctx, docID, chunks, promptTokens); err != nil {
 		slog.ErrorContext(ctx, "pipeline: commitReady failed", "document_id", docID, "err", err)
+		s.markFailed(ctx, docID, err.Error())
 		return
 	}
+	slog.InfoContext(ctx, "pipeline: document ready",
+		"document_id", docID, "chunks", len(chunks), "prompt_tokens", promptTokens)
 }
 
 // resolveEmbedOptions 环节 6：ResolveLLMConfig → EmbedOptions（明文凭据

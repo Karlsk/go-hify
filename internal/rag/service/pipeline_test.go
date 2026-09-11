@@ -210,11 +210,13 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 		longContent += "abcdefghij"
 	}
 	cases := []struct {
-		name       string
-		store      *stubStore
-		models     *stubModels
-		embeds     *stubEmbedder
-		cfg        Config
+		name          string
+		store         *stubStore
+		models        *stubModels
+		embeds        *stubEmbedder
+		cfg           Config
+		wantMarkFailed bool // 认领 processing 后的失败（spec 07 §2 环节 9）→ markFailed；认领前（环节 3）→ 仅记日志
+		failMsg       string // markFailed 消息应含的错误上下文片段
 	}{
 		{
 			name: "MarkDocumentProcessing 失败",
@@ -222,14 +224,15 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 				d := docFixture(7, 1, StatusPending)
 				d.Content = longContent
 				return &stubStore{
-					docsByID:         map[uint64]*Document{7: d},
-					kbByID:           map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+					docsByID:          map[uint64]*Document{7: d},
+					kbByID:            map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
 					markProcessingErr: errors.New("optimistic lock conflict"),
 				}
 			}(),
-			models:     &stubModels{resolveCfg: resolveCfgOK()},
-			embeds:     &stubEmbedder{embedVecs: [][]float32{embedVec()}},
-			cfg:        pipelineCfg(),
+			models:         &stubModels{resolveCfg: resolveCfgOK()},
+			embeds:         &stubEmbedder{embedVecs: [][]float32{embedVec()}},
+			cfg:            pipelineCfg(),
+			wantMarkFailed: false, // 认领前失败仅记日志：0 行=状态机拒绝（并发认领/已终态），markFailed 会误杀并发方
 		},
 		{
 			name: "extractText 失败（不支持的文件类型）",
@@ -242,9 +245,11 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 					kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
 				}
 			}(),
-			models:     &stubModels{resolveCfg: resolveCfgOK()},
-			embeds:     &stubEmbedder{embedVecs: [][]float32{embedVec()}},
-			cfg:        pipelineCfg(),
+			models:         &stubModels{resolveCfg: resolveCfgOK()},
+			embeds:         &stubEmbedder{embedVecs: [][]float32{embedVec()}},
+			cfg:            pipelineCfg(),
+			wantMarkFailed: true,
+			failMsg:        "pdf",
 		},
 		{
 			name: "resolveEmbedOptions 失败（模型悬空）",
@@ -256,9 +261,11 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 					kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
 				}
 			}(),
-			models:     &stubModels{resolveErr: providerapi.ErrModelNotFound},
-			embeds:     &stubEmbedder{},
-			cfg:        pipelineCfg(),
+			models:         &stubModels{resolveErr: providerapi.ErrModelNotFound},
+			embeds:         &stubEmbedder{},
+			cfg:            pipelineCfg(),
+			wantMarkFailed: true,
+			failMsg:        "resolve llm config",
 		},
 		{
 			name: "embedChunks 失败（EmbedStrings 错误）",
@@ -270,9 +277,11 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 					kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
 				}
 			}(),
-			models:     &stubModels{resolveCfg: resolveCfgOK()},
-			embeds:     &stubEmbedder{embedErr: errors.New("rate limited")},
-			cfg:        pipelineCfg(),
+			models:         &stubModels{resolveCfg: resolveCfgOK()},
+			embeds:         &stubEmbedder{embedErr: errors.New("rate limited")},
+			cfg:            pipelineCfg(),
+			wantMarkFailed: true,
+			failMsg:        "rate limited",
 		},
 		{
 			name: "commitReady 失败（CreateChunks 错误）",
@@ -280,14 +289,16 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 				d := docFixture(7, 1, StatusPending)
 				d.Content = longContent
 				return &stubStore{
-					docsByID:       map[uint64]*Document{7: d},
-					kbByID:         map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+					docsByID:        map[uint64]*Document{7: d},
+					kbByID:          map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
 					createChunksErr: errors.New("disk full"),
 				}
 			}(),
-			models:     &stubModels{resolveCfg: resolveCfgOK()},
-			embeds:     &stubEmbedder{embedVecs: embedVecsN(10)}, // 足够多向量，确保不因维度不足 panic
-			cfg:        pipelineCfg(),
+			models:         &stubModels{resolveCfg: resolveCfgOK()},
+			embeds:         &stubEmbedder{embedVecs: embedVecsN(10)}, // 足够多向量，确保不因维度不足 panic
+			cfg:            pipelineCfg(),
+			wantMarkFailed: true,
+			failMsg:        "disk full",
 		},
 	}
 	for _, tc := range cases {
@@ -302,6 +313,17 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 			// commitReady 内部失败时 CreateChunks 可能被调用（tx 回滚），但 MarkDocumentReady
 			// 不会被调用（严格状态机 WHERE status='processing' 保持不变）。
 			assert.Equal(t, 0, tc.store.markReadyCalls, "MarkDocumentReady 零调用（终态不可达）")
+
+			// 认领后的失败（spec 07 §2 环节 9「失败统一 markFailed」）：不得把文档永久留在
+			// processing——reindex 恒 409、只能靠重启 Recovery 收尸（端到端走查实测发现）。
+			if tc.wantMarkFailed {
+				require.Equal(t, 1, tc.store.numMarkFailedCalls(), "认领后失败 → markFailed 1 次")
+				_, msgs := tc.store.markFailedSnapshot()
+				require.Len(t, msgs, 1)
+				assert.Contains(t, msgs[0], tc.failMsg, "失败消息含错误上下文")
+			} else {
+				assert.Equal(t, 0, tc.store.numMarkFailedCalls(), "认领前失败 → 不 markFailed")
+			}
 		})
 	}
 }
