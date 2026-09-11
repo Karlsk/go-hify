@@ -43,6 +43,11 @@ type EmbedOptions struct {
 	BaseURL string
 	APIKey  string
 	Model   string
+	// Dimensions 输出维度（Matryoshka 截断，仅支持截断的模型有效，如 Qwen3-Embedding
+	// 2560→1536、text-embedding-3 系列）；>0 时 openai_compatible 请求体带 dimensions
+	// 字段，零值不发（老网关对未知字段可能 4xx，按需显式开启）。维度校验仍在调用方
+	//（rag 按向量列 1536 钉死）——platform 不 import 业务常量，值由 rag 侧注入。
+	Dimensions int
 }
 
 // EmbedResult 一次批量 embedding 的结果：向量按 inputs 顺序归位；
@@ -261,9 +266,15 @@ type openaiEmbedResp struct {
 	} `json:"usage"`
 }
 
-// openaiEmbedTarget POST {base}/embeddings + Bearer（调研 embedding_api.md §1）。
+// openaiEmbedTarget POST {base}/embeddings + Bearer（调研 embedding_api.md §1）；
+// opts.Dimensions > 0 时附 dimensions 输出维度参数（Matryoshka 截断，探针实测
+// SiliconFlow Qwen3-Embedding / OpenAI text-embedding-3 系列均支持）。
 func openaiEmbedTarget(base string, opts EmbedOptions, inputs []string) (embedReq, error) {
-	body, err := json.Marshal(map[string]any{"model": opts.Model, "input": inputs})
+	payload := map[string]any{"model": opts.Model, "input": inputs}
+	if opts.Dimensions > 0 {
+		payload["dimensions"] = opts.Dimensions
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return embedReq{}, fmt.Errorf("llm: embed: marshal openai body: %w", err)
 	}

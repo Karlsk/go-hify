@@ -213,6 +213,55 @@ func TestEmbedStrings_OpenAICompatible(t *testing.T) {
 	}
 }
 
+// Dimensions 输出维度参数（Matryoshka 截断，如 Qwen3-Embedding 2560→1536）：
+// >0 时 openai_compatible 请求体带 dimensions；=0（零值）不带——老网关对未知字段可能
+// 4xx，只在调用方显式要求时才发（rag 侧填 RequiredEmbeddingDim，platform 不 import 业务常量）。
+func TestEmbedStrings_OpenAIDimensions(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		dimensions int
+		wantSent   bool
+	}{
+		{"正数带 dimensions", 1536, true},
+		{"零值不带 dimensions（向后兼容）", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var raw map[string]json.RawMessage
+			e, srv := newEmbedServer(t, func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read body: %v", err)
+					return
+				}
+				if err := json.Unmarshal(body, &raw); err != nil {
+					t.Errorf("unmarshal body %s: %v", body, err)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1]}]}`))
+			})
+			opts := embedOpts(KindOpenAICompatible, srv.URL)
+			opts.Dimensions = tc.dimensions
+			if _, err := e.EmbedStrings(context.Background(), opts, []string{"x"}); err != nil {
+				t.Fatalf("EmbedStrings: %v", err)
+			}
+			_, sent := raw["dimensions"]
+			if sent != tc.wantSent {
+				t.Fatalf("dimensions 字段存在 = %v, want %v（原始请求体字段集: %v）", sent, tc.wantSent, raw)
+			}
+			if tc.wantSent {
+				var got int
+				if err := json.Unmarshal(raw["dimensions"], &got); err != nil || got != tc.dimensions {
+					t.Fatalf("dimensions = %s, want %d", raw["dimensions"], tc.dimensions)
+				}
+			}
+		})
+	}
+}
+
 // openai_compatible 响应防御：index 越界 / 缺槽（返回条目少于输入）→ 错误（不信任外部数据）。
 func TestEmbedStrings_OpenAIBadIndex(t *testing.T) {
 	cases := []struct {
