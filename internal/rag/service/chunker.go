@@ -1,5 +1,5 @@
 // chunker.go —— 分块与解析（spec 06）：解析槽位 + 递归分割 + token 估算，全部纯函数
-//（零 IO / 零 goroutine）；消费方 = spec 07 入库管线。
+// （零 IO / 零 goroutine）；消费方 = spec 07 入库管线。
 package service
 
 import (
@@ -22,8 +22,8 @@ func extractText(doc *Document) (string, error) {
 }
 
 // estimateTokens token 估算（spec 06 §3）= ceil(ASCII 字符数/4 + 非ASCII 字符数)
-//（cl100k 经验值：英文 ≈4 char/token、中文 ≈1-1.5）。写入 DocumentChunk.TokenCount
-//（07 组装时调用）；embedding API 只有批量级 usage 无按条计数，估算列够用。
+// （cl100k 经验值：英文 ≈4 char/token、中文 ≈1-1.5）。写入 DocumentChunk.TokenCount
+// （07 组装时调用）；embedding API 只有批量级 usage 无按条计数，估算列够用。
 func estimateTokens(content string) int {
 	ascii, nonASCII := 0, 0
 	for _, r := range content {
@@ -204,7 +204,7 @@ func hardCut(text string, size int) []string {
 }
 
 // splitParagraphs 段落切分（规则 1）：按 \n\n 切段、空段丢弃、段落外空白剥离
-//（段内换行 / 缩进保留）。
+// （段内换行 / 缩进保留）。
 func splitParagraphs(content string) []unit {
 	var units []unit
 	for _, para := range strings.Split(content, "\n\n") {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
@@ -104,20 +105,31 @@ func (s *stubStore) ListIngestingDocuments(_ context.Context) ([]Document, error
 // ---- dispatchIngest（spec 07 §1：WithoutCancel + 抢槽超时置 failed） ----
 
 // TestDispatchIngestWithoutCancel 已取消的请求 ctx 下管线仍执行（spec 07 §1 最易
-// 写错处）：WithoutCancel 脱钩取消信号、保留 trace 值；processDocument 被调（观察
-// loadDocument 的 store 读），且不落 failed——若误透传 ctx，sem.Acquire 立即失败、
-// 文档被错置 failed，断言即破。
+// 写错处）：WithoutCancel 脱钩取消信号、保留 trace 值。确定性设计——getDocByIDFn
+// 做成阻塞门闩：管线启动即关 entered（若误透传 ctx，sem.Acquire 立即失败退场，
+// entered 永不关闭，2s 超时即破）；放行后返回 not-found（环节 2 认领前路径，只记
+// 日志恒不 markFailed）——「取消不是失败」的断言由此摆脱 goroutine 时序竞态。
 func TestDispatchIngestWithoutCancel(t *testing.T) {
-	st := &stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, StatusPending)}}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	st := &stubStore{getDocByIDFn: func(_ context.Context, _ uint64) (*Document, error) {
+		close(entered)
+		<-release
+		return nil, gorm.ErrRecordNotFound
+	}}
 	svc := newPipelineSvc(st, &stubModels{}, nil, nil, pipelineCfg())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 模拟 202 返回后请求 ctx 结束
 	svc.dispatchIngest(ctx, 9)
 
-	assert.Eventually(t, func() bool { return st.numGetDocCalls() >= 1 },
-		time.Second, 5*time.Millisecond, "取消 ctx 下 processDocument 仍须执行（WithoutCancel）")
-	assert.Equal(t, 0, st.numMarkFailedCalls(), "取消不是失败：不得错置 failed")
+	select {
+	case <-entered: // 取消 ctx 下 processDocument 已启动（WithoutCancel 生效）
+	case <-time.After(2 * time.Second):
+		t.Fatal("取消 ctx 下 processDocument 未启动（WithoutCancel 失效：sem.Acquire 被取消信号击穿）")
+	}
+	close(release)
+	assert.Equal(t, 0, st.numMarkFailedCalls(), "取消不是失败：not-found 认领前路径不得错置 failed")
 }
 
 // TestDispatchIngestAcquireTimeout 抢槽 2s 超时（测试注入 10ms）→ 置 failed

@@ -124,7 +124,7 @@ func TestSplitChunksSentenceFallback(t *testing.T) {
 }
 
 // TestSplitChunksHardCut 无标点硬截（spec 06 §2 规则 3）：单句 / 单元仍超 size
-//（URL、长串）按 rune 硬截——多字节字符不撕裂，恰好整除不留尾块。
+// （URL、长串）按 rune 硬截——多字节字符不撕裂，恰好整除不留尾块。
 func TestSplitChunksHardCut(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -229,12 +229,12 @@ func TestEstimateTokens(t *testing.T) {
 		want    int
 	}{
 		{"空串", "", 0},
-		{"纯 ASCII 整除", "abcdefgh", 2},      // 8/4
-		{"纯 ASCII 非整除进位", "abcde", 2},    // ceil(5/4)
-		{"单 ASCII 字符", "a", 1},            // ceil(1/4)
-		{"纯中文一字一 token", "中文五个字", 5}, // 非ASCII 逐字计
-		{"混合", "abc中文", 1 + 2},           // ceil(3/4)=1 + 2
-		{"空白换行计入 ASCII", "a b\nc", 2},   // 5 ASCII → ceil(5/4)
+		{"纯 ASCII 整除", "abcdefgh", 2}, // 8/4
+		{"纯 ASCII 非整除进位", "abcde", 2}, // ceil(5/4)
+		{"单 ASCII 字符", "a", 1},        // ceil(1/4)
+		{"纯中文一字一 token", "中文五个字", 5},  // 非ASCII 逐字计
+		{"混合", "abc中文", 1 + 2},        // ceil(3/4)=1 + 2
+		{"空白换行计入 ASCII", "a b\nc", 2}, // 5 ASCII → ceil(5/4)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
