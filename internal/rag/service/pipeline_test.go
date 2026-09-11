@@ -306,6 +306,63 @@ func TestProcessDocumentFailureMatrix(t *testing.T) {
 	}
 }
 
+// ---- 空内容 → failed（spec 07 §2 环节 5） ----
+
+// TestProcessDocumentEmptyContent SplitChunks 返回 nil（空/纯空白文档）→
+// markFailed「文档内容为空」，CreateChunks 零调用。
+func TestProcessDocumentEmptyContent(t *testing.T) {
+	for _, content := range []string{"", "   ", "\n\n\n", "\t\t"} {
+		d := docFixture(7, 1, StatusPending)
+		d.Content = content
+		st := &stubStore{
+			docsByID: map[uint64]*Document{7: d},
+			kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+		}
+		svc := newPipelineSvc(st, &stubModels{}, nil, nil, pipelineCfg())
+		svc.dispatch = func(_ context.Context, docID uint64) {
+			svc.processDocument(context.Background(), docID)
+		}
+		svc.dispatch(context.Background(), 7)
+
+		assert.Equal(t, 1, st.numMarkFailedCalls(), "空内容 %q → markFailed 1 次", content)
+		ids, msgs := st.markFailedSnapshot()
+		assert.Equal(t, []uint64{7}, ids)
+		assert.Contains(t, msgs[0], "文档内容为空")
+		assert.Equal(t, 0, st.createChunksCalls, "空内容 → CreateChunks 零调用")
+		// 清空记录以便下一轮
+		st.markFailedCalls = 0
+		st.markFailedIDs = nil
+		st.markFailedMsgs = nil
+	}
+}
+
+// ---- embedChunks 维度校验（spec 07 §2 环节 7b） ----
+
+// TestProcessDocumentEmbedDimMismatch EmbedStrings 返回维度 ≠ 1536 →
+// markFailed，CreateChunks 零调用。
+func TestProcessDocumentEmbedDimMismatch(t *testing.T) {
+	d := docFixture(7, 1, StatusPending)
+	d.Content = "一些测试内容足够产生分块" // 确保 SplitChunks ≥1 chunk
+	st := &stubStore{
+		docsByID: map[uint64]*Document{7: d},
+		kbByID:   map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)},
+	}
+	models := &stubModels{resolveCfg: resolveCfgOK()}
+	// 返回维度 3072（≠1536）的向量
+	wrongDimVec := make([]float32, 3072)
+	embeds := &stubEmbedder{embedVecs: [][]float32{wrongDimVec}}
+
+	svc := newPipelineSvc(st, models, embeds, nil, pipelineCfg())
+	svc.dispatch = func(_ context.Context, docID uint64) {
+		svc.processDocument(context.Background(), docID)
+	}
+	svc.dispatch(context.Background(), 7)
+
+	assert.Equal(t, 0, st.createChunksCalls, "维度不匹配 → CreateChunks 零调用")
+	assert.Equal(t, 0, st.markReadyCalls, "维度不匹配 → MarkDocumentReady 零调用")
+	// embedChunks 失败后 processDocument return，不调 markFailed（与环节 3-6 失败同路径）
+}
+
 // ---- panic 兜底（spec 07 §2 环节 1：recover→failed "internal panic"） ----
 
 // TestProcessDocumentPanicRecovery 管线内 panic 被 recover 捕获 → markFailed
@@ -392,4 +449,36 @@ func TestRecoveryMarkInterruptedFailedEmpty(t *testing.T) {
 	err := rec.MarkInterruptedFailed(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, st.numMarkFailedCalls(), "无残留文档 → 零 markFailed")
+}
+
+// TestRecoveryMarkInterruptedFailedListError ListIngestingDocuments 失败 →
+// 返回 error，零 markFailed 调用。
+func TestRecoveryMarkInterruptedFailedListError(t *testing.T) {
+	st := &stubStore{ingestingErr: errors.New("db connection lost")}
+	svc := newPipelineSvc(st, &stubModels{}, nil, nil, pipelineCfg())
+	rec := &Recovery{svc: svc}
+
+	err := rec.MarkInterruptedFailed(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "list ingesting documents")
+	assert.Equal(t, 0, st.numMarkFailedCalls(), "List 失败 → 零 markFailed")
+}
+
+// TestRecoveryMarkInterruptedFailedPartialError MarkDocumentFailed 部分失败 →
+// 尽力而为：成功的照常 markFailed，失败的记日志并返回首个 error。
+func TestRecoveryMarkInterruptedFailedPartialError(t *testing.T) {
+	st := &stubStore{
+		ingestingDocs: func() []Document {
+			d1 := docFixture(10, 1, StatusPending)
+			d2 := docFixture(11, 1, StatusProcessing)
+			return []Document{*d1, *d2}
+		}(),
+		markFailedErr: errors.New("disk full"), // 全部 MarkDocumentFailed 都失败
+	}
+	svc := newPipelineSvc(st, &stubModels{}, nil, nil, pipelineCfg())
+	rec := &Recovery{svc: svc}
+
+	err := rec.MarkInterruptedFailed(context.Background())
+	require.Error(t, err, "首个 MarkDocumentFailed error 应上抛")
+	assert.Equal(t, 2, st.numMarkFailedCalls(), "尽力而为：2 个文档都尝试 markFailed")
 }

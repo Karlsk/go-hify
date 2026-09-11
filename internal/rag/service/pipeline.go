@@ -75,6 +75,10 @@ func (s *kbService) processDocument(ctx context.Context, docID uint64) {
 
 	// 环节 5：SplitChunks（递归段落→句子→硬截三级降级，MD 围栏原子保护）。
 	rawChunks := SplitChunks(text, s.cfg.ChunkSize, s.cfg.ChunkOverlap)
+	if len(rawChunks) == 0 {
+		s.markFailed(ctx, docID, "文档内容为空")
+		return
+	}
 
 	// 环节 6：resolveEmbedOptions（ResolveLLMConfig → 明文凭据瞬间存在，用后即弃）。
 	embedOpts, err := s.resolveEmbedOptions(ctx, doc.KnowledgeBaseID)
