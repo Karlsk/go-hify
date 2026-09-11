@@ -24,7 +24,7 @@ Hify 是简化版 Dify 的 AI Agent 开发平台。约束（一切决策的前�
 
 **降级做（做，但砍到最小）：**
 
-- 知识库 + RAG：一期只支持 TXT / MD 纯文本文档，固定长度分块，pgvector 向量召回（建表即建 HNSW 索引）
+- 知识库 + RAG：一期只支持 TXT / MD 纯文本文档，递归分割分块（段落→句子→硬截三级降级，MD 围栏原子保护），pgvector 向量召回（建表即建 HNSW 索引）
 - 简版工作流：JSON 配置，线性 + 条件分支
 
 **护栏与可观测：**
@@ -92,7 +92,7 @@ internal/
 ├── provider/                 # 模型提供商：API Key 加密存储、连通性探测、模型列表
 ├── agent/                    # Agent 配置：选模型、绑 MCP 工具、系统提示词
 ├── chat/                     # 对话引擎：SSE 流式、多轮上下文、工具调用循环
-├── rag/                      # 知识库：TXT/MD 解析、固定长度分块、pgvector 召回
+├── rag/                      # 知识库：TXT/MD 解析、递归分割分块、pgvector 召回
 ├── workflow/                 # 简版工作流：JSON 配置、线性 + 条件分支
 ├── mcp/                      # MCP 工具接入
 ├── auth/                     # 最简登录
