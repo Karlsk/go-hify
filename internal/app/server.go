@@ -41,6 +41,9 @@ import (
 	providerhandler "github.com/Karlsk/go-hify/internal/provider/handler"
 	providersvc "github.com/Karlsk/go-hify/internal/provider/service"
 	providerstore "github.com/Karlsk/go-hify/internal/provider/store"
+	raghandler "github.com/Karlsk/go-hify/internal/rag/handler"
+	ragsvc "github.com/Karlsk/go-hify/internal/rag/service"
+	ragstore "github.com/Karlsk/go-hify/internal/rag/store"
 )
 
 // Run 是组合根装配入口，返回非 nil error 表示启动失败（由 main.go 决定退出码）。
@@ -77,8 +80,8 @@ func Run(cfg *config.Config) error {
 	llmTransport := llm.NewSharedTransport()
 	llmManager := llm.NewManager(llm.NewUpstreamFactory(llm.NewStreamClient(llmTransport)))
 	// provider 的探测 / 模型同步走直连轻量 GET（NewJSONClient + 共享 transport），不经 Manager
-	// ——元数据请求不产生 token 消费，不占 bulkhead / 熔断。
-	_ = llmTransport
+	// ——元数据请求不产生 token 消费，不占 bulkhead / 熔断；rag 的 embedding 走独立
+	// NewEmbedder（4 槽 + 5s 超时，embed.go），与 chat 流量同 Transport 不同闸（装配见 rag 块）。
 	// TODO: platform/budget（每用户限流 + 每日预算熔断，fail-open + 80% 告警）
 
 	// appCtx：随 SIGINT / SIGTERM 取消，喂给长生命周期 goroutine（provider 定时探测、executions 分区维护）与关停流程。
@@ -121,6 +124,28 @@ func Run(cfg *config.Config) error {
 	agentCache := cache.New(rdb, cache.DefaultConfig()) // agent-cache：TTL 30min + 写时删 key
 	agentSvc := agentsvc.New(agentStore, modelSvc, agentCache)
 
+	// rag：知识库 + 入库管线 + 检索（spec 08 装配，依赖仅 provider + platform）。
+	// 建库/管线用 provider 的 ModelService（嵌入模型预检 + ResolveLLMConfig）；
+	// embedding 走 llm.Embedder（共享 Transport、独立 4 槽，不挤占 chat bulkhead）；
+	// cache 独立实例（NameRag 命名空间）。New 双返回（provider Prober 先例）：
+	// Recovery 启动时扫残留 pending/processing → 置 failed「服务重启中断」（spec 07 §4），
+	// 尽力而为——失败仅 WARN 不阻断启动。
+	ragStore := ragstore.New(gormDB)
+	ragCache := cache.New(rdb, cache.DefaultConfig()) // rag-cache：TTL 30min + 写时删 key
+	embedder := llm.NewEmbedder(llmTransport)         // 复用共享 Transport（keep-alive/TLS 复用）
+	ragCfg := ragsvc.Config{
+		TopK:              cfg.Rag.TopK,
+		EFSearch:          cfg.Rag.EFSearch,
+		ChunkSize:         cfg.Rag.ChunkSize,
+		ChunkOverlap:      cfg.Rag.ChunkOverlap,
+		EmbedBatchSize:    cfg.Rag.EmbedBatchSize,
+		IngestConcurrency: cfg.Rag.IngestConcurrency,
+	}
+	ragSvc, ragRecovery := ragsvc.New(ragStore, modelSvc, embedder, ragCache, ragCfg)
+	if err := ragRecovery.MarkInterruptedFailed(appCtx); err != nil {
+		slog.Warn("rag recovery: mark interrupted documents failed", "err", err)
+	}
+
 	// chat：对话引擎（依赖图最外层，零被依赖——将来可整体拆成独立服务）。
 	// 依赖方向：chat → agent（agentGetter）→ provider（llmConfigResolver）→ platform/llm（llmClientFactory）
 	//           chat → platform/logging（executionWriter）。
@@ -129,7 +154,7 @@ func Run(cfg *config.Config) error {
 	execStore := logging.NewExecutionStore(gormDB) // executions 表写入（每次 LLM 调用一行）
 	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore)
 
-	// mcp / rag / workflow 后续批次再接入。
+	// mcp / workflow 后续批次再接入。
 
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()
@@ -153,11 +178,12 @@ func Run(cfg *config.Config) error {
 	// login/register 由中间件内部白名单放行。业务 API 一期不按用户隔离，但仍要求登录门槛。
 	v1.Use(authH.Middleware())
 	authH.RegisterRoutes(v1)
-	demohandler.New(demoSvc).RegisterRoutes(v1)                   // demo 参照实现（受登录中间件保护）
-	providerhandler.New(providerSvc, modelSvc).RegisterRoutes(v1) // provider：providers + models 双组 12 端点
-	agenthandler.New(agentSvc).RegisterRoutes(v1)                 // agent：agents 一组 5 端点
-	chathandler.New(chatSvc).RegisterRoutes(v1)                   // chat：conversations + messages 5 端点
-	// TODO: 其余模块 handler.RegisterRoutes(v1)（mcp / rag / workflow）
+	demohandler.New(demoSvc).RegisterRoutes(v1)                            // demo 参照实现（受登录中间件保护）
+	providerhandler.New(providerSvc, modelSvc).RegisterRoutes(v1)          // provider：providers + models 双组 12 端点
+	agenthandler.New(agentSvc).RegisterRoutes(v1)                          // agent：agents 一组 5 端点
+	raghandler.New(ragSvc, int(cfg.Rag.MaxUploadBytes)).RegisterRoutes(v1) // rag：KB + documents 两组 11 端点
+	chathandler.New(chatSvc).RegisterRoutes(v1)                            // chat：conversations + messages 5 端点
+	// TODO: 其余模块 handler.RegisterRoutes(v1)（mcp / workflow）
 
 	// ── ⑤ 启动（§组合根步骤 5）──────────────────────────────────────
 	slog.Info("hify ready", slog.String("addr", ":"+cfg.Server.Port), slog.String("version", version))
