@@ -1,6 +1,7 @@
 // service.go —— rag 业务层：实现 ragapi.KnowledgeBaseService 的 KB + 文档 CRUD
-// 编排（spec 04）。不变量规则 2（软删文档同事务硬删 chunks）与规则 3（reindex 事务
-// 重置）在本层编排 / store 层执行；Upload / Reindex 落 pending 后不接 dispatch（07 接线）。
+// 编排（spec 04）。不变量规则 2（文档删除 / 深度停用同事务硬删 chunks）与规则 3
+//（reindex 事务重置）在本层编排 / store 层执行；Upload / Reindex / Enable 落 pending
+// 后 dispatch 重跑入库管线（07）。无软删：DELETE=真删，可逆下架走 enabled。
 package service
 
 import (
@@ -35,35 +36,44 @@ type Store interface {
 	ListKnowledgeBases(ctx context.Context, p page.OffsetParams, name string) (page.OffsetResult[KnowledgeBase], error)
 	// UpdateKnowledgeBase 全量 Save（PUT 语义，零值一并覆盖）。
 	UpdateKnowledgeBase(ctx context.Context, kb *KnowledgeBase) error
-	// DeleteKnowledgeBase 硬删（KB 无软删；有文档挡删由 service 前置计数保证，
-	// agent_knowledge_bases 绑定由 FK CASCADE 清理）；RowsAffected=0 返回 gorm.ErrRecordNotFound。
+	// DeleteKnowledgeBase 硬删（KB 级联删除事务的最后一步；agent_knowledge_bases
+	// 绑定由 FK CASCADE 清理）；RowsAffected=0 返回 gorm.ErrRecordNotFound。
 	DeleteKnowledgeBase(ctx context.Context, id uint64) error
-	// CountAllDocumentsByKB KB 下文档总数（Unscoped 含软删——删除护栏判据，spec 04 §1）。
-	CountAllDocumentsByKB(ctx context.Context, kbID uint64) (int64, error)
-	// CountDocumentsByKBIDs 列表聚合用批量计数（活跃文档）；map 无键 = 0。
+	// DeleteChunksByKB 硬删 KB 下全部分块（KB 级联删除事务第一步；0 行合法——空库）。
+	DeleteChunksByKB(ctx context.Context, kbID uint64) error
+	// DeleteDocumentsByKB 硬删 KB 下全部文档行（KB 级联删除事务第二步；0 行合法）。
+	DeleteDocumentsByKB(ctx context.Context, kbID uint64) error
+	// CountDocumentsByKBIDs 列表聚合用批量计数（全部文档，含停用）；map 无键 = 0。
 	CountDocumentsByKBIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error)
 
 	// GetDocumentByID 按主键查（含 content 原文——大文本仅此详情路径取，禁 SELECT *
-	// 的列清单纪律）；软删行不可见；未找到返回 gorm.ErrRecordNotFound。
+	// 的列清单纪律；停用行同样可见）；未找到返回 gorm.ErrRecordNotFound。
 	GetDocumentByID(ctx context.Context, id uint64) (*Document, error)
-	// CreateDocument 插入文档行（status=pending + 元数据 + 原文）。
+	// CreateDocument 插入文档行（status=pending + enabled=true + 元数据 + 原文）。
 	CreateDocument(ctx context.Context, d *Document) error
-	// SoftDeleteDocument store 内事务：软删 documents 行 + 硬删其 chunks（不变量
-	// 规则 2，spec 01 §3）；RowsAffected=0 返回 gorm.ErrRecordNotFound。
-	SoftDeleteDocument(ctx context.Context, id uint64) error
-	// ListDocumentsByKB KB 下活跃文档 keyset 分页（id DESC）；beforeID=0 为首页。
+	// HardDeleteDocument store 内事务：硬删 documents 行 + 其 chunks（不变量规则 2，
+	// spec 01 §3）；RowsAffected=0 返回 gorm.ErrRecordNotFound。
+	HardDeleteDocument(ctx context.Context, id uint64) error
+	// DisableDocument 深度停用事务：严格状态机（enabled 且终态）命中则同事务硬删
+	// chunks + enabled=false + chunk_count=0（内容保留）；0 行返回 gorm.ErrRecordNotFound
+	//（service 重读区分 404 / 已停用幂等 / 入库中 409）。
+	DisableDocument(ctx context.Context, id uint64) error
+	// EnableDocument 重新启用：严格状态机（停用且终态）→ enabled=true + 重置 pending
+	//（service 随后 dispatch 重跑管线）；0 行返回 gorm.ErrRecordNotFound（同上区分）。
+	EnableDocument(ctx context.Context, id uint64) error
+	// ListDocumentsByKB KB 下全部文档 keyset 分页（id DESC，停用行可见）；beforeID=0 为首页。
 	ListDocumentsByKB(ctx context.Context, kbID, beforeID uint64, limit int) ([]Document, error)
 	// DeleteChunksByDocument 硬删文档全部分块（规则 2 / 3 共用；0 行合法——pending 无 chunks）。
 	DeleteChunksByDocument(ctx context.Context, documentID uint64) error
 	// ResetDocumentForReindex 重置文档供重跑入库管线（规则 3）：status=pending +
-	// error_message='' + chunk_count=0；软删行不可见；RowsAffected=0 返回 gorm.ErrRecordNotFound。
+	// error_message='' + chunk_count=0；RowsAffected=0 返回 gorm.ErrRecordNotFound。
 	ResetDocumentForReindex(ctx context.Context, id uint64) error
 
 	// SearchChunks 跨 KB 单表 ANN 召回（spec 05 §2）：事务内 SET LOCAL ef_search 后
 	// 余弦距离排序取 top limit；kbIDs ≤ MaxRetrieveKBs；Scan 目标 ChunkHit，不解析名称。
 	SearchChunks(ctx context.Context, kbIDs []uint64, query []float32, limit int, efSearch int) ([]ChunkHit, error)
 	// GetDocumentMetasByIDs 批量取文档名（引用名解析，spec 05 §2）：只读 id/name 不碰
-	// content；软删 / 不存在的 id 无键（悬空 → ""）；空 ids 返回空 map 不发 SQL。
+	// content；已删 / 不存在的 id 无键（悬空 → ""）；空 ids 返回空 map 不发 SQL。
 	GetDocumentMetasByIDs(ctx context.Context, ids []uint64) (map[uint64]string, error)
 
 	// MarkDocumentProcessing pending→processing 翻转（spec 07 §3，严格状态机：
@@ -342,20 +352,22 @@ func (s *kbService) Update(ctx context.Context, req ragapi.UpdateKnowledgeBaseRe
 	return &schema, nil
 }
 
-// Delete 硬删：KB 下仍有文档（含软删，Unscoped 计数）→ 挡删 InUse；agent 绑定由
-// FK CASCADE 清理（store 层 DELETE）。
+// Delete 级联真删：单事务 DeleteChunksByKB → DeleteDocumentsByKB → DeleteKnowledgeBase
+//（决策修订：挡删退役——DELETE 即按用户意图收尾清空，误删兜底 PG 每日备份）；KB 行
+// 0 行（不存在）→ 404 整笔回滚；agent_knowledge_bases 绑定由 FK CASCADE 清理。
 func (s *kbService) Delete(ctx context.Context, req ragapi.DeleteKnowledgeBaseReq) error {
 	if err := req.Validate(); err != nil {
 		return fmt.Errorf("validate delete knowledge base: %w", err)
 	}
-	n, err := s.store.CountAllDocumentsByKB(ctx, req.ID)
-	if err != nil {
-		return fmt.Errorf("count all documents of kb %d: %w", req.ID, err)
-	}
-	if n > 0 {
-		return ragapi.ErrKnowledgeBaseInUse
-	}
-	if err := s.store.DeleteKnowledgeBase(ctx, req.ID); err != nil {
+	if err := s.store.WithTx(ctx, func(tx Store) error {
+		if err := tx.DeleteChunksByKB(ctx, req.ID); err != nil {
+			return fmt.Errorf("delete chunks of kb %d: %w", req.ID, err)
+		}
+		if err := tx.DeleteDocumentsByKB(ctx, req.ID); err != nil {
+			return fmt.Errorf("delete documents of kb %d: %w", req.ID, err)
+		}
+		return tx.DeleteKnowledgeBase(ctx, req.ID)
+	}); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ragapi.ErrKnowledgeBaseNotFound
 		}
@@ -392,6 +404,7 @@ func (s *kbService) UploadDocument(ctx context.Context, req ragapi.UploadDocumen
 		Name:            req.Name,
 		Content:         req.Content,
 		Status:          StatusPending,
+		Enabled:         true, // 显式设值：布尔无 gorm default tag（provider 踩坑 #1）
 		FileType:        req.FileType,
 		FileSize:        req.FileSize,
 	}
@@ -423,8 +436,8 @@ func (s *kbService) GetDocument(ctx context.Context, req ragapi.GetDocumentReq) 
 	return &ragapi.DocumentDetailSchema{DocumentSchema: toDocumentSchema(d), Content: d.Content}, nil
 }
 
-// ListDocuments KB 下活跃文档游标分页（keyset id DESC）：先验 KB 归属；坏 cursor →
-// ErrValidationFailed 包装（400）。
+// ListDocuments KB 下全部文档游标分页（keyset id DESC，停用行可见——深度停用不是
+// 删除）：先验 KB 归属；坏 cursor → ErrValidationFailed 包装（400）。
 func (s *kbService) ListDocuments(ctx context.Context, req ragapi.ListDocumentsReq) (*ragapi.DocumentListResult, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate list documents: %w", err)
@@ -455,8 +468,8 @@ func (s *kbService) ListDocuments(ctx context.Context, req ragapi.ListDocumentsR
 	return &ragapi.DocumentListResult{Items: items, Limit: res.Limit, HasMore: res.HasMore, NextCursor: res.NextCursor}, nil
 }
 
-// DeleteDocument 软删文档行，事务内硬删其 chunks（不变量规则 2 的执行在 store）；
-// evict 所属 KB 的 detail key（DocumentCount 变化）。
+// DeleteDocument 真删：documents 行 + 全部 chunks 同事务硬删（不变量规则 2 的执行在
+// store；内容不可恢复，兜底走 PG 备份）；evict 所属 KB 的 detail key（DocumentCount 变化）。
 func (s *kbService) DeleteDocument(ctx context.Context, req ragapi.DeleteDocumentReq) error {
 	if err := req.Validate(); err != nil {
 		return fmt.Errorf("validate delete document: %w", err)
@@ -468,18 +481,79 @@ func (s *kbService) DeleteDocument(ctx context.Context, req ragapi.DeleteDocumen
 		}
 		return fmt.Errorf("get document %d: %w", req.ID, err)
 	}
-	if err := s.store.SoftDeleteDocument(ctx, req.ID); err != nil {
+	if err := s.store.HardDeleteDocument(ctx, req.ID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ragapi.ErrDocumentNotFound // 并发已删（RowsAffected=0）
 		}
-		return fmt.Errorf("soft delete document %d: %w", req.ID, err)
+		return fmt.Errorf("hard delete document %d: %w", req.ID, err)
 	}
 	s.evict(ctx, fmt.Sprintf(cacheKeyDetail, d.KnowledgeBaseID))
 	return nil
 }
 
+// DisableDocument 深度停用：事务内硬删全部向量分块 + enabled=false（内容与 status
+// 保留，HNSW 内存即时回收）。store 严格状态机 0 行 → explainDocumentGuardMiss 重读
+// 区分。不 evict——DocumentCount 含停用文档不变，detail 缓存仍准确。
+func (s *kbService) DisableDocument(ctx context.Context, req ragapi.DisableDocumentReq) error {
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("validate disable document: %w", err)
+	}
+	if err := s.store.DisableDocument(ctx, req.ID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return s.explainDocumentGuardMiss(ctx, req.ID, false)
+		}
+		return fmt.Errorf("disable document %d: %w", req.ID, err)
+	}
+	return nil
+}
+
+// EnableDocument 重新启用：置 enabled=true + 重置 pending，提交后 dispatch 重跑入库
+// 管线重建向量（停用时向量已物理删）。幂等路径（已启用）返回现快照且不重跑——
+// 防误花 embedding 费。不 evict（DocumentCount 不变）。
+func (s *kbService) EnableDocument(ctx context.Context, req ragapi.EnableDocumentReq) (*ragapi.DocumentSchema, error) {
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("validate enable document: %w", err)
+	}
+	err := s.store.EnableDocument(ctx, req.ID)
+	switch {
+	case err == nil:
+		s.dispatch(ctx, req.ID) // 命中状态机：事务已提交，dispatch 重跑管线（内部脱钩请求 ctx）
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		if miss := s.explainDocumentGuardMiss(ctx, req.ID, true); miss != nil {
+			return nil, miss
+		}
+		// 已启用（幂等）：落到下方现读快照，不重跑管线
+	default:
+		return nil, fmt.Errorf("enable document %d: %w", req.ID, err)
+	}
+	fresh, err := s.store.GetDocumentByID(ctx, req.ID) // 现读快照（enable 路径行已 pending）
+	if err != nil {
+		return nil, fmt.Errorf("reload document %d after enable: %w", req.ID, err)
+	}
+	schema := toDocumentSchema(fresh)
+	return &schema, nil
+}
+
+// explainDocumentGuardMiss 严格状态机 0 行后的重读区分（disable / enable 共用）：
+// 不存在 → ErrDocumentNotFound；已处于目标态 → nil（幂等成功）；否则状态非终态
+//（入库中撞并发）→ ErrDocumentProcessing。
+func (s *kbService) explainDocumentGuardMiss(ctx context.Context, id uint64, wantEnabled bool) error {
+	d, err := s.store.GetDocumentByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ragapi.ErrDocumentNotFound // 不存在（或并发已真删）
+		}
+		return fmt.Errorf("reload document %d after guard miss: %w", id, err)
+	}
+	if d.Enabled == wantEnabled {
+		return nil // 已处于目标态：幂等成功
+	}
+	return fmt.Errorf("%w: 文档 %d 处于 %s 态", ragapi.ErrDocumentProcessing, id, d.Status)
+}
+
 // ReindexDocument 事务内删全部 chunks + 置 pending 重跑入库管线（不变量规则 3）；
-// pending / processing 中挡并发重入；返回重置后的真实快照。
+// pending / processing 中挡并发重入；已停用文档须先启用（400——重跑会给停用文档
+// 产 chunks，违反不变量规则 4）；返回重置后的真实快照。
 func (s *kbService) ReindexDocument(ctx context.Context, req ragapi.ReindexDocumentReq) (*ragapi.DocumentSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate reindex document: %w", err)
@@ -490,6 +564,9 @@ func (s *kbService) ReindexDocument(ctx context.Context, req ragapi.ReindexDocum
 			return nil, ragapi.ErrDocumentNotFound
 		}
 		return nil, fmt.Errorf("get document %d: %w", req.ID, err)
+	}
+	if !d.Enabled {
+		return nil, fmt.Errorf("%w: 文档 %d 已停用，请先启用", errs.ErrValidationFailed, req.ID)
 	}
 	if d.Status == StatusPending || d.Status == StatusProcessing {
 		return nil, fmt.Errorf("%w: 文档 %d 处于 %s 态", ragapi.ErrDocumentProcessing, req.ID, d.Status)
@@ -650,6 +727,7 @@ func toDocumentSchema(d *Document) ragapi.DocumentSchema {
 		FileType:     d.FileType,
 		FileSize:     d.FileSize,
 		Status:       d.Status,
+		Enabled:      d.Enabled,
 		ChunkCount:   d.ChunkCount,
 		ErrorMessage: d.ErrorMessage,
 	}

@@ -1,8 +1,9 @@
 package api
 
-// spec 03 §1：KnowledgeBaseService 方法集钉死。接口方法数用户拍板 11 个（清单为准，
-// 排除 spec 标题「12 方法」笔误）：KB CRUD 5 + 文档 5 + Retrieve 1——增删方法必须
-// 先走 spec 修订（用户显式批准），测试在编译期之外多一道运行期闸门。
+// spec 03 §1：KnowledgeBaseService 方法集钉死。方法数 13：KB CRUD 5 + 文档 7 + Retrieve 1
+//——软删改造 v2（用户批准的 spec 修订）增补 DisableDocument / EnableDocument（文档深度
+//停用 / 重新启用，可逆下架；DELETE 改真删）。增删方法必须先走 spec 修订（用户显式
+//批准），测试在编译期之外多一道运行期闸门。
 
 import (
 	"context"
@@ -26,10 +27,12 @@ func TestKnowledgeBaseServiceMethodSet(t *testing.T) {
 		"GetDocument":      "func(context.Context, api.GetDocumentReq) (*api.DocumentDetailSchema, error)",
 		"ListDocuments":    "func(context.Context, api.ListDocumentsReq) (*api.DocumentListResult, error)",
 		"DeleteDocument":   "func(context.Context, api.DeleteDocumentReq) error",
+		"DisableDocument":  "func(context.Context, api.DisableDocumentReq) error",
+		"EnableDocument":   "func(context.Context, api.EnableDocumentReq) (*api.DocumentSchema, error)",
 		"ReindexDocument":  "func(context.Context, api.ReindexDocumentReq) (*api.DocumentSchema, error)",
 		"Retrieve":         "func(context.Context, api.RetrieveReq) ([]api.RetrievedChunk, error)",
 	}
-	assert.Equal(t, len(want), typ.NumMethod(), "方法集必须恰好 11 个（spec 03 §1 清单）")
+	assert.Equal(t, len(want), typ.NumMethod(), "方法集必须恰好 13 个（spec 03 §1 清单 + 软删 v2 修订）")
 
 	got := make(map[string]string, typ.NumMethod())
 	for i := range typ.NumMethod() {

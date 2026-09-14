@@ -47,6 +47,8 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	docs := rg.Group("/documents")
 	docs.GET("/:id", h.getDocument)
 	docs.DELETE("/:id", h.deleteDocument)
+	docs.POST("/:id/disable", h.disableDocument)
+	docs.POST("/:id/enable", h.enableDocument)
 	docs.POST("/:id/reindex", h.reindexDocument)
 }
 
@@ -114,7 +116,8 @@ func (h *Handler) updateKB(c *gin.Context) {
 	respond.OK(c, s)
 }
 
-// deleteKB 硬删（204 无返回体；有文档含软删 → 409 InUse）。
+// deleteKB 级联真删（204 无返回体）：单事务清空 KB 下全部文档与分块后删 KB 行
+//（挡删已退役）；agent 绑定由 FK CASCADE 清理。
 func (h *Handler) deleteKB(c *gin.Context) {
 	var req ragapi.DeleteKnowledgeBaseReq
 	if !respond.BindUri(c, &req) {
@@ -217,7 +220,8 @@ func (h *Handler) getDocument(c *gin.Context) {
 	respond.OK(c, d)
 }
 
-// deleteDocument 软删文档 + 同事务硬删 chunks（不变量规则 2，204 无返回体）。
+// deleteDocument 真删：文档行 + 全部 chunks 同事务硬删（不变量规则 2，204 无返回体；
+// 内容不可恢复，兜底走 PG 备份）。
 func (h *Handler) deleteDocument(c *gin.Context) {
 	var req ragapi.DeleteDocumentReq
 	if !respond.BindUri(c, &req) {
@@ -230,8 +234,37 @@ func (h *Handler) deleteDocument(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// reindexDocument 重建索引（202：事务删 chunks + 置 pending 重跑管线）；
-// pending/processing 撞并发 → 409。
+// disableDocument 深度停用（204 同步返回：事务硬删全部向量分块 + enabled=false，
+// 内容保留）；入库中撞并发 → 409；已停用幂等成功。
+func (h *Handler) disableDocument(c *gin.Context) {
+	var req ragapi.DisableDocumentReq
+	if !respond.BindUri(c, &req) {
+		return
+	}
+	if err := h.kbs.DisableDocument(c.Request.Context(), req); err != nil {
+		failRag(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// enableDocument 重新启用（202：置 pending + 异步重跑入库管线重建向量）；已启用
+// 幂等返回现快照且不重跑。
+func (h *Handler) enableDocument(c *gin.Context) {
+	var req ragapi.EnableDocumentReq
+	if !respond.BindUri(c, &req) {
+		return
+	}
+	d, err := h.kbs.EnableDocument(c.Request.Context(), req)
+	if err != nil {
+		failRag(c, err)
+		return
+	}
+	respond.Accepted(c, d)
+}
+
+// reindexDocument 重建索引（202：事务删 chunks + 置 pending 重跑管线）；已停用
+// 文档 → 400 须先启用；pending/processing 撞并发 → 409。
 func (h *Handler) reindexDocument(c *gin.Context) {
 	var req ragapi.ReindexDocumentReq
 	if !respond.BindUri(c, &req) {
@@ -256,8 +289,6 @@ func failRag(c *gin.Context, err error) {
 		respond.Fail(c, http.StatusNotFound, ragapi.ErrKnowledgeBaseNotFound.Error(), "知识库不存在")
 	case errors.Is(err, ragapi.ErrKnowledgeBaseNameConflict):
 		respond.Fail(c, http.StatusConflict, ragapi.ErrKnowledgeBaseNameConflict.Error(), "知识库名称已存在")
-	case errors.Is(err, ragapi.ErrKnowledgeBaseInUse):
-		respond.Fail(c, http.StatusConflict, ragapi.ErrKnowledgeBaseInUse.Error(), "知识库下仍有文档，先删除文档")
 	case errors.Is(err, ragapi.ErrEmbeddingDimMismatch):
 		respond.Fail(c, http.StatusBadRequest, ragapi.ErrEmbeddingDimMismatch.Error(), "嵌入模型须为 embedding 能力且维度 1536")
 	case errors.Is(err, ragapi.ErrEmbeddingModelMismatch):

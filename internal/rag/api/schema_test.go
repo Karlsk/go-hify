@@ -22,7 +22,6 @@ func TestSentinelCodes(t *testing.T) {
 	}{
 		{ErrKnowledgeBaseNotFound, "KNOWLEDGE_BASE_NOT_FOUND"},
 		{ErrKnowledgeBaseNameConflict, "KNOWLEDGE_BASE_NAME_CONFLICT"},
-		{ErrKnowledgeBaseInUse, "KNOWLEDGE_BASE_IN_USE"},
 		{ErrDocumentNotFound, "DOCUMENT_NOT_FOUND"},
 		{ErrDocumentProcessing, "DOCUMENT_PROCESSING"},
 		{ErrEmbeddingModelMismatch, "EMBEDDING_MODEL_MISMATCH"},

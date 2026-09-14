@@ -48,8 +48,7 @@ type stubStore struct {
 	deleteDone bool
 
 	// 计数
-	allDocsByKB map[uint64]int64 // CountAllDocumentsByKB（含软删护栏判据）
-	docsByKBIDs map[uint64]int64 // CountDocumentsByKBIDs（活跃）
+	docsByKBIDs map[uint64]int64 // CountDocumentsByKBIDs（含停用行——深度停用不是删除）
 	countIDsGot []uint64         // 查收批量计数的 id 集合
 
 	// 列表
@@ -57,13 +56,19 @@ type stubStore struct {
 	listName string // 查收 name 过滤参数（透传断言）
 
 	// 文档路径
-	docsByID       map[uint64]*Document // GetDocumentByID 数据集（无键 = NotFound）
-	getDocByIDFn   func(ctx context.Context, id uint64) (*Document, error) // 覆写 GetDocumentByID 行为（panic 注入等）
-	createDocErr   error     // CreateDocument 注入错误（23503 / 普通）
-	createdDoc     *Document // 落库实体快照
-	softDelErr     error     // SoftDeleteDocument 注入错误（NotFound / 普通）
-	softDelID      uint64
-	softDelDone    bool
+	docsByID     map[uint64]*Document // GetDocumentByID 数据集（无键 = NotFound）
+	getDocByIDFn func(ctx context.Context, id uint64) (*Document, error) // 覆写 GetDocumentByID 行为（panic 注入等）
+	createDocErr error     // CreateDocument 注入错误（23503 / 普通）
+	createdDoc   *Document // 落库实体快照
+	hardDelErr   error     // HardDeleteDocument 注入错误（NotFound / 普通）
+	hardDelID    uint64
+	hardDelDone  bool
+	disableErr   error // DisableDocument 注入错误（状态机 0 行 → ErrRecordNotFound / 普通）
+	disableID    uint64
+	disableDone  bool
+	enableErr    error // EnableDocument 注入错误（0 行 → ErrRecordNotFound / 普通）
+	enableID     uint64
+	enableDone   bool
 	listDocs       []Document // ListDocumentsByKB 固定返回集
 	listDocsKB     uint64     // 查收三元组（kb / before / limit）
 	listDocsBefore uint64
@@ -140,11 +145,19 @@ func (s *stubStore) DeleteKnowledgeBase(_ context.Context, id uint64) error {
 	}
 	s.deletedID = id
 	s.deleteDone = true
+	s.ops = append(s.ops, fmt.Sprintf("delKB:%d", id))
 	return nil
 }
 
-func (s *stubStore) CountAllDocumentsByKB(_ context.Context, kbID uint64) (int64, error) {
-	return s.allDocsByKB[kbID], nil
+// DeleteChunksByKB / DeleteDocumentsByKB KB 级联删除事务前两步（0 行合法——空库）。
+func (s *stubStore) DeleteChunksByKB(_ context.Context, kbID uint64) error {
+	s.ops = append(s.ops, fmt.Sprintf("delChunksByKB:%d", kbID))
+	return nil
+}
+
+func (s *stubStore) DeleteDocumentsByKB(_ context.Context, kbID uint64) error {
+	s.ops = append(s.ops, fmt.Sprintf("delDocsByKB:%d", kbID))
+	return nil
 }
 
 func (s *stubStore) CountDocumentsByKBIDs(_ context.Context, ids []uint64) (map[uint64]int64, error) {
@@ -184,16 +197,43 @@ func (s *stubStore) CreateDocument(_ context.Context, d *Document) error {
 	return nil
 }
 
-func (s *stubStore) SoftDeleteDocument(_ context.Context, id uint64) error {
-	if s.softDelErr != nil {
-		return s.softDelErr
+// HardDeleteDocument 真删（documents 行 + chunks 同事务在 store 内；stub 只记调用）。
+func (s *stubStore) HardDeleteDocument(_ context.Context, id uint64) error {
+	if s.hardDelErr != nil {
+		return s.hardDelErr
 	}
-	if _, ok := s.docsByID[id]; !ok {
-		return gorm.ErrRecordNotFound
+	s.hardDelID = id
+	s.hardDelDone = true
+	s.ops = append(s.ops, fmt.Sprintf("hardDel:%d", id))
+	return nil
+}
+
+// DisableDocument 深度停用：命中状态机则模拟落库（enabled=false + chunk_count=0，
+// 内容保留）；0 行注入由 disableErr = gorm.ErrRecordNotFound 表达。
+func (s *stubStore) DisableDocument(_ context.Context, id uint64) error {
+	if s.disableErr != nil {
+		return s.disableErr
 	}
-	s.softDelID = id
-	s.softDelDone = true
-	s.ops = append(s.ops, fmt.Sprintf("softDel:%d", id))
+	s.disableID = id
+	s.disableDone = true
+	if d, ok := s.docsByID[id]; ok {
+		d.Enabled = false
+		d.ChunkCount = 0
+	}
+	return nil
+}
+
+// EnableDocument 重新启用：命中状态机则模拟落库（enabled=true + 重置 pending）。
+func (s *stubStore) EnableDocument(_ context.Context, id uint64) error {
+	if s.enableErr != nil {
+		return s.enableErr
+	}
+	s.enableID = id
+	s.enableDone = true
+	if d, ok := s.docsByID[id]; ok {
+		d.Enabled = true
+		d.Status = StatusPending
+	}
 	return nil
 }
 
@@ -335,6 +375,16 @@ func newSvc(st Store, models providerapi.ModelService) ragapi.KnowledgeBaseServi
 // newSvcWithCache 带缓存构造（Cache-Aside / evict 用例）。
 func newSvcWithCache(st Store, models providerapi.ModelService, cm cacheManager) ragapi.KnowledgeBaseService {
 	svc, _ := New(st, models, nil, cm, Config{})
+	return svc
+}
+
+// newSvcNoDispatch 带缓存构造并把 dispatch 替换为 no-op：Upload / Reindex / Enable
+// 落 pending 后都会触发异步管线（spec 07 §5 接线），CRUD 编排测试不依赖管线副作用
+//（dispatch 接线本身由 pipeline_test.go 的 TestXxxDispatches 覆盖）。返回具体类型，
+// 需要记录 dispatch 的用例可再次覆写该字段。
+func newSvcNoDispatch(st Store, models providerapi.ModelService, cm cacheManager) *kbService {
+	svc := newPipelineSvc(st, models, nil, cm, Config{})
+	svc.dispatch = func(context.Context, uint64) {}
 	return svc
 }
 
@@ -619,30 +669,24 @@ func TestListKnowledgeBasesEmpty(t *testing.T) {
 	assert.Empty(t, models.listIDs, "空页不发 ListByIDs")
 }
 
-// 挡删：有文档（含软删，Unscoped 计数）→ InUse，不触删除。
-func TestDeleteKnowledgeBaseInUse(t *testing.T) {
-	st := &stubStore{allDocsByKB: map[uint64]int64{1: 2}}
-	svc := newSvcWithCache(st, &stubModels{}, &stubCache{})
-
-	err := svc.Delete(context.Background(), ragapi.DeleteKnowledgeBaseReq{ID: 1})
-	assert.ErrorIs(t, err, ragapi.ErrKnowledgeBaseInUse)
-	assert.False(t, st.deleteDone, "挡删时不触删除")
-}
-
-// 删除：成功 + evict；并发已删（RowsAffected=0）→ 哨兵翻译。
+// 级联真删（挡删退役）：单事务按序 chunks → documents → KB 行；完成后 evict；
+// KB 行 0 行（并发已删）→ 404 整笔回滚。
 func TestDeleteKnowledgeBase(t *testing.T) {
-	st := &stubStore{allDocsByKB: map[uint64]int64{1: 0}}
+	st := &stubStore{}
 	cm := &stubCache{}
 	svc := newSvcWithCache(st, &stubModels{}, cm)
 
 	err := svc.Delete(context.Background(), ragapi.DeleteKnowledgeBaseReq{ID: 1})
 	require.NoError(t, err)
+	assert.Equal(t, []string{"delChunksByKB:1", "delDocsByKB:1", "delKB:1"}, st.ops,
+		"级联事务顺序：先清 chunks 与文档行，最后删 KB 行（agent_knowledge_bases 由 FK CASCADE）")
+	assert.Equal(t, 1, st.txCalls, "三步同一事务")
 	assert.True(t, st.deleteDone)
 	assert.Equal(t, uint64(1), st.deletedID)
 	assert.Equal(t, []string{"detail:1"}, cm.deleted, "删除后失效缓存（防幽灵读）")
 
 	svc = newSvcWithCache(
-		&stubStore{allDocsByKB: map[uint64]int64{1: 0}, deleteErr: gorm.ErrRecordNotFound},
+		&stubStore{deleteErr: gorm.ErrRecordNotFound},
 		&stubModels{}, &stubCache{})
 	err = svc.Delete(context.Background(), ragapi.DeleteKnowledgeBaseReq{ID: 1})
 	assert.ErrorIs(t, err, ragapi.ErrKnowledgeBaseNotFound)
@@ -650,17 +694,26 @@ func TestDeleteKnowledgeBase(t *testing.T) {
 
 // ---- 文档五方法（spec 04 §1：pending 快照 / 规则 2 / 规则 3 / 游标组装） ----
 
-// docFixture 构造文档实体基线。
+// docFixture 构造文档实体基线（Enabled 默认 true——真实落库行的常态；停用场景
+// 由用例显式置 false）。
 func docFixture(id, kbID uint64, status string) *Document {
 	d := &Document{
 		KnowledgeBaseID: kbID,
 		Name:            "manual.txt",
 		Content:         "正文内容",
 		Status:          status,
+		Enabled:         true,
 		FileType:        "txt",
 		FileSize:        24,
 	}
 	d.ID = id
+	return d
+}
+
+// disabledDoc 停用文档变体（深度停用不是删除——行仍可见、内容保留）。
+func disabledDoc(id, kbID uint64, status string) *Document {
+	d := docFixture(id, kbID, status)
+	d.Enabled = false
 	return d
 }
 
@@ -684,17 +737,19 @@ func TestUploadDocumentKBNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ragapi.ErrKnowledgeBaseNotFound)
 }
 
-// 上传成功：pending + 元数据 + 原文落库；快照回 202 载荷；evict KB detail key。
-// 本篇无 dispatch 接线（07）——无事务 / 无异步调用可断言（ops / txCalls 恒空）。
+// 上传成功：pending + enabled=true + 元数据 + 原文落库；快照回 202 载荷；evict KB
+// detail key。dispatch 已接线（spec 07 §5），本测试替换为 no-op（接线断言在
+// pipeline_test.go 的 TestUploadDocumentDispatches）。
 func TestUploadDocument(t *testing.T) {
 	st := &stubStore{kbByID: map[uint64]*KnowledgeBase{1: kbFixture(1, 5, true)}}
 	cm := &stubCache{}
-	svc := newSvcWithCache(st, &stubModels{}, cm)
+	svc := newSvcNoDispatch(st, &stubModels{}, cm)
 
 	got, err := svc.UploadDocument(context.Background(), validUploadReq(1))
 	require.NoError(t, err)
 
 	assert.Equal(t, StatusPending, st.createdDoc.Status)
+	assert.True(t, st.createdDoc.Enabled, "创建路径显式置 true（布尔无 gorm default tag）")
 	assert.Equal(t, "使用手册", st.createdDoc.Name)
 	assert.Equal(t, "txt", st.createdDoc.FileType)
 	assert.Equal(t, int64(12), st.createdDoc.FileSize)
@@ -703,11 +758,12 @@ func TestUploadDocument(t *testing.T) {
 	assert.Empty(t, st.createdDoc.ErrorMessage)
 
 	assert.Equal(t, StatusPending, got.Status)
+	assert.True(t, got.Enabled)
 	assert.Equal(t, "txt", got.FileType)
 	assert.Equal(t, int64(12), got.FileSize)
 
 	assert.Equal(t, []string{"detail:1"}, cm.deleted, "文档计数变化 → 写时 evict（澄清拍板）")
-	assert.Empty(t, st.ops, "本篇无 dispatch / 事务调用")
+	assert.Empty(t, st.ops, "落库本身无事务编排（级联 / 重置路径才有）")
 	assert.Zero(t, st.txCalls)
 }
 
@@ -793,7 +849,8 @@ func TestListDocumentsEmpty(t *testing.T) {
 	assert.Empty(t, got.NextCursor)
 }
 
-// 软删：取 KB 归属后走 store 事务（规则 2 在 store 内）；evict 所属 KB detail key。
+// 真删：取 KB 归属后 HardDeleteDocument（documents 行 + chunks 同事务在 store 内）；
+// evict 所属 KB detail key（DocumentCount 变化）。
 func TestDeleteDocument(t *testing.T) {
 	st := &stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, StatusReady)}}
 	cm := &stubCache{}
@@ -801,37 +858,133 @@ func TestDeleteDocument(t *testing.T) {
 
 	err := svc.DeleteDocument(context.Background(), ragapi.DeleteDocumentReq{ID: 9})
 	require.NoError(t, err)
-	assert.True(t, st.softDelDone)
-	assert.Equal(t, uint64(9), st.softDelID)
+	assert.True(t, st.hardDelDone)
+	assert.Equal(t, uint64(9), st.hardDelID)
 	assert.Equal(t, []string{"detail:1"}, cm.deleted, "evict 文档所属 KB 的 detail key")
 
 	err = svc.DeleteDocument(context.Background(), ragapi.DeleteDocumentReq{ID: 999})
 	assert.ErrorIs(t, err, ragapi.ErrDocumentNotFound)
 
 	svc = newSvcWithCache(
-		&stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, StatusReady)}, softDelErr: gorm.ErrRecordNotFound},
+		&stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, StatusReady)}, hardDelErr: gorm.ErrRecordNotFound},
 		&stubModels{}, &stubCache{})
 	err = svc.DeleteDocument(context.Background(), ragapi.DeleteDocumentReq{ID: 9})
 	assert.ErrorIs(t, err, ragapi.ErrDocumentNotFound, "并发已删（RowsAffected=0）→ 哨兵翻译")
 }
 
-// reindex：pending / processing 挡并发；ready / failed 走规则 3 事务序列
-// （删 chunks → 置 pending + 清 error_message + chunk_count=0）；快照重读。
+// 深度停用：命中状态机 → 委托 store（删 chunks + enabled=false 事务在 store 内）；
+// 不 evict（DocumentCount 含停用文档不变）。状态机 0 行 → explainDocumentGuardMiss
+// 重读三分支：幂等（已停用）/ 404（不存在）/ 409（入库中撞并发）。
+func TestDisableDocument(t *testing.T) {
+	d := docFixture(9, 1, StatusReady)
+	d.ChunkCount = 8
+	st := &stubStore{docsByID: map[uint64]*Document{9: d}}
+	cm := &stubCache{}
+	svc := newSvcWithCache(st, &stubModels{}, cm)
+
+	err := svc.DisableDocument(context.Background(), ragapi.DisableDocumentReq{ID: 9})
+	require.NoError(t, err)
+	assert.True(t, st.disableDone)
+	assert.Empty(t, cm.deleted, "DocumentCount 不变，不 evict")
+
+	// 幂等：0 行 + 重读已 enabled=false → nil（重复停用成功）
+	st2 := &stubStore{docsByID: map[uint64]*Document{9: disabledDoc(9, 1, StatusReady)},
+		disableErr: gorm.ErrRecordNotFound}
+	svc2 := newSvcWithCache(st2, &stubModels{}, &stubCache{})
+	err = svc2.DisableDocument(context.Background(), ragapi.DisableDocumentReq{ID: 9})
+	require.NoError(t, err)
+	assert.False(t, st2.disableDone, "幂等路径未命中状态机")
+
+	// 404：0 行 + 重读不存在
+	svc3 := newSvcWithCache(&stubStore{disableErr: gorm.ErrRecordNotFound}, &stubModels{}, &stubCache{})
+	err = svc3.DisableDocument(context.Background(), ragapi.DisableDocumentReq{ID: 9})
+	assert.ErrorIs(t, err, ragapi.ErrDocumentNotFound)
+
+	// 409：0 行 + 重读仍 enabled 且入库中
+	st4 := &stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, StatusProcessing)},
+		disableErr: gorm.ErrRecordNotFound}
+	svc4 := newSvcWithCache(st4, &stubModels{}, &stubCache{})
+	err = svc4.DisableDocument(context.Background(), ragapi.DisableDocumentReq{ID: 9})
+	assert.ErrorIs(t, err, ragapi.ErrDocumentProcessing)
+
+	// store 普通错误包装上抛
+	boom := errors.New("tx failed")
+	svc5 := newSvcWithCache(&stubStore{disableErr: boom}, &stubModels{}, &stubCache{})
+	err = svc5.DisableDocument(context.Background(), ragapi.DisableDocumentReq{ID: 9})
+	assert.ErrorIs(t, err, boom)
+	assert.NotErrorIs(t, err, ragapi.ErrDocumentNotFound)
+}
+
+// 重新启用：命中状态机 → 提交后 dispatch 重跑管线 + 返回现读快照（pending）；
+// 幂等路径（已启用）返回快照且不 dispatch——防误花 embedding 费。
+func TestEnableDocument(t *testing.T) {
+	st := &stubStore{docsByID: map[uint64]*Document{9: disabledDoc(9, 1, StatusReady)}}
+	svc := newSvcNoDispatch(st, &stubModels{}, &stubCache{})
+	var dispatched []uint64
+	svc.dispatch = func(_ context.Context, id uint64) { dispatched = append(dispatched, id) }
+	got, err := svc.EnableDocument(context.Background(), ragapi.EnableDocumentReq{ID: 9})
+	require.NoError(t, err)
+	assert.True(t, st.enableDone)
+	assert.Equal(t, []uint64{9}, dispatched, "命中状态机：提交后 dispatch 重跑管线")
+	assert.True(t, got.Enabled, "stub 已模拟落库 enabled=true")
+	assert.Equal(t, StatusPending, got.Status, "启用即重置 pending")
+
+	// 幂等：0 行 + 重读已 enabled → 返回现读快照，不 dispatch
+	st2 := &stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, StatusReady)},
+		enableErr: gorm.ErrRecordNotFound}
+	svc2 := newSvcNoDispatch(st2, &stubModels{}, &stubCache{})
+	var dispatched2 []uint64
+	svc2.dispatch = func(_ context.Context, id uint64) { dispatched2 = append(dispatched2, id) }
+	got2, err := svc2.EnableDocument(context.Background(), ragapi.EnableDocumentReq{ID: 9})
+	require.NoError(t, err)
+	assert.Empty(t, dispatched2, "幂等路径不重跑管线")
+	assert.True(t, got2.Enabled)
+	assert.NotEqual(t, StatusPending, got2.Status, "快照现读，未重置")
+
+	// 404：0 行 + 重读不存在
+	svc3 := newSvcNoDispatch(&stubStore{enableErr: gorm.ErrRecordNotFound}, &stubModels{}, &stubCache{})
+	_, err = svc3.EnableDocument(context.Background(), ragapi.EnableDocumentReq{ID: 9})
+	assert.ErrorIs(t, err, ragapi.ErrDocumentNotFound)
+
+	// 409：0 行 + 重读仍停用且入库中（停用文档被并发启用后正在重建）
+	st4 := &stubStore{docsByID: map[uint64]*Document{9: disabledDoc(9, 1, StatusProcessing)},
+		enableErr: gorm.ErrRecordNotFound}
+	svc4 := newSvcNoDispatch(st4, &stubModels{}, &stubCache{})
+	_, err = svc4.EnableDocument(context.Background(), ragapi.EnableDocumentReq{ID: 9})
+	assert.ErrorIs(t, err, ragapi.ErrDocumentProcessing)
+
+	// store 普通错误包装上抛
+	boom := errors.New("tx failed")
+	svc5 := newSvcNoDispatch(&stubStore{enableErr: boom}, &stubModels{}, &stubCache{})
+	_, err = svc5.EnableDocument(context.Background(), ragapi.EnableDocumentReq{ID: 9})
+	assert.ErrorIs(t, err, boom)
+}
+
+// reindex：pending / processing 挡并发；已停用挡重跑（400——重跑会给停用文档产
+// chunks，违反不变量规则 4）；ready / failed 走规则 3 事务序列（删 chunks → 置
+// pending + 清 error_message + chunk_count=0）；快照重读。
 func TestReindexDocument(t *testing.T) {
 	for _, status := range []string{StatusPending, StatusProcessing} {
 		st := &stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, status)}}
-		svc := newSvcWithCache(st, &stubModels{}, &stubCache{})
+		svc := newSvcNoDispatch(st, &stubModels{}, &stubCache{})
 		_, err := svc.ReindexDocument(context.Background(), ragapi.ReindexDocumentReq{ID: 9})
 		assert.ErrorIs(t, err, ragapi.ErrDocumentProcessing, "状态 %s 挡并发重入", status)
 		assert.Zero(t, st.txCalls, "挡下时不进事务")
 	}
+
+	// 已停用 → 400（防违反不变量：停用文档不得有 chunks）
+	stD := &stubStore{docsByID: map[uint64]*Document{9: disabledDoc(9, 1, StatusReady)}}
+	svcD := newSvcNoDispatch(stD, &stubModels{}, &stubCache{})
+	_, err := svcD.ReindexDocument(context.Background(), ragapi.ReindexDocumentReq{ID: 9})
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Zero(t, stD.txCalls, "停用挡下时不进事务")
 
 	// ready → 事务序列顺序钉死；快照 status=pending / chunk_count=0 / error_message 空
 	d := docFixture(9, 1, StatusReady)
 	d.ChunkCount = 8
 	d.ErrorMessage = "上次失败原因"
 	st := &stubStore{docsByID: map[uint64]*Document{9: d}}
-	svc := newSvcWithCache(st, &stubModels{}, &stubCache{})
+	svc := newSvcNoDispatch(st, &stubModels{}, &stubCache{})
 	got, err := svc.ReindexDocument(context.Background(), ragapi.ReindexDocumentReq{ID: 9})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"delChunks:9", "reset:9"}, st.ops, "规则 3 事务序列（先删 chunks 后重置）")
@@ -842,18 +995,18 @@ func TestReindexDocument(t *testing.T) {
 
 	// failed 同样可重跑
 	st2 := &stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, StatusFailed)}}
-	svc = newSvcWithCache(st2, &stubModels{}, &stubCache{})
+	svc = newSvcNoDispatch(st2, &stubModels{}, &stubCache{})
 	got2, err := svc.ReindexDocument(context.Background(), ragapi.ReindexDocumentReq{ID: 9})
 	require.NoError(t, err)
 	assert.Equal(t, StatusPending, got2.Status)
 
 	// 404；事务失败包装上抛
-	svc = newSvcWithCache(&stubStore{}, &stubModels{}, &stubCache{})
+	svc = newSvcNoDispatch(&stubStore{}, &stubModels{}, &stubCache{})
 	_, err = svc.ReindexDocument(context.Background(), ragapi.ReindexDocumentReq{ID: 999})
 	assert.ErrorIs(t, err, ragapi.ErrDocumentNotFound)
 
 	boom := errors.New("tx failed")
-	svc = newSvcWithCache(
+	svc = newSvcNoDispatch(
 		&stubStore{docsByID: map[uint64]*Document{9: docFixture(9, 1, StatusReady)}, resetErr: boom},
 		&stubModels{}, &stubCache{})
 	_, err = svc.ReindexDocument(context.Background(), ragapi.ReindexDocumentReq{ID: 9})

@@ -26,8 +26,9 @@ type KnowledgeBaseService interface {
 	// 错误：ErrKnowledgeBaseNotFound、ErrKnowledgeBaseNameConflict。
 	Update(ctx context.Context, req UpdateKnowledgeBaseReq) (*KnowledgeBaseSchema, error)
 
-	// Delete 硬删；KB 下仍有文档（含软删）→ 挡删。
-	// 错误：ErrKnowledgeBaseNotFound、ErrKnowledgeBaseInUse。
+	// Delete 级联真删：KB 下全部文档与分块同事务清空（决策修订：挡删退役），
+	// agent_knowledge_bases 绑定由 FK CASCADE 清理。
+	// 错误：ErrKnowledgeBaseNotFound。
 	Delete(ctx context.Context, req DeleteKnowledgeBaseReq) error
 
 	// UploadDocument 落 pending 行后异步跑入库管线，返回快照（status=pending +
@@ -39,16 +40,29 @@ type KnowledgeBaseService interface {
 	// 错误：ErrDocumentNotFound。
 	GetDocument(ctx context.Context, req GetDocumentReq) (*DocumentDetailSchema, error)
 
-	// ListDocuments KB 下文档游标分页（keyset id DESC；软删行不可见）。
+	// ListDocuments KB 下文档游标分页（keyset id DESC；停用文档可见——深度停用不是删除）。
 	// 错误：ErrKnowledgeBaseNotFound。
 	ListDocuments(ctx context.Context, req ListDocumentsReq) (*DocumentListResult, error)
 
-	// DeleteDocument 软删文档 + 同事务硬删其 chunks（核心不变量规则 2，spec 01 §3）。
+	// DeleteDocument 真删：documents 行 + 全部 chunks 同事务硬删（核心不变量规则 2，
+	// spec 01 §3）；已删文档内容不可恢复，兜底走 PG 备份。
 	// 错误：ErrDocumentNotFound。
 	DeleteDocument(ctx context.Context, req DeleteDocumentReq) error
 
-	// ReindexDocument 事务内删 chunks + 置 pending 重跑入库管线；
-	// pending / processing 中 → 挡并发。
+	// DisableDocument 深度停用：事务内硬删其全部向量分块 + enabled=false +
+	// chunk_count=0（内容与 status 保留，HNSW 内存即时回收）；仅终态 ready/failed
+	// 可停用。幂等：已停用 → 成功。
+	// 错误：ErrDocumentNotFound、ErrDocumentProcessing。
+	DisableDocument(ctx context.Context, req DisableDocumentReq) error
+
+	// EnableDocument 重新启用：置 enabled=true + 重置 pending，自动重跑入库管线
+	// 重建向量（停用时向量已物理删）；仅终态可启用。幂等：已启用 → 成功不重跑
+	//（防误花 embedding 费用）。
+	// 错误：ErrDocumentNotFound、ErrDocumentProcessing。
+	EnableDocument(ctx context.Context, req EnableDocumentReq) (*DocumentSchema, error)
+
+	// ReindexDocument 事务内删 chunks + 置 pending 重跑入库管线；已停用文档须先
+	// 启用（400）；pending / processing 中 → 挡并发。
 	// 错误：ErrDocumentNotFound、ErrDocumentProcessing。
 	ReindexDocument(ctx context.Context, req ReindexDocumentReq) (*DocumentSchema, error)
 

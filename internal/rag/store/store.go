@@ -18,10 +18,10 @@ import (
 // 列表 / 快照路径不取，零 TOAST 解压成本。
 const (
 	selectKB = "id, name, description, embedding_model_id, chunk_strategy, enabled, created_at, updated_at"
-	// selectDocument 列表列（不含 content）；deleted_at 一并取回（软删 mixin 字段，可见行恒为 NULL）。
-	selectDocument = "id, knowledge_base_id, name, status, file_type, file_size, error_message, chunk_count, created_at, updated_at, deleted_at"
+	// selectDocument 列表列（不含 content；enabled 停用标记随行返回——停用行可见）。
+	selectDocument = "id, knowledge_base_id, name, status, file_type, file_size, error_message, chunk_count, enabled, created_at, updated_at"
 	// selectDocumentDetail 详情列 = 列表列 + content 原文。
-	selectDocumentDetail = "id, knowledge_base_id, name, content, status, file_type, file_size, error_message, chunk_count, created_at, updated_at, deleted_at"
+	selectDocumentDetail = "id, knowledge_base_id, name, content, status, file_type, file_size, error_message, chunk_count, enabled, created_at, updated_at"
 )
 
 // Store 实现 ragsvc.Store。
@@ -82,8 +82,8 @@ func (s *Store) UpdateKnowledgeBase(ctx context.Context, kb *ragsvc.KnowledgeBas
 	return s.db.WithContext(ctx).Save(kb).Error
 }
 
-// DeleteKnowledgeBase 硬删（KB 无软删；agent 绑定由 FK CASCADE 清理）；RowsAffected=0
-// 返回 gorm.ErrRecordNotFound。
+// DeleteKnowledgeBase 硬删（KB 级联删除事务的最后一步；agent 绑定由 FK CASCADE
+// 清理）；RowsAffected=0 返回 gorm.ErrRecordNotFound——事务回滚，已删的文档 / 分块还原。
 func (s *Store) DeleteKnowledgeBase(ctx context.Context, id uint64) error {
 	res := s.db.WithContext(ctx).Delete(&ragsvc.KnowledgeBase{}, id)
 	if res.Error != nil {
@@ -95,15 +95,19 @@ func (s *Store) DeleteKnowledgeBase(ctx context.Context, id uint64) error {
 	return nil
 }
 
-// CountAllDocumentsByKB KB 下文档总数（Unscoped 含软删行——KB 删除护栏判据：有过
-// 文档就不许硬删，软删行也占 uq 命名空间且可恢复）。
-func (s *Store) CountAllDocumentsByKB(ctx context.Context, kbID uint64) (int64, error) {
-	var n int64
-	err := s.db.WithContext(ctx).Model(&ragsvc.Document{}).
-		Unscoped().
+// DeleteChunksByKB 硬删 KB 下全部分块（KB 级联删除事务第一步；按 document_chunks
+// 冗余 knowledge_base_id 单表清理，不依赖 document_id FK CASCADE）。0 行合法（空库）。
+func (s *Store) DeleteChunksByKB(ctx context.Context, kbID uint64) error {
+	return s.db.WithContext(ctx).
 		Where("knowledge_base_id = ?", kbID).
-		Count(&n).Error
-	return n, err
+		Delete(&ragsvc.DocumentChunk{}).Error
+}
+
+// DeleteDocumentsByKB 硬删 KB 下全部文档行（KB 级联删除事务第二步）。0 行合法。
+func (s *Store) DeleteDocumentsByKB(ctx context.Context, kbID uint64) error {
+	return s.db.WithContext(ctx).
+		Where("knowledge_base_id = ?", kbID).
+		Delete(&ragsvc.Document{}).Error
 }
 
 // CountDocumentsByKBIDs 列表聚合用批量计数（活跃文档）：GROUP BY + 聚合一条查询
@@ -134,8 +138,8 @@ func (s *Store) CountDocumentsByKBIDs(ctx context.Context, ids []uint64) (map[ui
 
 // ---- documents ----
 
-// GetDocumentByID 按主键查（含 content 原文——大文本仅此详情路径取）；gorm.DeletedAt
-// 自动过滤软删行；未找到返回 gorm.ErrRecordNotFound。
+// GetDocumentByID 按主键查（含 content 原文——大文本仅此详情路径取；停用行同样
+// 可见——深度停用不是删除）；未找到返回 gorm.ErrRecordNotFound。
 func (s *Store) GetDocumentByID(ctx context.Context, id uint64) (*ragsvc.Document, error) {
 	var d ragsvc.Document
 	if err := s.db.WithContext(ctx).Select(selectDocumentDetail).First(&d, id).Error; err != nil {
@@ -149,8 +153,9 @@ func (s *Store) CreateDocument(ctx context.Context, d *ragsvc.Document) error {
 	return s.db.WithContext(ctx).Create(d).Error
 }
 
-// ListDocumentsByKB KB 下活跃文档 keyset 分页（id DESC；软删行被 DeletedAt 过滤）；
-// beforeID=0 为首页（无 id < 条件）；limit 由调用方传 FetchN()（limit+1 判 has_more）。
+// ListDocumentsByKB KB 下全部文档 keyset 分页（id DESC；停用行一并返回——深度停用
+// 不是删除，管理面可见）；beforeID=0 为首页（无 id < 条件）；limit 由调用方传
+// FetchN()（limit+1 判 has_more）。
 func (s *Store) ListDocumentsByKB(ctx context.Context, kbID, beforeID uint64, limit int) ([]ragsvc.Document, error) {
 	var items []ragsvc.Document
 	q := s.db.WithContext(ctx).Model(&ragsvc.Document{}).Where("knowledge_base_id = ?", kbID)
@@ -164,12 +169,12 @@ func (s *Store) ListDocumentsByKB(ctx context.Context, kbID, beforeID uint64, li
 	return items, err
 }
 
-// SoftDeleteDocument 事务（不变量规则 2，spec 01 §3）：软删 documents 行 + 同事务
-// 硬删其全部 chunks（元信息软删保底，向量物理删省 HNSW 内存）。软删 0 行
-// （不存在或已删）→ 整笔回滚 + gorm.ErrRecordNotFound，chunks 不被误删。
-func (s *Store) SoftDeleteDocument(ctx context.Context, id uint64) error {
+// HardDeleteDocument 事务（不变量规则 2，spec 01 §3）：硬删 documents 行 + 同事务
+// 硬删其全部 chunks（真删——内容随之不可恢复，兜底走 PG 备份）。0 行（不存在）
+// → 整笔回滚 + gorm.ErrRecordNotFound，chunks 不被误删。
+func (s *Store) HardDeleteDocument(ctx context.Context, id uint64) error {
 	return s.db.WithContext(ctx).Transaction(func(gtx *gorm.DB) error {
-		res := gtx.Delete(&ragsvc.Document{}, id) // DeletedAt 改写为 UPDATE deleted_at
+		res := gtx.Delete(&ragsvc.Document{}, id) // 无软删 mixin：真 DELETE
 		if res.Error != nil {
 			return res.Error
 		}
@@ -178,6 +183,52 @@ func (s *Store) SoftDeleteDocument(ctx context.Context, id uint64) error {
 		}
 		return (&Store{db: gtx}).DeleteChunksByDocument(ctx, id)
 	})
+}
+
+// DisableDocument 深度停用事务（不变量规则 2）：严格状态机 WHERE enabled AND
+// status IN ('ready','failed')——与入库管线并发时必输（0 行回滚，chunks 不被误删）；
+// 命中则同事务硬删其全部 chunks + enabled=false + chunk_count=0（内容与 status
+// 保留，HNSW 内存即时回收）。0 行返回 gorm.ErrRecordNotFound，由 service 重读区分：
+// 不存在 / 已停用（幂等）/ 入库中。
+func (s *Store) DisableDocument(ctx context.Context, id uint64) error {
+	return s.db.WithContext(ctx).Transaction(func(gtx *gorm.DB) error {
+		res := gtx.Model(&ragsvc.Document{}).
+			Where("id = ?", id).
+			Where("enabled = ?", true).
+			Where("status IN ?", []string{ragsvc.StatusReady, ragsvc.StatusFailed}).
+			Updates(map[string]any{"enabled": false, "chunk_count": 0})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return (&Store{db: gtx}).DeleteChunksByDocument(ctx, id)
+	})
+}
+
+// EnableDocument 重新启用（不变量规则 4）：严格状态机 WHERE NOT enabled AND
+// status IN ('ready','failed') → enabled=true + 重置 pending（error_message='' /
+// chunk_count=0；停用行本就无 chunks，无须删）；提交后由 service dispatch 重跑
+// 管线重建向量。0 行返回 gorm.ErrRecordNotFound，由 service 重读区分（同上）。
+func (s *Store) EnableDocument(ctx context.Context, id uint64) error {
+	res := s.db.WithContext(ctx).Model(&ragsvc.Document{}).
+		Where("id = ?", id).
+		Where("enabled = ?", false).
+		Where("status IN ?", []string{ragsvc.StatusReady, ragsvc.StatusFailed}).
+		Updates(map[string]any{
+			"enabled":       true,
+			"status":        ragsvc.StatusPending,
+			"error_message": "",
+			"chunk_count":   0,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // DeleteChunksByDocument 硬删文档全部分块（规则 2 / 3 共用；0 行合法——pending 无
@@ -189,7 +240,7 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, documentID uint64) e
 }
 
 // ResetDocumentForReindex 重置文档供重跑入库管线（不变量规则 3）：status=pending +
-// error_message='' + chunk_count=0（updated_at 由 autoUpdateTime 维护）；软删行不可见；
+// error_message='' + chunk_count=0（updated_at 由 autoUpdateTime 维护）；
 // RowsAffected=0 返回 gorm.ErrRecordNotFound。
 func (s *Store) ResetDocumentForReindex(ctx context.Context, id uint64) error {
 	res := s.db.WithContext(ctx).Model(&ragsvc.Document{}).
@@ -219,7 +270,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx ragsvc.Store) error) erro
 
 // searchChunksSQL 跨 KB 单表 ANN 召回（spec 05 §2 冻结形态）：显式列 + 余弦距离；
 // kbIDs IN 展开；embedding IS NOT NULL 纯防御（不变量：终态事务保证行必带向量）；
-// 正确性不依赖 status/deleted_at 过滤——01 §3 不变量换来的简化。ORDER BY 用表达式
+// 正确性不依赖 status/enabled 过滤——01 §3 不变量换来的简化（停用文档的向量已物理删）。ORDER BY 用表达式
 // 本体（与 vector_cosine_ops 索引配对铁律，改写 distance 别名会绕开索引）；向量参数
 // 传两次（SELECT 列 + ORDER BY 各一）。
 const searchChunksSQL = `SELECT id, document_id, knowledge_base_id, chunk_index, content, token_count, (embedding <=> ?) AS distance
@@ -230,7 +281,7 @@ ORDER BY embedding <=> ?
 LIMIT ?`
 
 // GetDocumentMetasByIDs 批量取文档名（引用名解析，spec 05 §2）：只读 id/name 不碰
-// content（大文本 TOAST 零成本）；软删 / 不存在的 id 无键（悬空 → ""）；空 ids 返回
+// content（大文本 TOAST 零成本）；已删 / 不存在的 id 无键（悬空 → ""）；空 ids 返回
 // 空 map 不发 SQL（IN () 非法）。
 func (s *Store) GetDocumentMetasByIDs(ctx context.Context, ids []uint64) (map[uint64]string, error) {
 	metas := make(map[uint64]string, len(ids))
@@ -336,8 +387,8 @@ func (s *Store) CreateChunks(ctx context.Context, cs []ragsvc.DocumentChunk) err
 }
 
 // ListIngestingDocuments 扫全部入库中文档（Recovery 用，spec 07 §4）：WHERE status IN
-// ('pending','processing') 命中 partial idx idx_documents_ingesting；软删行被
-// DeletedAt 过滤；无分页（单实例内部工具量级可控）。
+// ('pending','processing') 命中 partial idx idx_documents_ingesting；无分页
+//（单实例内部工具量级可控）。
 func (s *Store) ListIngestingDocuments(ctx context.Context) ([]ragsvc.Document, error) {
 	var docs []ragsvc.Document
 	err := s.db.WithContext(ctx).Model(&ragsvc.Document{}).

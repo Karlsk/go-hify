@@ -181,6 +181,36 @@ func (f *fakeSvc) ReindexDocument(_ context.Context, req ragapi.ReindexDocumentR
 	return &s, nil
 }
 
+// DisableDocument / EnableDocument 深度停用端点族（挡删退役后的可逆下架）。
+func (f *fakeSvc) DisableDocument(_ context.Context, req ragapi.DisableDocumentReq) error {
+	if f.injected != nil {
+		return f.injected
+	}
+	d, ok := f.docs[req.ID]
+	if !ok {
+		return ragapi.ErrDocumentNotFound
+	}
+	d.Enabled = false // 行保留可见（深度停用不是删除），chunks 计数归零
+	d.ChunkCount = 0
+	f.docs[req.ID] = d
+	return nil
+}
+
+func (f *fakeSvc) EnableDocument(_ context.Context, req ragapi.EnableDocumentReq) (*ragapi.DocumentSchema, error) {
+	if f.injected != nil {
+		return nil, f.injected
+	}
+	d, ok := f.docs[req.ID]
+	if !ok {
+		return nil, ragapi.ErrDocumentNotFound
+	}
+	d.Enabled = true
+	d.Status = "pending" // 启用即重置 pending，异步管线重建向量
+	f.docs[req.ID] = d
+	s := d.DocumentSchema
+	return &s, nil
+}
+
 // Retrieve 检索覆写（spec 05 端点 11）：查收请求（KBIDs 程序内填充断言）+ 返回可配置集。
 func (f *fakeSvc) Retrieve(_ context.Context, req ragapi.RetrieveReq) ([]ragapi.RetrievedChunk, error) {
 	if f.injected != nil {
@@ -417,7 +447,7 @@ func TestUpdateKB_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-// ---- 端点 5：DELETE /knowledge-bases/{id} ----
+// ---- 端点 5：DELETE /knowledge-bases/{id}（级联真删：挡删退役） ----
 
 func TestDeleteKB_NoContent(t *testing.T) {
 	svc := newFakeSvc()
@@ -429,16 +459,13 @@ func TestDeleteKB_NoContent(t *testing.T) {
 	assert.Empty(t, w.Body.String(), "204 无返回体")
 }
 
-func TestDeleteKB_InUse(t *testing.T) {
-	svc := newFakeSvc()
-	svc.injected = ragapi.ErrKnowledgeBaseInUse
-	r := newTestRouter(svc, 64)
-
-	w := doReq(t, r, http.MethodDelete, "/api/v1/knowledge-bases/1", "")
-	assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+func TestDeleteKB_NotFound(t *testing.T) {
+	r := newTestRouter(newFakeSvc(), 64)
+	w := doReq(t, r, http.MethodDelete, "/api/v1/knowledge-bases/999", "")
+	assert.Equal(t, http.StatusNotFound, w.Code)
 	e := parseEnvelope(t, w.Body.Bytes())
 	require.NotNil(t, e.Error)
-	assert.Equal(t, ragapi.ErrKnowledgeBaseInUse.Error(), e.Error.Code)
+	assert.Equal(t, ragapi.ErrKnowledgeBaseNotFound.Error(), e.Error.Code)
 }
 
 // ---- 端点 6：POST /knowledge-bases/{kbId}/documents（multipart 202） ----
@@ -665,6 +692,63 @@ func TestReindexDocument_Processing(t *testing.T) {
 	e := parseEnvelope(t, w.Body.Bytes())
 	require.NotNil(t, e.Error)
 	assert.Equal(t, ragapi.ErrDocumentProcessing.Error(), e.Error.Code)
+}
+
+// ---- 端点：POST /documents/{id}/disable（204）/ POST /documents/{id}/enable（202） ----
+
+func TestDisableDocument_NoContent(t *testing.T) {
+	svc := newFakeSvc()
+	svc.docs[9] = ragapi.DocumentDetailSchema{DocumentSchema: ragapi.DocumentSchema{Name: "manual.txt", Status: "ready", Enabled: true, ChunkCount: 8}}
+	r := newTestRouter(svc, 64)
+
+	w := doReq(t, r, http.MethodPost, "/api/v1/documents/9/disable", "")
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Empty(t, w.Body.String(), "204 无返回体")
+	assert.False(t, svc.docs[9].Enabled, "深度停用：行保留、enabled=false")
+	assert.Zero(t, svc.docs[9].ChunkCount)
+}
+
+func TestDisableDocument_GuardMiss(t *testing.T) {
+	// 409：入库中撞并发（状态机 0 行 → service 重读为 processing）
+	svc := newFakeSvc()
+	svc.injected = ragapi.ErrDocumentProcessing
+	r := newTestRouter(svc, 64)
+	w := doReq(t, r, http.MethodPost, "/api/v1/documents/9/disable", "")
+	assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	require.NotNil(t, e.Error)
+	assert.Equal(t, ragapi.ErrDocumentProcessing.Error(), e.Error.Code)
+
+	// 404：不存在
+	r2 := newTestRouter(newFakeSvc(), 64)
+	w2 := doReq(t, r2, http.MethodPost, "/api/v1/documents/999/disable", "")
+	assert.Equal(t, http.StatusNotFound, w2.Code)
+	e2 := parseEnvelope(t, w2.Body.Bytes())
+	require.NotNil(t, e2.Error)
+	assert.Equal(t, ragapi.ErrDocumentNotFound.Error(), e2.Error.Code)
+}
+
+func TestEnableDocument_Accepted(t *testing.T) {
+	svc := newFakeSvc()
+	svc.docs[9] = ragapi.DocumentDetailSchema{DocumentSchema: ragapi.DocumentSchema{Name: "manual.txt", Status: "ready", Enabled: false}}
+	r := newTestRouter(svc, 64)
+
+	w := doReq(t, r, http.MethodPost, "/api/v1/documents/9/enable", "")
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	require.True(t, e.Success)
+	d := decodeData[ragapi.DocumentSchema](t, e)
+	assert.True(t, d.Enabled, "202 信封 enabled=true")
+	assert.Equal(t, "pending", d.Status, "启用即重置 pending（管线异步重建向量）")
+}
+
+func TestEnableDocument_NotFound(t *testing.T) {
+	r := newTestRouter(newFakeSvc(), 64)
+	w := doReq(t, r, http.MethodPost, "/api/v1/documents/999/enable", "")
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	e := parseEnvelope(t, w.Body.Bytes())
+	require.NotNil(t, e.Error)
+	assert.Equal(t, ragapi.ErrDocumentNotFound.Error(), e.Error.Code)
 }
 
 // fmtBool 布尔字面量（避免引入 fmt 拼 body 的噪音）。

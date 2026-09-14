@@ -170,13 +170,30 @@ func (r ListDocumentsReq) Validate() error {
 	return nil
 }
 
-// DeleteDocumentReq 文档删除请求（路径参数；软删文档同事务硬删其 chunks——spec 04）。
+// DeleteDocumentReq 文档删除请求（路径参数；真删——行与全部 chunks 同事务硬删）。
 type DeleteDocumentReq struct {
 	ID uint64 `uri:"id" binding:"required"`
 }
 
 // Validate 跨字段校验（无）。
 func (r DeleteDocumentReq) Validate() error { return nil }
+
+// DisableDocumentReq 深度停用请求（路径参数；仅终态 ready/failed 可停用，入库中 409）。
+type DisableDocumentReq struct {
+	ID uint64 `uri:"id" binding:"required"`
+}
+
+// Validate 跨字段校验（无）。
+func (r DisableDocumentReq) Validate() error { return nil }
+
+// EnableDocumentReq 重新启用请求（路径参数；置 pending 自动重跑管线重建向量，
+// 入库中 409；已启用幂等成功不重跑）。
+type EnableDocumentReq struct {
+	ID uint64 `uri:"id" binding:"required"`
+}
+
+// Validate 跨字段校验（无）。
+func (r EnableDocumentReq) Validate() error { return nil }
 
 // ReindexDocumentReq 重建索引请求（路径参数；pending/processing 撞并发在 service 挡）。
 type ReindexDocumentReq struct {
@@ -230,14 +247,16 @@ type KnowledgeBaseListResult struct {
 	Total    int64                   `json:"total"`
 }
 
-// DocumentSchema 文档响应（上传 202 / 列表 / reindex 202）。status 四态
-// pending/processing/ready/failed 与 DB CHECK 对齐；error_message 仅 failed 非空。
+// DocumentSchema 文档响应（上传 202 / 列表 / reindex 202 / 启用 202）。status 四态
+// pending/processing/ready/failed 与 DB CHECK 对齐；error_message 仅 failed 非空；
+// Enabled=false 表示深度停用（向量已删、内容保留，重新启用自动重建索引）。
 type DocumentSchema struct {
 	schema.BaseSchema
 	Name         string `json:"name"`
 	FileType     string `json:"file_type"`
 	FileSize     int64  `json:"file_size"`
 	Status       string `json:"status"`
+	Enabled      bool   `json:"enabled"`
 	ChunkCount   int    `json:"chunk_count"`
 	ErrorMessage string `json:"error_message"`
 }

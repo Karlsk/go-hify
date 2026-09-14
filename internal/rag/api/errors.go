@@ -9,11 +9,9 @@ var (
 	ErrKnowledgeBaseNotFound = errors.New("KNOWLEDGE_BASE_NOT_FOUND")
 	// ErrKnowledgeBaseNameConflict 知识库名称唯一约束冲突（409，uq(name) 23505 翻译）。
 	ErrKnowledgeBaseNameConflict = errors.New("KNOWLEDGE_BASE_NAME_CONFLICT")
-	// ErrKnowledgeBaseInUse KB 下仍有文档（含软删，Unscoped 计数）挡删（409）。
-	ErrKnowledgeBaseInUse = errors.New("KNOWLEDGE_BASE_IN_USE")
 	// ErrDocumentNotFound 文档不存在（404）。
 	ErrDocumentNotFound = errors.New("DOCUMENT_NOT_FOUND")
-	// ErrDocumentProcessing 文档入库进行中（pending/processing），reindex 撞并发（409）。
+	// ErrDocumentProcessing 文档入库进行中（pending/processing），reindex / 停用 / 启用撞并发（409）。
 	ErrDocumentProcessing = errors.New("DOCUMENT_PROCESSING")
 	// ErrEmbeddingModelMismatch 多 KB 检索嵌入模型不一致（400，向量空间可比性前提）。
 	ErrEmbeddingModelMismatch = errors.New("EMBEDDING_MODEL_MISMATCH")

@@ -9,13 +9,15 @@ import (
 )
 
 // KnowledgeBase 知识库：绑定一个嵌入模型（维度随模型钉死，vector(1536) 不可改）。
-// 无软删——删除即硬删，且被文档（含软删，Unscoped 计数）占用时挡删（ErrKnowledgeBaseInUse）。
+// 无软删——删除即真删（级联清空其全部文档与分块，决策修订：挡删退役）。
 type KnowledgeBase struct {
 	db.BaseMutable
 	Name             string        `gorm:"not null"`
 	Description      string        `gorm:"not null"`
 	EmbeddingModelID uint64        `gorm:"not null"`
-	ChunkStrategy    ChunkStrategy `gorm:"type:jsonb;not null;default:'{}'"`
+	// serializer:json 让 GORM 以 JSON 编解码该列（2030b8d 遗漏该 tag——纯结构体无
+	// Valuer/Scanner，Save / 带策略 Create / jsonb Scan 均会绑参失败，靠此 tag 修复）。
+	ChunkStrategy ChunkStrategy `gorm:"type:jsonb;not null;default:'{}';serializer:json"`
 	// Enabled 启用开关：false = 检索范围静默剔除（service 层过滤），管理面仍可见可编辑。
 	// 布尔/数值字段一律不加 gorm default tag（provider 模块踩坑 #1：零值会被 GORM 默认值写回替换）。
 	Enabled bool `gorm:"not null"`
@@ -34,9 +36,10 @@ const (
 	StatusFailed     = "failed"
 )
 
-// Document 知识库文档：软删保底可恢复元信息 + 原文，向量物理删除省 HNSW 内存（恢复 = 重新 reindex）。
+// Document 知识库文档：无软删——深度停用（enabled=false）物理删向量分块省 HNSW
+// 内存、内容保留（重新启用 = 自动重建索引）；删除即真删（行 + chunks 同事务）。
 type Document struct {
-	db.BaseSoftDelete
+	db.BaseMutable
 	KnowledgeBaseID uint64 `gorm:"not null"`
 	Name            string `gorm:"not null"`
 	Content         string `gorm:"not null"`
@@ -49,6 +52,9 @@ type Document struct {
 	ErrorMessage string `gorm:"not null"`
 	// ChunkCount 分块数量（终态事务与 ready 原子同写；pending/processing/failed 恒 0——单写者保证见 spec 07）。
 	ChunkCount int `gorm:"not null"`
+	// Enabled 启用开关：false=深度停用（向量分块已物理删除、内容保留，检索不命中），
+	// 重新启用自动触发重建索引。布尔字段一律不加 gorm default tag（provider 踩坑 #1）。
+	Enabled bool `gorm:"not null"`
 }
 
 // TableName 显式表名。
@@ -57,10 +63,12 @@ func (Document) TableName() string { return "documents" }
 // DocumentChunk 文档分块（append-only）。
 //
 // 核心不变量（spec 01 §3 定义处，执行者在 spec 04 / 07）：document_chunks 有行
-// ⟺ 所属文档 status='ready' 且未软删。三条维护规则：
+// ⟺ 所属文档 status='ready' 且 enabled=true。四条维护规则：
 //  1. 终态事务：入库向量内存组装完成后，一个事务内批量 INSERT + MarkDocumentReady(id, N) 原子翻转；
-//  2. 软删文档 ⇒ 同事务硬删其 chunks（元信息软删保底，向量物理删省 HNSW 内存）；
-//  3. reindex ⇒ 事务内删 chunks + 置 pending（清 error_message，chunk_count=0）后重跑 pipeline。
+//  2. 停用文档 ⇒ 同事务硬删其 chunks + enabled=false + chunk_count=0（向量物理删省 HNSW 内存，内容保留）；
+//     删除文档 ⇒ 行 + chunks 同事务硬删；
+//  3. reindex ⇒ 事务内删 chunks + 置 pending（清 error_message，chunk_count=0）后重跑 pipeline；
+//  4. 启用文档 ⇒ 置 pending + enabled=true 后自动重跑 pipeline（重建向量）。
 //
 // KnowledgeBaseID 是冗余 KB 归属（文档不可换 KB，确定不变派生值），检索单表过滤免 JOIN。
 type DocumentChunk struct {
