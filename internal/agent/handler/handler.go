@@ -96,7 +96,7 @@ func (h *Handler) update(c *gin.Context) {
 	respond.OK(c, s)
 }
 
-// delete 软删除（204 无返回体；绑定保留、历史会话不动、新会话被拒）。
+// delete 真删（204 无返回体）：绑定由 FK CASCADE 清理；有历史会话 → 409 InUse。
 func (h *Handler) delete(c *gin.Context) {
 	var req agentapi.DeleteAgentReq
 	if !respond.BindUri(c, &req) {
@@ -118,6 +118,8 @@ func failAgent(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, agentapi.ErrAgentNotFound):
 		respond.Fail(c, http.StatusNotFound, agentapi.ErrAgentNotFound.Error(), "Agent 不存在")
+	case errors.Is(err, agentapi.ErrAgentInUse):
+		respond.Fail(c, http.StatusConflict, agentapi.ErrAgentInUse.Error(), "Agent 有历史会话，无法删除；可先删除相关会话或改为停用")
 	case errors.Is(err, agentapi.ErrToolNotFound):
 		respond.Fail(c, http.StatusNotFound, agentapi.ErrToolNotFound.Error(), "绑定的工具不存在")
 	case errors.Is(err, providerapi.ErrModelNotFound):

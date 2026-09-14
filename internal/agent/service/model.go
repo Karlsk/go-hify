@@ -9,17 +9,16 @@ import (
 // / max_context_turns / enabled）。
 // 参数打散列不用 jsonb——暴露旋钮仅 4 个，强类型 + DB CHECK 可查可校验（db_model.md 决策 #1）。
 //
-// 软删除（db.BaseSoftDelete）= 下架语义（决策 #9）：GORM 自动给查询加
-// WHERE deleted_at IS NULL、把 DELETE 改写为 UPDATE；绑定行（agent_tools）保留——
-// CASCADE 只在硬删触发，恢复时绑定还在；conversations 不受影响，新会话经
-// Get→ErrAgentNotFound 拒绝。Enabled=false 是停用（保留配置、新会话被拒），
-// 与软删两档独立：停用可一键恢复。
+// 无软删（决策 #9 修订，deleted_at 已随 00013 退役）：enabled=false = 停用（保留配置、
+// 新会话被拒、一键恢复）；DELETE = 真删——agent_tools / agent_knowledge_bases 绑定由
+// FK CASCADE 同步清理，有历史会话（conversations.agent_id FK RESTRICT）被挡删 409
+// ErrAgentInUse，可先删会话或改停用。
 //
 // 字段一律不加 GORM 数值 / 布尔 default tag：temperature=0（严谨）是合法零值，
 // 加 default 会被 GORM 在 INSERT 时替换成默认值（provider 模块踩坑 #1 的数值变体）；
 // 创建路径显式设值，DB 列 DEFAULT 只作直插 SQL 兜底。
 type Agent struct {
-	db.BaseSoftDelete
+	db.BaseMutable
 	Name            string  `gorm:"not null"` // 展示名（不唯一，决策 #5）
 	Description     string  `gorm:"not null"` // 用途说明，默认空串
 	ModelID         uint64  `gorm:"not null"` // 主模型 models.id（RESTRICT）

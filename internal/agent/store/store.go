@@ -12,8 +12,8 @@ import (
 )
 
 // selectAgent 显式列清单（禁 SELECT *）：agents 无大文本列，此处主要为对齐全仓规范
-// 与防加列耦合。deleted_at 一并取回（软删 mixin 字段，可见行恒为 NULL）。
-const selectAgent = "id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at, deleted_at"
+// 与防加列耦合。
+const selectAgent = "id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at"
 
 // Store 实现 agentsvc.Store。
 type Store struct{ db *gorm.DB }
@@ -31,7 +31,7 @@ func (s *Store) CreateAgent(ctx context.Context, a *agentsvc.Agent) error {
 	return s.db.WithContext(ctx).Create(a).Error
 }
 
-// GetAgentByID 按主键查（gorm.DeletedAt 自动加 WHERE deleted_at IS NULL，软删行不可见）；
+// GetAgentByID 按主键查（无软删——行恒可见，删除即真删）；
 // 未找到返回 gorm.ErrRecordNotFound。
 func (s *Store) GetAgentByID(ctx context.Context, id uint64) (*agentsvc.Agent, error) {
 	var a agentsvc.Agent
@@ -42,7 +42,7 @@ func (s *Store) GetAgentByID(ctx context.Context, id uint64) (*agentsvc.Agent, e
 	return &a, nil
 }
 
-// ListAgents 活跃 Agent 偏移分页（id 升序）：先 Count 再取当页（软删行两个查询都被过滤）。
+// ListAgents 偏移分页（id 升序）：先 Count 再取当页。
 func (s *Store) ListAgents(ctx context.Context, p page.OffsetParams) (page.OffsetResult[agentsvc.Agent], error) {
 	var (
 		items []agentsvc.Agent
@@ -64,13 +64,15 @@ func (s *Store) ListAgents(ctx context.Context, p page.OffsetParams) (page.Offse
 }
 
 // UpdateAgent 全量 Save（PUT 语义，零值一并覆盖）；updated_at 由 autoUpdateTime 维护。
-// 前置：a.ID 必须有效（service 层先 GetAgentByID 取得；软删行 WHERE 不命中即静默 0 行）。
+// 前置：a.ID 必须有效（service 层先 GetAgentByID 取得）。
 func (s *Store) UpdateAgent(ctx context.Context, a *agentsvc.Agent) error {
 	return s.db.WithContext(ctx).Save(a).Error
 }
 
-// DeleteAgent 软删除：gorm.DeletedAt 把 DELETE 改写为 UPDATE deleted_at（绑定行保留）；
-// RowsAffected=0（不存在或已软删）返回 gorm.ErrRecordNotFound。
+// DeleteAgent 硬删（无软删 mixin：真 DELETE）。agent_tools / agent_knowledge_bases
+// 绑定由 FK CASCADE 同步清理；仍有会话（conversations.agent_id FK RESTRICT）时 PG
+// 抛 23503，由 service 翻译 ErrAgentInUse。RowsAffected=0（不存在）返回
+// gorm.ErrRecordNotFound。
 func (s *Store) DeleteAgent(ctx context.Context, id uint64) error {
 	res := s.db.WithContext(ctx).Delete(&agentsvc.Agent{}, id)
 	if res.Error != nil {

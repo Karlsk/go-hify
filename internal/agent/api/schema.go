@@ -128,8 +128,8 @@ type GetAgentReq struct {
 // Validate 跨字段校验；当前无跨字段规则。
 func (r GetAgentReq) Validate() error { return nil }
 
-// DeleteAgentReq 软删除请求：绑定行保留（CASCADE 仅硬删触发）、历史会话不动，
-// 新会话经 Get→ErrAgentNotFound 拒绝（db_model.md 决策 #9）。
+// DeleteAgentReq 删除请求（真删）：绑定行由 FK CASCADE 清理；有历史会话 → 409
+// ErrAgentInUse 挡删，可先删会话或改停用（决策 #9 修订）。
 type DeleteAgentReq struct {
 	ID uint64 `uri:"id" binding:"required"`
 }

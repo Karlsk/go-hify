@@ -532,6 +532,17 @@ func TestDelete_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, agentapi.ErrAgentNotFound)
 }
 
+func TestDelete_InUse(t *testing.T) {
+	// 有历史会话：conversations.agent_id FK RESTRICT 抛 23503 → 挡删 ErrAgentInUse
+	st := &stubStore{deleteAgent: func(ctx context.Context, id uint64) error { return fkErr() }}
+	cm := &stubCache{}
+	svc := newSvc(st, okModels(), cm)
+
+	err := svc.Delete(context.Background(), agentapi.DeleteAgentReq{ID: 1})
+	assert.ErrorIs(t, err, agentapi.ErrAgentInUse)
+	assert.Empty(t, cm.deletedKeys, "删除被挡 DB 未变，不失效缓存")
+}
+
 func TestEvict_FailureDoesNotFailRequest(t *testing.T) {
 	cm := &stubCache{delete: func(ctx context.Context, name, key string) error { return errors.New("redis down") }}
 	svc := newSvc(&stubStore{}, okModels(), cm)

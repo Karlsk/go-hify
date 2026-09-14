@@ -13,18 +13,19 @@ type AgentService interface {
 	// ErrToolNotFound（tool_ids 含不存在的工具，FK 兜底）。
 	Create(ctx context.Context, req CreateAgentReq) (*AgentSchema, error)
 
-	// Get 详情（含绑定工具 id）；软删行不可见。
+	// Get 详情（含绑定工具 id）。
 	// 错误：ErrAgentNotFound。
 	Get(ctx context.Context, req GetAgentReq) (*AgentDetailSchema, error)
 
-	// List 活跃 Agent 偏移分页（id 升序，软删行不可见）。
+	// List 偏移分页（id 升序）。
 	List(ctx context.Context, req ListAgentsReq) (*AgentListResult, error)
 
 	// Update 整体更新（PUT 语义：全量覆盖，绑定在同一事务内先删后插）。
 	// 错误：ErrAgentNotFound、providerapi.ErrModelNotFound、ErrToolNotFound。
 	Update(ctx context.Context, req UpdateAgentReq) (*AgentSchema, error)
 
-	// Delete 软删除（绑定行保留、历史会话不动、新会话被拒）。
-	// 错误：ErrAgentNotFound。
+	// Delete 真删（无软删）：绑定行由 FK CASCADE 清理；有历史会话 → ErrAgentInUse
+	// 挡删（可先删会话或改停用）。
+	// 错误：ErrAgentNotFound、ErrAgentInUse。
 	Delete(ctx context.Context, req DeleteAgentReq) error
 }

@@ -17,8 +17,8 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/page"
 )
 
-// store 测试：sqlmock 注入 mock DB，验证 GORM 生成的 SQL 形态（显式列 / 软删过滤 /
-// WHERE / ORDER BY）与错误原样上抛；业务翻译（哨兵 / 23503）在 service 层测试覆盖。
+// store 测试：sqlmock 注入 mock DB，验证 GORM 生成的 SQL 形态（显式列 / WHERE /
+// ORDER BY / 真删 DELETE）与错误原样上抛；业务翻译（哨兵 / 23503）在 service 层测试覆盖。
 
 func newMockDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 	t.Helper()
@@ -35,12 +35,12 @@ func newMockDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 }
 
 // 列清单（与 store.go 的 selectAgent 一致，供 NewRows 用）。
-var agentCols = []string{"id", "name", "description", "model_id", "fallback_model_id", "system_prompt", "temperature", "max_output_tokens", "max_context_turns", "enabled", "created_at", "updated_at", "deleted_at"}
+var agentCols = []string{"id", "name", "description", "model_id", "fallback_model_id", "system_prompt", "temperature", "max_output_tokens", "max_context_turns", "enabled", "created_at", "updated_at"}
 
 // avals 展开为 agents 一行（列序 = agentCols）；基础列填典型值，变体由参数带入。
 // max_context_turns=10 / enabled=true 固定（store 层无缺省逻辑，值原样扫描）。
 func avals(id, modelID uint64, fallback, maxTok *int64, now time.Time) []driver.Value {
-	return []driver.Value{id, "客服助手", "回答售后问题", modelID, fallback, "你是售后客服", 0.7, maxTok, 10, true, now, now, nil}
+	return []driver.Value{id, "客服助手", "回答售后问题", modelID, fallback, "你是售后客服", 0.7, maxTok, 10, true, now, now}
 }
 
 // agentRows 单行 agents 结果集。
@@ -48,13 +48,13 @@ func agentRows(vals []driver.Value) *sqlmock.Rows {
 	return sqlmock.NewRows(agentCols).AddRow(vals...)
 }
 
-const getAgentByIDSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at, deleted_at FROM "agents" WHERE "agents"."id" = $1 AND "agents"."deleted_at" IS NULL ORDER BY "agents"."id" LIMIT $2`
+const getAgentByIDSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at FROM "agents" WHERE "agents"."id" = $1 ORDER BY "agents"."id" LIMIT $2`
 
-const listAgentsCountSQL = `SELECT count(*) FROM "agents" WHERE "agents"."deleted_at" IS NULL`
+const listAgentsCountSQL = `SELECT count(*) FROM "agents"`
 
-const listAgentsPageSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at, deleted_at FROM "agents" WHERE "agents"."deleted_at" IS NULL ORDER BY id LIMIT $1`
+const listAgentsPageSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at FROM "agents" ORDER BY id LIMIT $1`
 
-const deleteAgentSQL = `UPDATE "agents" SET "deleted_at"=$1 WHERE "agents"."id" = $2 AND "agents"."deleted_at" IS NULL`
+const deleteAgentSQL = `DELETE FROM "agents" WHERE "agents"."id" = $1`
 
 const listToolIDsSQL = `SELECT "tool_id" FROM "agent_tools" WHERE agent_id = $1 ORDER BY id`
 
@@ -171,9 +171,9 @@ func TestDeleteAgent(t *testing.T) {
 	db, mock := newMockDB(t)
 	s := New(db)
 	mock.ExpectBegin()
-	// 软删除：DELETE 被改写为 UPDATE deleted_at，且 WHERE 带软删过滤（已软删的行不再命中）。
+	// 硬删（无软删 mixin）：真 DELETE；绑定行由 FK CASCADE 清理（PG 侧行为，不在此断言）。
 	mock.ExpectExec(regexp.QuoteMeta(deleteAgentSQL)).
-		WithArgs(sqlmock.AnyArg(), uint64(1)).
+		WithArgs(uint64(1)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -187,7 +187,7 @@ func TestDeleteAgentNotFound(t *testing.T) {
 	s := New(db)
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(deleteAgentSQL)).
-		WithArgs(sqlmock.AnyArg(), uint64(999)).
+		WithArgs(uint64(999)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 

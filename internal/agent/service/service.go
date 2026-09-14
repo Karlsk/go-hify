@@ -25,16 +25,17 @@ import (
 type Store interface {
 	// CreateAgent 插入 Agent（id / created_at / updated_at 由 DB 生成并经 RETURNING 回填）。
 	CreateAgent(ctx context.Context, a *Agent) error
-	// GetAgentByID 按主键查（软删行不可见）；未找到返回 gorm.ErrRecordNotFound。
+	// GetAgentByID 按主键查（无软删——行恒可见）；未找到返回 gorm.ErrRecordNotFound。
 	GetAgentByID(ctx context.Context, id uint64) (*Agent, error)
-	// ListAgents 活跃 Agent 偏移分页（id 升序）。agents 是极小配置表，
+	// ListAgents 偏移分页（id 升序）。agents 是极小配置表，
 	// 按接口规范走偏移分页（keyset 强制规则的例外表）。
 	ListAgents(ctx context.Context, p page.OffsetParams) (page.OffsetResult[Agent], error)
 	// UpdateAgent 全量 Save（PUT 语义，零值一并覆盖）。前置：a.ID 有效
-	// （service 先 GetAgentByID 确认存在，并发删除由 Save 的 WHERE deleted_at IS NULL 兜底）。
+	// （service 先 GetAgentByID 确认存在）。
 	UpdateAgent(ctx context.Context, a *Agent) error
-	// DeleteAgent 软删除（gorm.DeletedAt 把 DELETE 改写为 UPDATE deleted_at，
-	// agent_tools 绑定行保留）；RowsAffected=0 返回 gorm.ErrRecordNotFound。
+	// DeleteAgent 硬删（真 DELETE）：agent_tools / agent_knowledge_bases 绑定由 FK
+	// CASCADE 清理；仍有会话时 PG 抛 23503（conversations FK RESTRICT），由调用方
+	// （service.Delete）翻译 ErrAgentInUse。RowsAffected=0 返回 gorm.ErrRecordNotFound。
 	DeleteAgent(ctx context.Context, id uint64) error
 	// ListToolIDsByAgent 读某 Agent 绑定的工具 id 列表（按绑定先后，id 升序）。
 	ListToolIDsByAgent(ctx context.Context, agentID uint64) ([]uint64, error)
@@ -115,7 +116,7 @@ func (s *agentService) Create(ctx context.Context, req agentapi.CreateAgentReq) 
 	return &schema, nil
 }
 
-// Get 详情（含绑定工具 id）：先查缓存，miss 落库并回填；软删行不可见。
+// Get 详情（含绑定工具 id）：先查缓存，miss 落库并回填。
 // 错误：agentapi.ErrAgentNotFound。
 func (s *agentService) Get(ctx context.Context, req agentapi.GetAgentReq) (*agentapi.AgentDetailSchema, error) {
 	if err := req.Validate(); err != nil {
@@ -254,8 +255,10 @@ func (s *agentService) Update(ctx context.Context, req agentapi.UpdateAgentReq) 
 	return &schema, nil
 }
 
-// Delete 软删除：绑定行保留（CASCADE 仅硬删触发）、历史会话不动、新会话被拒。
-// 错误：agentapi.ErrAgentNotFound。
+// Delete 真删（决策 #9 修订：软删退役）：agent_tools / agent_knowledge_bases 绑定由
+// FK CASCADE 同步清理；有历史会话（conversations.agent_id FK RESTRICT → 23503）→
+// ErrAgentInUse 挡删，可先删会话或改停用（enabled=false）。
+// 错误：agentapi.ErrAgentNotFound、agentapi.ErrAgentInUse。
 func (s *agentService) Delete(ctx context.Context, req agentapi.DeleteAgentReq) error {
 	if err := req.Validate(); err != nil {
 		return fmt.Errorf("validate delete agent: %w", err)
@@ -263,6 +266,9 @@ func (s *agentService) Delete(ctx context.Context, req agentapi.DeleteAgentReq) 
 	if err := s.store.DeleteAgent(ctx, req.ID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return agentapi.ErrAgentNotFound
+		}
+		if isFKViolation(err) {
+			return agentapi.ErrAgentInUse // 仍有会话引用，挡删
 		}
 		return fmt.Errorf("delete agent %d: %w", req.ID, err)
 	}
