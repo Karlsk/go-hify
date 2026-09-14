@@ -85,7 +85,7 @@ LLM 答不出公司文档内容的根因：知识在训练完成那一刻冻结�
 | 召回器 | rag store 原生 SQL（`db.Raw`）+ `SET LOCAL hnsw.ef_search`，按 KB/document_id 过滤 |
 | 上下文注入 | chat 引擎 RAG 路径，召回结果拼进多轮上下文 |
 | Agent ↔ 知识库绑定 | `agent_knowledge_bases` 表 |
-| 生命周期 | `documents` 状态机 + 软删除 + `POST /documents/{id}/reindex` |
+| 生命周期 | `documents` 状态机 + enabled 深度停用/恢复（2026-09-14 修订，软删退役）+ `POST /documents/{id}/reindex` |
 | 引用展示 | 对话前端 |
 | 评估 | 上线前 golden set 跑 top-k 命中率（CLAUDE.md 明确要求） |
 

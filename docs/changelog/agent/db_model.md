@@ -21,14 +21,15 @@ erDiagram
 
     agents {
         bigint id PK
-        text name "不唯一（20-50人重名无害；要唯一须 partial WHERE deleted_at IS NULL）"
+        text name "不唯一（20-50人重名无害）"
         text description "默认空串"
         bigint model_id FK "主模型，RESTRICT；删模型报 MODEL_IN_USE 的检测靠 FK 23503 翻译"
         bigint fallback_model_id FK "备用模型，一期配置位不启用"
         text system_prompt "角色指令；长度上限走应用层 binding"
         numeric temperature "0.00-2.00，DEFAULT 0.7，CHECK 约束；工具型建议 0-0.3"
         bigint max_output_tokens "NULL=跟随模型默认（chat 引擎读 nil 不设 option）"
-        timestamptz deleted_at "软删除=下架语义"
+        timestamptz deleted_at "〔已退役〕原软删除列——迁移 00013 删除；可逆下架由 00009 的 enabled 承担"
+        boolean enabled "启用开关：false=停用（保留配置，新会话被拒）——00009 增补"
     }
     agent_tools {
         bigint id PK "代理主键（标准表头回归，model 可 embed BaseAppendOnly）"
@@ -38,7 +39,7 @@ erDiagram
     }
 ```
 
-索引：`uq_agent_tools(agent_id, tool_id)` 防重复绑定 + 最左前缀覆盖按 agent 查询；`idx_agent_tools_tool` 反查"某工具被哪些 Agent 绑"（复合唯一覆盖不了单列查询，不冗余）；`idx_agents_model` / `idx_agents_fallback_model`（排障与未来反查）；`idx_agents_active` partial（活跃列表）。
+索引：`uq_agent_tools(agent_id, tool_id)` 防重复绑定 + 最左前缀覆盖按 agent 查询；`idx_agent_tools_tool` 反查"某工具被哪些 Agent 绑"（复合唯一覆盖不了单列查询，不冗余）；`idx_agents_model` / `idx_agents_fallback_model`（排障与未来反查）；`idx_agents_active` partial（活跃列表）〔已退役：其 partial 谓词引用 deleted_at，随迁移 00013 DROP COLUMN 被 PG 依赖级联自动删除〕。
 
 ## 2. 关键决策（三轮评审收敛，勿回头）
 
@@ -47,12 +48,12 @@ erDiagram
 | 1 | 模型参数打散列（temperature + max_output_tokens），不用 jsonb | 暴露旋钮仅 2-3 个，强类型 + CHECK 可查可校验；jsonb 万金轮 = ext 垃圾场 |
 | 2 | `max_output_tokens bigint NULL`，不用 `NOT NULL DEFAULT 2048` | NULL=跟随模型默认最诚实；硬默认会静默截断长输出 |
 | 3 | **不存 `max_context_turns`** | 上下文组装归 chat 引擎（token 预算实现，轮数不可靠）；加列便宜、撤已发布配置难 |
-| 4 | 不加 `enabled` 列 | 软删已覆盖下架；"临时停用可恢复"不是一期真需求 |
-| 5 | `name` 不唯一 | 跟随 CLAUDE.md 索引地图；普通唯一 + 软删 = 删掉的行占名 |
+| 4 | 不加 `enabled` 列 | 软删已覆盖下架；"临时停用可恢复"不是一期真需求。〔2026-08 后被推翻：迁移 00009 增补 `enabled`（停用 = 保留配置 + 新会话被拒）〕 |
+| 5 | `name` 不唯一 | 跟随 CLAUDE.md 索引地图；普通唯一 + 软删 = 删掉的行占名。〔软删已退役（迁移 00013），本条顾虑不复存在〕 |
 | 6 | **绑定粒度 = 工具，不是 server** | 绑定即授权，授权到能力本身；绑 server 则新 discover 的工具自动获得授权（无人审批）+ 提示词全量注入膨胀。拒绝 agents 上加 jsonb 权限字段——那是劣化版绑 tool（名字漂移、无反查、无审计） |
 | 7 | `agent_tools` 用代理 id 主键 + uq | 用户拍板；标准表头（每表必备 id）回归，model 可 embed `db.BaseAppendOnly` |
 | 8 | ReAct 迭代上限**不进 DB** | chat 引擎常量（默认 8 轮工具调用），触发后优雅收尾（"请基于以上信息作答"），executions 记 finish_reason=max_iterations；用户不知该填几，不暴露成产品配置 |
-| 9 | 软删除而非硬删 | conversations.agent_id RESTRICT 拦硬删——带历史的 Agent 永远硬删不掉；软删后绑定行保留（CASCADE 只在硬删触发），恢复时绑定还在 |
+| 9 | 软删除而非硬删 | conversations.agent_id RESTRICT 拦硬删——带历史的 Agent 永远硬删不掉；软删后绑定行保留（CASCADE 只在硬删触发），恢复时绑定还在。**〔2026-09-14 修订（用户批准）：软删退役（迁移 00013）**——DELETE = 真删（绑定行 FK CASCADE 清理）；有历史会话时 FK RESTRICT 23503 → `agentapi.ErrAgentInUse`(409) 挡删；可逆下架由既有 `enabled` 承担（停用 = 新会话被拒，一键恢复）；误删兜底 = PG 每日备份〕 |
 
 ## 3. 与 mcp / chat 的运行时契约（后续模块实现时对照）
 

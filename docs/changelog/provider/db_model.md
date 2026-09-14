@@ -196,7 +196,7 @@ erDiagram
 |---|---|
 | `AUTO_INCREMENT` | `bigint GENERATED ALWAYS AS IDENTITY` |
 | `VARCHAR(N)` | `text` |
-| `TINYINT` 代布尔 / `deleted` 软删除 | `boolean`；软删除仅 agents/documents（软删行仍占 name 唯一键，重建同名会 409） |
+| `TINYINT` 代布尔 / `deleted` 软删除 | `boolean`；软删除仅 agents/documents（软删行仍占 name 唯一键，重建同名会 409）〔2026-09-14 修订：软删除全面退役（迁移 00013），可逆下架由业务 `enabled` 布尔承担〕 |
 | `DATETIME` | `timestamptz`（UTC） |
 | `JSON` | `jsonb` |
 | 行内 `COMMENT` | `COMMENT ON` |

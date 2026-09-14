@@ -40,7 +40,7 @@
 ## 5. 接线（本篇全部增量代码点）
 
 - `service.New` 改双返回 `(ragapi.KnowledgeBaseService, *Recovery)`（照 provider `(api, Prober)` 先例）；
-- `UploadDocument` / `ReindexDocument` 尾部各加一行 dispatch 调用（04 刻意留白的接线点）；
+- `UploadDocument` / `ReindexDocument` 尾部各加一行 dispatch 调用（04 刻意留白的接线点）；`EnableDocument` 命中状态机后同样 dispatch 重跑管线（2026-09-14 修订新增；幂等路径不 dispatch 防误花 embedding 费）；
 - server.go 装配一行（`MarkInterruptedFailed`）属 08。
 
 ## 6. 单测与验收门
@@ -54,7 +54,7 @@
 ## 7. 风险（本篇）
 
 1. **`context.WithoutCancel` 必须用**——直接透传请求 ctx 会让 embedding 立刻 abort。
-2. 不变量维护责任：任何让文档离开 ready 的新路径必须同事务删 chunks（04 已实现软删/reindex 两处，本篇终态事务是第三处闭环）。
+2. 不变量维护责任：任何让文档离开 ready 的新路径必须同事务删 chunks（04 已实现真删/深度停用/reindex 三处删除路径〔2026-09-14 修订〕，本篇终态事务完成最后一处闭环）。
 3. embedding 永不进事务；终态事务只含纯 DB 写。
 4. 内存峰值被 MaxUploadBytes 钉死；二期放开上限前必须先改流式分批提交。
 5. 单写者假设（信号量 + ErrDocumentProcessing）——将来引入并发写文档路径需补乐观锁。

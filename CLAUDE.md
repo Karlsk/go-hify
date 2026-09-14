@@ -702,10 +702,10 @@ created_at timestamptz NOT NULL DEFAULT now(),
 -- updated_at 仅可变表有（见下）
 ```
 
-> **Go 侧表头**：上述标准表头由 `internal/platform/db` 的三套 mixin 提供，各模块 `service/model.go` 按表性质 embed 即可，不必重复声明 id / created_at：
+> **Go 侧表头**：上述标准表头由 `internal/platform/db` 的 mixin 提供，各模块 `service/model.go` 按表性质 embed 即可，不必重复声明 id / created_at：
 > - `db.BaseAppendOnly`（id + created_at）—— append-only 表（executions / messages / chunks）；
 > - `db.BaseMutable`（+ updated_at，`autoUpdateTime`）—— 可变表（providers / agents / ...）；
-> - `db.BaseSoftDelete`（+ deleted_at，`gorm.DeletedAt` 自动加 `WHERE deleted_at IS NULL`）—— 仅 agents / documents。
+> - `db.BaseSoftDelete`（+ deleted_at，`gorm.DeletedAt` 自动加 `WHERE deleted_at IS NULL`）—— 一期无使用者（软删已全面退役，见下），mixin 保留备用。
 >
 > model 只带 `gorm` tag、不带 `json` tag（序列化是 api/schema 的事，ID 的 `"id,string"` 在 schema 上做）；表的真实 DDL（含 `GENERATED ALWAYS AS IDENTITY`、partial 索引）仍由 migrations/ SQL 决定，本包从不 AutoMigrate。
 
@@ -726,7 +726,7 @@ created_at timestamptz NOT NULL DEFAULT now(),
 
 - **append-only 表**（`executions` / `messages` / `chunks`）：只有 `created_at`，不要 `updated_at`。
 - **可变表**（`providers` / `agents` / `mcp_servers` / `knowledge_bases` / `workflows` / `conversations` / `documents`）：加 `updated_at`，GORM `autoUpdateTime` 维护；日后引入裸 SQL UPDATE 路径再加 `BEFORE UPDATE` 触发器兜底。
-- **软删除**（`deleted_at timestamptz`）：只给业务需要的表（`agents` / `documents`），配 partial 索引 `WHERE deleted_at IS NULL`；不全局加。
+- **无软删除**（`deleted_at` 已全面退役，迁移 00013）：可逆下架统一由业务 `enabled` 布尔开关承担（可见、可恢复——KB / Agent 轻量停用，Document 深度停用 = 事务删向量分块、内容保留、重新启用自动重跑入库管线）；DELETE = 真删（级联清理，误删兜底 PG 每日备份）。Agent 有历史会话时 FK RESTRICT 挡删（409 `AGENT_IN_USE`）。不引入 `deleted_at` 列。
 
 命名（建表直接照抄）：
 
@@ -754,7 +754,7 @@ COMMENT ON COLUMN executions.error_class IS 'Timeout/RateLimited/Overloaded/Netw
 1. **每个外键必须单独建索引**（PG 不自动建）。漏建 = 慢 JOIN + DELETE 锁升级。检测脚本见《监控》。
 2. **复合索引：等值列在前，范围/排序列在后。**
 3. **按访问模式建索引，不是按列建**——从真实 WHERE/ORDER BY 推导；用 `pg_stat_user_indexes` 复查，删未用索引。
-4. **partial 索引**给稀疏标志（`WHERE deleted_at IS NULL`、`WHERE status='processing'`）——更小更快。
+4. **partial 索引**给稀疏标志（`WHERE status IN ('pending','processing')`、`WHERE error_class IS NOT NULL`）——更小更快。
 5. **covering 索引（`INCLUDE`）**只给已证实的热读路径。
 6. **向量列一律建 HNSW**（`chunks.embedding`），建表即建，参数与 ops 类见《pgvector 索引规范》。
 7. **GIN 只给"按 jsonb 内容过滤"的场景**；纯整块存取（`workflows.config` 按 id 取）不要 GIN。
@@ -1112,6 +1112,7 @@ HTTP 状态映射：
 | `SERVICE_UNAVAILABLE` | 503 | `errs.ErrServiceUnavailable`（通用 503 兜底） |
 | `AGENT_NOT_FOUND` | 404 | `agentapi.ErrAgentNotFound` |
 | `AGENT_DISABLED` | 503 | `agentapi.ErrAgentDisabled`（Agent 已停用，新会话被拒） |
+| `AGENT_IN_USE` | 409 | `agentapi.ErrAgentInUse`（Agent 有历史会话，删除被 FK RESTRICT 挡） |
 | `CONVERSATION_NOT_FOUND` | 404 | `chatapi.ErrConversationNotFound` |
 | `MODEL_CONTEXT_TOO_LONG` | 400 | `chatapi.ErrModelContextTooLong`（chat service 翻译自 llm `InvalidRequest`） |
 | `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound` |

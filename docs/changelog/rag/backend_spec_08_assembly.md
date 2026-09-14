@@ -23,11 +23,11 @@ ragRecovery.MarkInterruptedFailed(appCtx)            // 失败仅 WARN（07）
 ## 2. 路由注册
 
 - `raghandler.New(ragSvc, cfg.Rag.MaxUploadBytes).RegisterRoutes(rg)`——两组路由分开注册（`/knowledge-bases/:id/...` 与 `/documents/:id`），组内无 `:id` 与静态段同级冲突（04）。
-- 全部 11 端点在 `/api/v1` 下、auth 中间件之后（组合根先挂中间件再 RegisterRoutes 的既有顺序）。
+- 全部 13 端点在 `/api/v1` 下、auth 中间件之后（组合根先挂中间件再 RegisterRoutes 的既有顺序；11 + documents disable/enable，2026-09-14 修订）。
 
 ## 3. 骨架冒烟（curl，可提交门）
 
-建 KB 201（enabled=true）→ 列表分页 + `?name=` 模糊命中 → 详情 200 → PUT 改 name/enabled 200 → 删有文档 KB 409 / 删空 KB 204 → 上传 .md 202 **status=pending**（file_type/file_size 回显）→ 上传 .pdf / 超 2MB 400 → 文档列表游标分页 + 详情（content / chunk_count=0）→ 软删文档 204 → `POST /knowledge-bases/{id}/retrieve` 空库返回 `[]`。
+建 KB 201（enabled=true）→ 列表分页 + `?name=` 模糊命中 → 详情 200 → PUT 改 name/enabled 200 → 删 KB 204（级联真删，2026-09-14 修订）→ 上传 .md 202 **status=pending**（file_type/file_size 回显）→ 上传 .pdf / 超 2MB 400 → 文档列表游标分页 + 详情（content / chunk_count=0）→ 删文档 204 / 停用文档 204 / 启用文档 202 → `POST /knowledge-bases/{id}/retrieve` 空库返回 `[]`。
 
 ## 4. 端到端验收（完整闭环）
 
@@ -37,8 +37,8 @@ ragRecovery.MarkInterruptedFailed(appCtx)            // 失败仅 WARN（07）
    - **检索验收**：`{"query":"退货要自己出运费吗"}` → top1 含「运费由公司承担」且带 DocumentName，similarity 明显高于无关 query（语义改写命中，非关键词匹配）；
    - **disabled 剔除**：PUT KB enabled=false → 同 query 返回 `[]`；改回 true 恢复命中；
    - **name 模糊**：`GET /knowledge-bases?name=手册` 命中「产品手册库」；
-   - 负向：重名 409 / .pdf 400 / 超 2MB 400 / 删有文档 KB 409 / processing 中 reindex 409；
-   - 生命周期：reindex→ready 且 chunk_count 不变；DELETE 文档后 retrieve 不再命中其内容（**验证软删联动删 chunks**：`SELECT count(*) FROM document_chunks WHERE document_id=?` = 0）；处理中重启服务→failed + error_message 含「服务重启中断」。
+   - 负向：重名 409 / .pdf 400 / 超 2MB 400 / processing 中 reindex 409 / 已停用文档 reindex 400；
+   - 生命周期：reindex→ready 且 chunk_count 不变；DELETE 文档后 retrieve 不再命中其内容（**验证删除联动删 chunks**：`SELECT count(*) FROM document_chunks WHERE document_id=?` = 0）；**disable 后检索不命中且 chunk_count=0、enable 后自动 pending→ready 重建向量**（2026-09-14 修订）；处理中重启服务→failed + error_message 含「服务重启中断」。
 3. SQL 侧：`EXPLAIN (ANALYZE)` 确认召回走 idx_document_chunks_embedding（小表 Seq Scan 属正常——[pgvector_quickstart.md](pgvector_quickstart.md) 坑 1）。
 
 ## 5. 验收门与风险指针

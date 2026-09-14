@@ -1,6 +1,6 @@
 # RAG spec 01 · 模型与数据迁移（backend_spec_01_model_migration）
 
-> 状态：**实施 spec**（2026-09-07），8 篇之 01；决策依据与全量决策表见总览 [backend_module_spec.md](backend_module_spec.md)。前置依赖：无（起点）。
+> 状态：**实施 spec**（2026-09-07；2026-09-14 修订：**软删除退役**——`documents.deleted_at` 由迁移 00013 移除，可逆下架改由 `enabled` 承担，见 §3/§4 修订标注），8 篇之 01；决策依据与全量决策表见总览 [backend_module_spec.md](backend_module_spec.md)。前置依赖：无（起点）。
 > 交付：增量迁移 00011 + `service/model.go` GORM 实体 + 平台地基三件（config.RagCfg / respond.Accepted / cache.NameRag）+ go get pgvector-go。**核心不变量在本篇定义**——后续 CRUD（04）、管线（07）spec 是执行者。
 
 ## 1. go.mod
@@ -76,20 +76,20 @@ ALTER TABLE knowledge_bases DROP COLUMN IF EXISTS enabled;
 
 ## 3. 核心不变量（定义处；执行者在 04/07）
 
-> **`document_chunks` 有行 ⟺ 所属文档 `status='ready'` 且未软删。**
+> **`document_chunks` 有行 ⟺ 所属文档 `status='ready'` 且 `enabled=true`。**（2026-09-14 修订：软删退役，原「未软删」条件由 `enabled` 承担）
 
 三条维护规则，任何新增代码路径不得例外：
 
 1. **终态事务**（执行：spec 07）：入库全部向量在内存组装完成后，一个事务内批量 INSERT + `MarkDocumentReady(id, N)` 原子翻转——事务前任何失败 = 零 chunks，无孤儿向量；
-2. **软删文档 ⇒ 同事务硬删其 chunks**（执行：spec 04）：文档行软删保底可恢复元信息+原文，向量物理删除省 HNSW 内存；恢复 = 重新 reindex（~$0.02/1M tokens 可忽略）；
-3. **reindex ⇒ 事务内删 chunks + 置 pending（清 error_message，chunk_count=0）** 后重跑 pipeline（执行：spec 04 事务重置 + spec 07 dispatch）。
+2. **文档离开 ready ⇒ 同事务硬删其 chunks**（执行：spec 04；2026-09-14 修订）：DELETE = 真删（documents 行 + chunks 同事务）；深度停用（`enabled=false`）= 删向量保内容（行可见可恢复，重新启用自动重跑管线，恢复成本 ~$0.02/1M tokens 可忽略）；
+3. **reindex ⇒ 事务内删 chunks + 置 pending（清 error_message，chunk_count=0）** 后重跑 pipeline（执行：spec 04 事务重置 + spec 07 dispatch；已停用文档 reindex → 400，防给停用文档产 chunks 破坏不变量）。
 
 单写者保证（chunk_count / chunks 无需乐观锁）：pipeline 信号量串行 + reindex 被 `ErrDocumentProcessing` 挡并发——不存在两个 goroutine 写同一文档的窗口。
 
 ## 4. service/model.go（GORM 实体，模块私有）
 
 - `KnowledgeBase`（embed `db.BaseMutable`；**+Enabled bool**；无软删，删除即硬删）。
-- `Document`（embed `db.BaseSoftDelete`；Status 常量 `StatusPending/StatusProcessing/StatusReady/StatusFailed`；**+FileType/FileSize/ErrorMessage/ChunkCount**）。
+- `Document`（embed `db.BaseMutable`——2026-09-14 修订（迁移 00013）：`BaseSoftDelete` → `BaseMutable`，`deleted_at` 全面退役；Status 常量 `StatusPending/StatusProcessing/StatusReady/StatusFailed`；**+FileType/FileSize/ErrorMessage/ChunkCount/Enabled**，创建路径显式置 true，布尔字段一律不加 gorm default tag）。
 - `DocumentChunk`（embed `db.BaseAppendOnly`；`DocumentID/KnowledgeBaseID/ChunkIndex/Content/TokenCount` + `Embedding pgvector.Vector \`gorm:"type:vector(1536)"\` 声明性标注，DDL 在 migrations）；`TableName() = "document_chunks"`。
 - `ChunkHit`（Raw Scan 目标：id/document_id/knowledge_base_id/chunk_index/content/token_count/distance——**无 name，名称走二次查询**）。
 - 纪律：字段一律不加 gorm default tag；显式 `TableName()`；model 不打 json tag（序列化是 api/schema 的事）。

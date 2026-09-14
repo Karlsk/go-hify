@@ -6,8 +6,8 @@
 > |---|---|---|---|
 > | 01 | [模型与数据迁移](backend_spec_01_model_migration.md) | 00011 迁移 + model.go 实体 + 核心不变量定义 + RagCfg/Accepted/NameRag 地基 | config 校验；migrate up/down |
 > | 02 | [embedding 能力](backend_spec_02_embedding.md) | platform/llm/embed.go（4 槽 + 5s 总预算 + 重试矩阵） | httptest 按 kind 打桩 |
-> | 03 | [接口定义](backend_spec_03_api_contract.md) | api 三文件（12 方法契约 + schema + 6 哨兵） | schema_test 表驱动 |
-> | 04 | [CRUD](backend_spec_04_crud.md) | KB/文档 CRUD 三层（端点 1-10；软删联动/reindex 事务重置） | service/store/handler 三层 stub |
+> | 03 | [接口定义](backend_spec_03_api_contract.md) | api 三文件（12→13 方法契约〔2026-09-14 修订 +Disable/Enable〕+ schema + 6 哨兵） | schema_test 表驱动；api_test 方法集钉死 |
+> | 04 | [CRUD](backend_spec_04_crud.md) | KB/文档 CRUD 三层（端点 1-10 + disable/enable〔2026-09-14 修订〕；级联真删/深度停用/reindex 事务重置） | service/store/handler 三层 stub |
 > | 05 | [检索](backend_spec_05_retrieval.md) | Retrieve 编排 + SearchChunks 单表 SQL（端点 11） | 召回 SQL 事务序列断言 |
 > | 06 | [分块与解析](backend_spec_06_chunker.md) | chunker.go 纯函数（extractText + 递归分割 + token 估算） | 表驱动，零依赖可先行 |
 > | 07 | [管道](backend_spec_07_pipeline.md) | dispatch + 状态机 + 终态事务 + Recovery + 接线 | dispatch 注入同步直调 |
@@ -27,9 +27,9 @@
 | 3 | 上传报文 | multipart（`file` + 可选 `name`），handler 手动绑定 + `Validate()` 兜底；ContentLength 预检 + LimitReader 双保险；202 响应 data 含 `status=pending` + file_type/file_size |
 | 4 | 异步编排 | goroutine + `semaphore.Weighted`（DB 即持久队列）；**状态机四态** `pending→processing→ready/failed`，启动扫 pending/processing 残留 → 置 failed（不自动重跑，reindex 是显式用户动作） |
 | 5 | 分块 | **递归分割** `SplitChunks(content, size, overlap)`（第四轮定稿）：段落(`\n\n`)贪心合并 > 单段超长降级句子边界（中英标点、小数点豁免）> 无标点硬截；MD 围栏(````)原子保护；尺寸 500/80 **rune**；overlap = 上一块尾部前缀。否决固定滑窗（用户升级为递归）；否决 tiktoken 精确 token（词汇表 2-4MB、cl100k 绑 OpenAI 系、跨 provider 不通用——估算 ±20% 下"精确 512"是假精度，token_count 维持估算列） |
-| 6 | 召回 SQL | **单表查询 `document_chunks`**（冗余 kb_id 免 JOIN）；`db.Transaction` 内 `SET LOCAL hnsw.ef_search`；正确性由不变量保证（定义见 [spec 01](backend_spec_01_model_migration.md) §3），不再手写 status/deleted_at 过滤 |
+| 6 | 召回 SQL | **单表查询 `document_chunks`**（冗余 kb_id 免 JOIN）；`db.Transaction` 内 `SET LOCAL hnsw.ef_search`；正确性由不变量保证（定义见 [spec 01](backend_spec_01_model_migration.md) §3，2026-09-14 修订后 = status='ready' 且 enabled=true），不再手写 status/enabled 过滤 |
 | 7 | 哨兵 | rag 新增 6 个 + llm 新增 1 个；文件类型/大小/空内容走 `errs.ErrValidationFailed` |
-| 8 | KB 删除 | **硬删 + 有文档（含软删，Unscoped 计数）→ `ErrKnowledgeBaseInUse`(409) 拒绝**（第三轮再次确认，否决草稿的逻辑删除级联——防误删知识资产 + chunks 永不逻辑删）；CASCADE 只清 agent 绑定 |
+| 8 | KB 删除 | **硬删 + 有文档（含软删，Unscoped 计数）→ `ErrKnowledgeBaseInUse`(409) 拒绝**（第三轮再次确认，否决草稿的逻辑删除级联——防误删知识资产 + chunks 永不逻辑删）；CASCADE 只清 agent 绑定。**2026-09-14 修订（用户批准，本条挡删语义退役）**：KB Delete = 级联真删单事务（chunks→documents→KB 行），`ErrKnowledgeBaseInUse` 移除；误删兜底 = PG 每日备份 |
 | 9 | 模型校验 | 建 KB 时 `ModelService.Get` 预检：capability=embedding + enabled + dim==1536（常量钉死） |
 | 10 | KB 启停用 | `enabled boolean NOT NULL DEFAULT true`（不用 1/0 整数，PG 原生布尔）；检索侧 service 解析 KB 列表时**静默剔除 disabled**——管理员下架某库，绑它的 Agent 用剩余库继续工作，不报错；管理面照常可见可编辑 |
 | 11 | 文档元数据 | `file_type text + CHECK('txt','md')`（取**扩展名**而非 mime——mime 可伪造；二期加 pdf 只改 CHECK）、`file_size bigint`（字节）、`error_message text`（截 500）、`chunk_count integer`（终态事务原子维护） |
@@ -43,7 +43,9 @@
 | 19 | 解析环节槽位 | **`extractText` 显式环节保留**（第四轮定稿）：一期读 `Document.Content` 原样返回（txt/md pass-through，~10 行；上传边界已完成 BOM/编码/空白规范化），二期换文件卷 + PDF 提取实现、签名不变——管道形状从第一天就是最终形态。**文件落盘不做**：上传路径二期反正要改流式（几百 M 进不了内存），一期做零节省；原始字节保全对 txt/md 收益 marginal |
 | 20 | 管线代码组织 | `processDocument` **只做串联 + 状态管理**，环节逻辑独立私有函数（loadDocument / resolveEmbedOptions / embedChunks / buildDocumentChunks / commitReady / markFailed），全局规则函数 <50 行 |
 
-**用户拍板**：迭代范围 = 仅 rag 后端模块；文档处理 = 后台异步；agent 绑 KB 保留关联表；终态事务的 20-50MB 内存峰值接受；KB 删除 = 硬删 + 有文档挡删（否决逻辑删除级联）；上传默认 2MB（`RAG_MAX_UPLOAD_BYTES` 可调，否决草稿 10MB）；name 模糊 = ILIKE 小表豁免；解析环节读 DB（一期 pass-through，文件落盘留二期）；分块 = 递归分割 rune 单位（否决固定滑窗与 tiktoken）。
+**用户拍板**：迭代范围 = 仅 rag 后端模块；文档处理 = 后台异步；agent 绑 KB 保留关联表；终态事务的 20-50MB 内存峰值接受；KB 删除 = 硬删 + 有文档挡删（否决逻辑删除级联）〔2026-09-14 修订：挡删退役 → 级联真删 + enabled 可逆下架〕；上传默认 2MB（`RAG_MAX_UPLOAD_BYTES` 可调，否决草稿 10MB）；name 模糊 = ILIKE 小表豁免；解析环节读 DB（一期 pass-through，文件落盘留二期）；分块 = 递归分割 rune 单位（否决固定滑窗与 tiktoken）。
+
+> **2026-09-14 修订（用户批准）**：软删除全面退役（迁移 00013）——可逆下架统一由业务 `enabled` 布尔承担（KB/Agent 轻量停用、Document 深度停用 = 删向量保内容、重新启用自动重跑管线），DELETE = 真删（级联清理，误删兜底 PG 每日备份）。受影响：决策 #2/#6/#8 与 spec 01/03/04/07/08 各修订标注。
 
 ## 2. 交付波次与门（8 篇 spec 的两道提交门）
 
