@@ -8,7 +8,8 @@ import (
 
 // 本文件定义三套基础表头 mixin。各业务模块的 model（service/model.go，模块私有）按表性质
 // embed 对应 mixin，获得统一的 id / created_at（/ updated_at / deleted_at）字段与 GORM 行为，
-// 不必每张表重复声明——CLAUDE.md《SQL 通用字段约定》标准表头的 Go 侧等价物。
+// 不必每张表重复声明——CLAUDE.md《SQL 通用字段约定》标准表头的 Go 侧等价物。当前一期
+// 实际使用 BaseAppendOnly / BaseMutable 两套；BaseSoftDelete 备用（见其注释）。
 //
 // 约定（CLAUDE.md《模块内部结构》）：model 是 GORM 实体、模块私有、禁止跨模块；
 // 「json 序列化是 schema 的事，model 不打 json tag」。故本文件 mixin 只带 gorm tag，
@@ -37,10 +38,10 @@ type BaseMutable struct {
 	UpdatedAt time.Time `gorm:"type:timestamptz;not null;default:now();autoUpdateTime"`
 }
 
-// BaseSoftDelete 是软删除表（仅 agents / documents）的标准表头。
+// BaseSoftDelete 是软删除表的标准表头（当前一期无使用者——agents / documents 的
+// 软删已随 00013 退役：可逆下架改走 enabled 字段、DELETE 即真删；mixin 保留备用，
+// 日后确有软删需求的表 embed 本结构即可）。
 // gorm.DeletedAt 字段让 GORM 自动：查询加 WHERE deleted_at IS NULL、DELETE 改写为 UPDATE。
-// CLAUDE.md §软删除：「只给业务需要的表（agents / documents），不全局加」——
-// 需要软删除的 model embed 本结构，不需要的不 embed。
 //
 // partial 索引（WHERE deleted_at IS NULL）由 migrations/ 建，GORM tag 表达不了 partial。
 type BaseSoftDelete struct {
