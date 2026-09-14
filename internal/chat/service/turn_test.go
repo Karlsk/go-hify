@@ -326,10 +326,10 @@ func parseUint(s string) (uint64, error) {
 func TestStreamAgentDeleted(t *testing.T) {
 	h := newTestService(t, happyScript)
 	convID := createConv(t, h.svc)
-	h.svc.agents = &stubAgents{err: agentapi.ErrAgentNotFound} // 建会话后软删
+	h.svc.agents = &stubAgents{err: agentapi.ErrAgentNotFound} // 建会话后删除
 
 	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "x"}, func(chatapi.StreamEvent) error { return nil })
-	assert.ErrorIs(t, err, agentapi.ErrAgentNotFound) // 软删 agent 的存量会话同样被拒（哨兵透传）
+	assert.ErrorIs(t, err, agentapi.ErrAgentNotFound) // 已删 agent 的存量会话同样被拒（哨兵透传）
 	assert.Empty(t, h.store.messagesOf(convID))
 }
 

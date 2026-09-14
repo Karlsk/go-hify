@@ -7,7 +7,7 @@ import "context"
 // 由组合根注入 handler 与上游模块。跨模块调用与 HTTP 请求复用同一套接口。
 type ChatService interface {
 	// CreateConversation 建会话（绑 Agent，中途不换）。
-	// 错误：agentapi.ErrAgentNotFound（含软删）、agentapi.ErrAgentDisabled（停用，新会话被拒）。
+	// 错误：agentapi.ErrAgentNotFound（不存在 / 已删）、agentapi.ErrAgentDisabled（停用，新会话被拒）。
 	CreateConversation(ctx context.Context, req CreateConversationReq) (*ConversationSchema, error)
 
 	// ListConversations 当前用户的会话列表（keyset 游标，updated_at DESC）。

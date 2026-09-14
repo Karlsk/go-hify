@@ -111,7 +111,7 @@ type convCursorKey struct {
 // ---- 会话 CRUD ----
 
 // CreateConversation 建会话（绑 Agent，中途不换）。
-// agent 校验失败（不存在 / 软删 / 停用）不落库，直接透传哨兵。
+// agent 校验失败（不存在 / 停用）不落库，直接透传哨兵。
 func (s *chatService) CreateConversation(ctx context.Context, req chatapi.CreateConversationReq) (*chatapi.ConversationSchema, error) {
 	a, err := s.agents.Get(ctx, agentapi.GetAgentReq{ID: req.AgentID})
 	if err != nil {

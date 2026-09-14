@@ -183,7 +183,7 @@ func (s *chatService) setupTurn(ctx context.Context, conversationID uint64) (*ll
 	}
 	a, err := s.agents.Get(ctx, agentapi.GetAgentReq{ID: conv.AgentID})
 	if err != nil {
-		return nil, fmt.Errorf("load agent %d: %w", conv.AgentID, err) // 软删 agent 的存量会话同样被拒
+		return nil, fmt.Errorf("load agent %d: %w", conv.AgentID, err) // 已删 agent 的存量会话同样被拒
 	}
 	if !a.Enabled {
 		return nil, agentapi.ErrAgentDisabled
