@@ -66,6 +66,8 @@ export interface DocumentItem {
   file_type: string
   file_size: number
   status: DocumentStatus
+  /** 启用开关：false=深度停用（向量分块已删、内容保留），重新启用自动重建索引 */
+  enabled: boolean
   chunk_count: number
   error_message: string
   created_at: string
@@ -106,7 +108,7 @@ export function updateKnowledgeBase(id: string, data: UpdateKnowledgeBaseData) {
   return put<KnowledgeBaseItem>(`/knowledge-bases/${id}`, data)
 }
 
-/** 删除知识库（硬删；有文档时 409） */
+/** 删除知识库（级联真删：清空其全部文档与分块后删 KB 行） */
 export function deleteKnowledgeBase(id: string) {
   return del<void>(`/knowledge-bases/${id}`)
 }
@@ -133,12 +135,22 @@ export function uploadDocument(kbId: string, file: File, name?: string) {
   return post<UploadDocumentResult>(`/knowledge-bases/${kbId}/documents`, formData)
 }
 
-/** 删除文档（软删 + 同事务硬删 chunks） */
+/** 删除文档（真删：文档行 + 全部 chunks 同事务硬删，内容不可恢复） */
 export function deleteDocument(id: string) {
   return del<void>(`/documents/${id}`)
 }
 
-/** 重建索引（202：事务删 chunks + 置 pending 重跑管线） */
+/** 深度停用文档（204 同步：删全部向量分块、内容保留，检索不再命中） */
+export function disableDocument(id: string) {
+  return post<void>(`/documents/${id}/disable`)
+}
+
+/** 重新启用文档（202：自动重跑入库管线重建索引，消耗嵌入费用） */
+export function enableDocument(id: string) {
+  return post<DocumentItem>(`/documents/${id}/enable`)
+}
+
+/** 重建索引（202：事务删 chunks + 置 pending 重跑管线；已停用须先启用） */
 export function reindexDocument(id: string) {
   return post<DocumentItem>(`/documents/${id}/reindex`)
 }

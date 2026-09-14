@@ -327,7 +327,7 @@ function onSubmit(form: AgentForm, done: (ok?: boolean) => void): void {
 
 function remove(row: AgentItem): void {
   void useConfirm({
-    message: `删除 Agent「${row.name}」？软删除：历史会话保留、新会话被拒。`,
+    message: `删除 Agent「${row.name}」？将永久删除其配置与工具绑定；有历史会话时无法删除（可先删会话或改为停用）。`,
     api: () => deleteAgent(row.id),
   }).then((ok) => {
     if (ok) tableRef.value?.refresh()

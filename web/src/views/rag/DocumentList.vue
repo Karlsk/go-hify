@@ -56,12 +56,11 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="分块数" width="80" prop="chunk_count" />
-        <el-table-column label="错误信息" min-width="160" hide-below="992">
+        <el-table-column label="启用" width="80">
           <template #default="{ row }">
-            <span v-if="row.status === 'failed' && row.error_message" class="error-text">
-              {{ row.error_message }}
-            </span>
+            <el-tag :type="row.enabled ? 'success' : 'info'" size="small">
+              {{ row.enabled ? '启用' : '停用' }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="150">
@@ -69,17 +68,38 @@
             {{ formatDateTime(row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" align="right">
+        <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              :disabled="row.status === 'pending' || row.status === 'processing'"
-              @click="reindex(row as DocumentItem)"
+            <el-dropdown
+              trigger="click"
+              popper-class="doc-actions-popper"
+              @command="(cmd: string) => onAction(cmd, row as DocumentItem)"
             >
-              重建索引
-            </el-button>
-            <el-button link type="danger" @click="remove(row as DocumentItem)">删除</el-button>
+              <el-button link type="primary">
+                操作<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    command="reindex"
+                    :disabled="row.status === 'pending' || row.status === 'processing' || !row.enabled"
+                  >
+                    重建索引
+                  </el-dropdown-item>
+                  <el-dropdown-item
+                    v-if="row.enabled"
+                    command="disable"
+                    :disabled="row.status === 'pending' || row.status === 'processing'"
+                  >
+                    停用
+                  </el-dropdown-item>
+                  <el-dropdown-item v-else command="enable">启用</el-dropdown-item>
+                  <el-dropdown-item command="delete" divided class="doc-actions__delete">
+                    删除
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
         <template #empty>
@@ -105,8 +125,22 @@
               {{ STATUS_LABEL[detailDoc?.status ?? ''] }}
             </el-tag>
           </el-descriptions-item>
+          <el-descriptions-item label="启用状态">
+            <el-tag :type="detailDoc?.enabled ? 'success' : 'info'" size="small">
+              {{ detailDoc?.enabled ? '已启用' : '已停用（向量已删，内容保留）' }}
+            </el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="分块数">{{ detailDoc?.chunk_count }}</el-descriptions-item>
           <el-descriptions-item label="创建时间">{{ formatDateTime(detailDoc?.created_at ?? '') }}</el-descriptions-item>
+          <el-descriptions-item label="错误信息" :span="2">
+            <span
+              v-if="detailDoc?.status === 'failed' && detailDoc?.error_message"
+              class="error-text"
+            >
+              {{ detailDoc.error_message }}
+            </span>
+            <span v-else>—</span>
+          </el-descriptions-item>
         </el-descriptions>
         <div class="detail-content">
           <h4>文档原文</h4>
@@ -165,14 +199,15 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Search, Upload } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeft, Search, Upload } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
-import { BREAKPOINTS } from '@/composables/useBreakpoint'
 import { useConfirm } from '@/composables/useConfirm'
 import { notifyError, notifySuccess } from '@/utils/notify'
 import {
   deleteDocument,
+  disableDocument,
+  enableDocument,
   getDocument,
   getDocumentList,
   getKnowledgeBase,
@@ -331,15 +366,56 @@ async function reindex(row: DocumentItem): Promise<void> {
   }
 }
 
+// ---- 停用 / 启用（深度停用：删向量保内容；启用自动重建索引） ----
+
+function disableDoc(row: DocumentItem): void {
+  void useConfirm({
+    message: `停用文档「${row.name}」？将删除其全部向量分块（检索不再命中），重新启用时自动重建索引。`,
+    api: () => disableDocument(row.id),
+  }).then((ok) => {
+    if (ok) void loadInitial()
+  })
+}
+
+function enableDoc(row: DocumentItem): void {
+  void useConfirm({
+    message: `启用文档「${row.name}」？将自动重建索引（消耗嵌入费用）。`,
+    api: () => enableDocument(row.id),
+  }).then((ok) => {
+    if (ok) {
+      notifySuccess('已启用，正在重建索引')
+      void loadInitial()
+    }
+  })
+}
+
 // ---- 删除 ----
 
 function remove(row: DocumentItem): void {
   void useConfirm({
-    message: `删除文档「${row.name}」？将同时删除其所有分块，此操作不可恢复。`,
+    message: `删除文档「${row.name}」？文档与其全部分块将被永久删除，此操作不可恢复（停用可保留内容）。`,
     api: () => deleteDocument(row.id),
   }).then((ok) => {
     if (ok) void loadInitial()
   })
+}
+
+/** 操作下拉分发：command → 行操作（禁用条件同原按钮组，见模板） */
+function onAction(cmd: string, row: DocumentItem): void {
+  switch (cmd) {
+    case 'reindex':
+      void reindex(row)
+      break
+    case 'disable':
+      disableDoc(row)
+      break
+    case 'enable':
+      enableDoc(row)
+      break
+    case 'delete':
+      remove(row)
+      break
+  }
 }
 
 // ---- 文档详情弹窗 ----
@@ -508,5 +584,12 @@ const STATUS_LABEL: Record<string, string> = {
   word-break: break-word;
   max-height: 120px;
   overflow-y: auto;
+}
+</style>
+
+<style>
+/* 操作下拉菜单 teleport 到 body，scoped 选择器够不着——经 popper-class 命中；删除项标红对齐原 danger 按钮 */
+.doc-actions-popper .doc-actions__delete {
+  color: var(--hf-danger);
 }
 </style>
