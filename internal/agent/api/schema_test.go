@@ -18,6 +18,7 @@ func TestConstantsPinned(t *testing.T) {
 	// 哨兵 code = Error() 字符串，与 CLAUDE.md 错误码表命名空间一致。
 	assert.Equal(t, "AGENT_NOT_FOUND", ErrAgentNotFound.Error())
 	assert.Equal(t, "TOOL_NOT_FOUND", ErrToolNotFound.Error())
+	assert.Equal(t, "KNOWLEDGE_BASE_NOT_FOUND", ErrKnowledgeBaseNotFound.Error())
 
 	// 温度边界与 migrations 00004 的 CHECK (temperature BETWEEN 0 AND 2) 对齐。
 	assert.Equal(t, 0.0, TemperatureMin)
@@ -31,6 +32,9 @@ func TestConstantsPinned(t *testing.T) {
 
 	// 绑定上限与 binding tag max=100 对齐（防提示词无界膨胀）。
 	assert.Equal(t, 100, MaxToolBindings)
+
+	// KB 绑定上限 = ragapi.MaxRetrieveKBs（绑超则 chat 检索必撞 kb_ids 上限，绑定期挡）。
+	assert.Equal(t, 10, MaxKBBindings)
 }
 
 func TestValidateAgent_Create(t *testing.T) {
@@ -57,6 +61,14 @@ func TestValidateAgent_Create(t *testing.T) {
 	})
 	t.Run("tool_ids 不重复则合法", func(t *testing.T) {
 		r := newReq(func(r *CreateAgentReq) { r.ToolIDs = []uint64{10, 12} })
+		assert.NoError(t, r.Validate())
+	})
+	t.Run("knowledge_base_ids 重复被拒", func(t *testing.T) {
+		r := newReq(func(r *CreateAgentReq) { r.KnowledgeBaseIDs = []uint64{7, 8, 7} })
+		assert.ErrorContains(t, r.Validate(), "重复")
+	})
+	t.Run("knowledge_base_ids 不重复则合法", func(t *testing.T) {
+		r := newReq(func(r *CreateAgentReq) { r.KnowledgeBaseIDs = []uint64{7, 8} })
 		assert.NoError(t, r.Validate())
 	})
 }
@@ -102,7 +114,7 @@ func TestAgentSchema_JSON(t *testing.T) {
 
 func TestAgentListItem_JSON(t *testing.T) {
 	// 列表项 = AgentSchema 展平 + 聚合列；悬空引用 ModelName=""（前端 fallback model_id）。
-	it := AgentListItem{ModelName: "gpt-4o", ToolCount: 2}
+	it := AgentListItem{ModelName: "gpt-4o", ToolCount: 2, KBCount: 1}
 	it.ID = "1"
 	it.ModelID = "5"
 	b, err := json.Marshal(it)
@@ -112,6 +124,7 @@ func TestAgentListItem_JSON(t *testing.T) {
 
 	assert.Equal(t, "gpt-4o", m["model_name"], "聚合列展平在列表项上")
 	assert.Equal(t, float64(2), m["tool_count"])
+	assert.Equal(t, float64(1), m["kb_count"])
 	assert.Contains(t, m, "name", "嵌入 AgentSchema 字段展平")
 	assert.Contains(t, m, "enabled")
 }
@@ -141,5 +154,6 @@ func TestAgentDetailSchema_JSONToolIDs(t *testing.T) {
 		var m map[string]any
 		assert.NoError(t, json.Unmarshal(b, &m))
 		assert.Nil(t, m["tool_ids"], "nil 切片会序列化成 null——toSchema 必须用 make 初始化")
+		assert.Nil(t, m["knowledge_base_ids"], "同上——toDetailSchema 必须用 make 初始化")
 	})
 }

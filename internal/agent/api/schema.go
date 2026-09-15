@@ -25,6 +25,9 @@ type AgentSchema struct {
 	MaxOutputTokens   *int64  `json:"max_output_tokens"` // null=跟随模型默认
 	MaxContextTurns   int     `json:"max_context_turns"` // 多轮对话携带的最大历史轮数
 	Enabled           bool    `json:"enabled"`           // false=停用（保留配置，新会话被拒）
+	// RAGTopK / RAGMinSimilarity RAG 检索注入参数（chat buildSystemPrompt 读此值）。
+	RAGTopK          int     `json:"rag_top_k"`
+	RAGMinSimilarity float64 `json:"rag_min_similarity"`
 }
 
 // AgentListItem 列表项：AgentSchema + 当页批量现读的聚合列（模型展示名 / 绑定工具数，
@@ -34,14 +37,17 @@ type AgentListItem struct {
 	AgentSchema
 	ModelName string `json:"model_name"` // 关联模型展示名（悬空引用为 ""）
 	ToolCount int64  `json:"tool_count"` // 绑定 MCP 工具数
+	KBCount   int64  `json:"kb_count"`   // 绑定知识库数（chat 检索注入的召回范围）
 }
 
-// AgentDetailSchema Agent 详情：AgentSchema + 绑定工具 id 列表。
-// 嵌入字段 JSON 展平（detail = 全部 agent 字段 + tool_ids）。
-// ToolIDs 由 service 保证非 nil（空绑定返 []，不返 null，接口规范《空值约定》）。
+// AgentDetailSchema Agent 详情：AgentSchema + 绑定工具 / 知识库 id 列表。
+// 嵌入字段 JSON 展平（detail = 全部 agent 字段 + tool_ids + knowledge_base_ids）。
+// ToolIDs / KnowledgeBaseIDs 由 service 保证非 nil（空绑定返 []，不返 null，
+// 接口规范《空值约定》）。
 type AgentDetailSchema struct {
 	AgentSchema
-	ToolIDs []string `json:"tool_ids"` // 绑定的 mcp_tools.id（字符串化）
+	ToolIDs          []string `json:"tool_ids"`           // 绑定的 mcp_tools.id（字符串化）
+	KnowledgeBaseIDs []string `json:"knowledge_base_ids"` // 绑定的 knowledge_bases.id（字符串化）
 }
 
 // AgentListResult Agent 偏移分页结果。agents 是极小配置表，按接口规范走偏移分页
@@ -72,6 +78,14 @@ const (
 	DefaultMaxContextTurns = 10
 	// MaxToolBindings 单 Agent 绑定工具数上限（uq 防重复，上限防提示词无界膨胀）。
 	MaxToolBindings = 100
+	// MaxKBBindings 单 Agent 绑定知识库数上限 = ragapi.MaxRetrieveKBs：检索一次最多
+	// 10 个 KB，绑超则 chat 注入的 Retrieve 必撞 kb_ids 上限、运行期才爆——绑定期挡
+	//（binding tag max=10 与本常量对齐；数值取等）。
+	MaxKBBindings = 10
+	// DefaultRAGTopK / DefaultRAGMinSimilarity RAG 检索注入默认参数（与 DB DEFAULT 对齐）。
+	// chat buildSystemPrompt 读 Agent 配置值，未传时取此默认。
+	DefaultRAGTopK          = 3
+	DefaultRAGMinSimilarity = 0.75
 )
 
 // CreateAgentReq 创建 Agent 请求：主资源 body 内嵌 tool_ids（db_model.md §4.3），
@@ -88,11 +102,18 @@ type CreateAgentReq struct {
 	MaxContextTurns *int     `json:"max_context_turns" binding:"omitempty,min=1,max=100"`
 	Enabled         *bool    `json:"enabled"` // 未传 = true（创建即启用）
 	ToolIDs         []uint64 `json:"tool_ids" binding:"omitempty,max=100,dive,gt=0"`
+	// KnowledgeBaseIDs 绑定的知识库（RAG 召回范围，多对多）；kb 不存在时 FK 23503
+	// 由 service 翻译 ErrKnowledgeBaseNotFound（agent 不依赖 rag，FK 是唯一校验）。
+	KnowledgeBaseIDs []uint64 `json:"knowledge_base_ids" binding:"omitempty,max=10,dive,gt=0"`
+	// RAGTopK / RAGMinSimilarity RAG 检索注入参数（可选，nil=取默认 3/0.75）。
+	// chat buildSystemPrompt 读此值替代钉死常量。
+	RAGTopK          *int     `json:"rag_top_k" binding:"omitempty,min=1,max=20"`
+	RAGMinSimilarity *float64 `json:"rag_min_similarity" binding:"omitempty,gte=0,lte=1"`
 }
 
 // Validate 跨字段校验（字段格式由 binding tag 管）。
 func (r CreateAgentReq) Validate() error {
-	return validateAgent(r.ModelID, r.FallbackModelID, r.ToolIDs)
+	return validateAgent(r.ModelID, r.FallbackModelID, r.ToolIDs, r.KnowledgeBaseIDs)
 }
 
 // UpdateAgentReq 整体更新请求（PUT 语义：全量提交，缺省字段按零值覆盖）。
@@ -110,6 +131,11 @@ type UpdateAgentReq struct {
 	MaxContextTurns *int     `json:"max_context_turns" binding:"omitempty,min=1,max=100"`
 	Enabled         *bool    `json:"enabled"` // 未传 = true（PUT 全量；前端漏发会被置回启用）
 	ToolIDs         []uint64 `json:"tool_ids" binding:"omitempty,max=100,dive,gt=0"`
+	// KnowledgeBaseIDs 同 CreateAgentReq（PUT 全量覆盖：绑定事务内先删后插）。
+	KnowledgeBaseIDs []uint64 `json:"knowledge_base_ids" binding:"omitempty,max=10,dive,gt=0"`
+	// RAGTopK / RAGMinSimilarity 同 CreateAgentReq。
+	RAGTopK          *int     `json:"rag_top_k" binding:"omitempty,min=1,max=20"`
+	RAGMinSimilarity *float64 `json:"rag_min_similarity" binding:"omitempty,gte=0,lte=1"`
 }
 
 // Validate 跨字段校验；ID>0 由本方法兜底（防绕过 handler 的调用方）。
@@ -117,7 +143,7 @@ func (r UpdateAgentReq) Validate() error {
 	if r.ID == 0 {
 		return fmt.Errorf("id 必填")
 	}
-	return validateAgent(r.ModelID, r.FallbackModelID, r.ToolIDs)
+	return validateAgent(r.ModelID, r.FallbackModelID, r.ToolIDs, r.KnowledgeBaseIDs)
 }
 
 // GetAgentReq / DeleteAgentReq 单条取 / 删请求（路径参数 id）。
@@ -146,9 +172,9 @@ type ListAgentsReq struct {
 // Validate 跨字段校验；当前无跨字段规则。
 func (r ListAgentsReq) Validate() error { return nil }
 
-// validateAgent 创建/更新共用的跨字段规则：备用模型不得等于主模型；tool_ids 不得重复
-// （重复会撞 uq(agent_id, tool_id)，提前 400 比落库报错友好）。
-func validateAgent(modelID uint64, fallback *uint64, toolIDs []uint64) error {
+// validateAgent 创建/更新共用的跨字段规则：备用模型不得等于主模型；tool_ids /
+// knowledge_base_ids 不得重复（重复会撞 uq / 复合 PK，提前 400 比落库报错友好）。
+func validateAgent(modelID uint64, fallback *uint64, toolIDs, kbIDs []uint64) error {
 	if fallback != nil && *fallback == modelID {
 		return fmt.Errorf("fallback_model_id 不得等于 model_id（备用须是另一个模型）")
 	}
@@ -158,6 +184,13 @@ func validateAgent(modelID uint64, fallback *uint64, toolIDs []uint64) error {
 			return fmt.Errorf("tool_ids 含重复 id %d", id)
 		}
 		seen[id] = struct{}{}
+	}
+	seenKB := make(map[uint64]struct{}, len(kbIDs))
+	for _, id := range kbIDs {
+		if _, dup := seenKB[id]; dup {
+			return fmt.Errorf("knowledge_base_ids 含重复 id %d", id)
+		}
+		seenKB[id] = struct{}{}
 	}
 	return nil
 }

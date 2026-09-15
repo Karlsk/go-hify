@@ -148,11 +148,11 @@ func Run(cfg *config.Config) error {
 
 	// chat：对话引擎（依赖图最外层，零被依赖——将来可整体拆成独立服务）。
 	// 依赖方向：chat → agent（agentGetter）→ provider（llmConfigResolver）→ platform/llm（llmClientFactory）
-	//           chat → platform/logging（executionWriter）。
-	// v1 范围：会话 CRUD + 上下文组装 + SSE 两模式 + executions 落库；ToolIDs/KB 读到不执行。
+	//           chat → rag（ragRetriever，KB 检索注入）→ platform/logging（executionWriter）。
+	// v1 范围：会话 CRUD + 上下文组装（含 RAG 检索注入）+ SSE 两模式 + executions 落库；ToolIDs 读到不执行。
 	chatStore := chatstore.New(gormDB)
 	execStore := logging.NewExecutionStore(gormDB) // executions 表写入（每次 LLM 调用一行）
-	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore)
+	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore, ragSvc)
 
 	// mcp / workflow 后续批次再接入。
 

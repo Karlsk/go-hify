@@ -25,6 +25,10 @@ export interface AgentBase {
   max_context_turns: number
   /** false=停用（保留配置，新会话被拒） */
   enabled: boolean
+  /** RAG 检索注入取回片段数（1-20，默认 3） */
+  rag_top_k: number
+  /** RAG 检索注入相似度过滤阈值（0-1，默认 0.75） */
+  rag_min_similarity: number
   created_at: string
   updated_at: string
 }
@@ -35,11 +39,14 @@ export interface AgentItem extends AgentBase {
   model_name: string
   /** 绑定 MCP 工具数 */
   tool_count: number
+  /** 绑定知识库数（RAG 检索注入范围） */
+  kb_count: number
 }
 
-/** 详情：基础 + 绑定工具 id（空绑定 []） */
+/** 详情：基础 + 绑定工具 / 知识库 id（空绑定 []） */
 export interface AgentDetail extends AgentBase {
   tool_ids: string[]
+  knowledge_base_ids: string[]
 }
 
 /** 创建 / 整体更新载荷（PUT 全量提交；enabled 必带——漏发会被后端置回启用） */
@@ -53,6 +60,9 @@ export interface AgentSaveData {
   max_context_turns?: number
   enabled?: boolean
   tool_ids?: number[]
+  knowledge_base_ids?: number[]
+  rag_top_k?: number
+  rag_min_similarity?: number
 }
 
 // ---- 请求方法 ----

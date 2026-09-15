@@ -13,7 +13,7 @@ import (
 
 // selectAgent 显式列清单（禁 SELECT *）：agents 无大文本列，此处主要为对齐全仓规范
 // 与防加列耦合。
-const selectAgent = "id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, created_at, updated_at"
+const selectAgent = "id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, rag_top_k, rag_min_similarity, created_at, updated_at"
 
 // Store 实现 agentsvc.Store。
 type Store struct{ db *gorm.DB }
@@ -144,6 +144,69 @@ func (s *Store) CreateTools(ctx context.Context, agentID uint64, toolIDs []uint6
 	rows := make([]agentsvc.AgentTool, 0, len(toolIDs))
 	for _, tid := range toolIDs {
 		rows = append(rows, agentsvc.AgentTool{AgentID: agentID, ToolID: tid})
+	}
+	return s.db.WithContext(ctx).Create(&rows).Error
+}
+
+// ---- agent_knowledge_bases（KB 绑定） ----
+
+// ListKBIDsByAgent 读绑定 KB id 列表（knowledge_base_id 升序——复合 PK 表无代理 id，
+// 按键列排序保证顺序稳定，chat 检索注入依赖该确定性）。
+func (s *Store) ListKBIDsByAgent(ctx context.Context, agentID uint64) ([]uint64, error) {
+	var ids []uint64
+	err := s.db.WithContext(ctx).
+		Model(&agentsvc.AgentKnowledgeBase{}).
+		Where("agent_id = ?", agentID).
+		Order("knowledge_base_id").
+		Pluck("knowledge_base_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// CountKBsByAgentIDs 列表聚合用批量计数（GROUP BY 一条查询覆盖当页，防 N+1；
+// IN 写法理由同 CountToolsByAgentIDs）。
+func (s *Store) CountKBsByAgentIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+	counts := make(map[uint64]int64, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	var rows []struct {
+		AgentID uint64
+		Cnt     int64
+	}
+	err := s.db.WithContext(ctx).
+		Model(&agentsvc.AgentKnowledgeBase{}).
+		Select("agent_id, COUNT(*) AS cnt").
+		Where("agent_id IN ?", ids).
+		Group("agent_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		counts[r.AgentID] = r.Cnt
+	}
+	return counts, nil
+}
+
+// DeleteKBsByAgent 清空绑定（硬删；DELETE 带 WHERE，仓规）。
+func (s *Store) DeleteKBsByAgent(ctx context.Context, agentID uint64) error {
+	return s.db.WithContext(ctx).
+		Where("agent_id = ?", agentID).
+		Delete(&agentsvc.AgentKnowledgeBase{}).Error
+}
+
+// CreateKBs 批量绑定 KB：切片插入 = 单条多 VALUES INSERT；空列表直接返回。
+// kb_id 不存在时 FK 23503 由 service 层翻译 ErrKnowledgeBaseNotFound。
+func (s *Store) CreateKBs(ctx context.Context, agentID uint64, kbIDs []uint64) error {
+	if len(kbIDs) == 0 {
+		return nil
+	}
+	rows := make([]agentsvc.AgentKnowledgeBase, 0, len(kbIDs))
+	for _, kid := range kbIDs {
+		rows = append(rows, agentsvc.AgentKnowledgeBase{AgentID: agentID, KnowledgeBaseID: kid})
 	}
 	return s.db.WithContext(ctx).Create(&rows).Error
 }

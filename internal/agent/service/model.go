@@ -19,15 +19,17 @@ import (
 // 创建路径显式设值，DB 列 DEFAULT 只作直插 SQL 兜底。
 type Agent struct {
 	db.BaseMutable
-	Name            string  `gorm:"not null"` // 展示名（不唯一，决策 #5）
-	Description     string  `gorm:"not null"` // 用途说明，默认空串
-	ModelID         uint64  `gorm:"not null"` // 主模型 models.id（RESTRICT）
-	FallbackModelID *uint64 // 备用模型（一期配置位不启用；nil=未设置）
-	SystemPrompt    string  `gorm:"not null"`                   // 角色指令（Agent 的"灵魂"）
-	Temperature     float64 `gorm:"type:numeric(3,2);not null"` // 0.00-2.00（DB CHECK 兜底）
-	MaxOutputTokens *int64  // NULL=跟随模型默认（chat 引擎读 nil 不设 option）
-	MaxContextTurns int     `gorm:"not null"` // 多轮对话携带的最大历史轮数（chat 引擎读）
-	Enabled         bool    `gorm:"not null"` // 停用开关：false=保留配置且新会话被拒
+	Name             string  `gorm:"not null"` // 展示名（不唯一，决策 #5）
+	Description      string  `gorm:"not null"` // 用途说明，默认空串
+	ModelID          uint64  `gorm:"not null"` // 主模型 models.id（RESTRICT）
+	FallbackModelID  *uint64 // 备用模型（一期配置位不启用；nil=未设置）
+	SystemPrompt     string  `gorm:"not null"`                   // 角色指令（Agent 的"灵魂"）
+	Temperature      float64 `gorm:"type:numeric(3,2);not null"` // 0.00-2.00（DB CHECK 兜底）
+	MaxOutputTokens  *int64  // NULL=跟随模型默认（chat 引擎读 nil 不设 option）
+	MaxContextTurns  int     `gorm:"not null"`                                             // 多轮对话携带的最大历史轮数（chat 引擎读）
+	Enabled          bool    `gorm:"not null"`                                             // 停用开关：false=保留配置且新会话被拒
+	RAGTopK          int     `gorm:"not null;column:rag_top_k"`                            // RAG 检索注入取回片段数（1-20，默认 3）
+	RAGMinSimilarity float64 `gorm:"type:numeric(4,3);not null;column:rag_min_similarity"` // RAG 注入过滤阈值（0-1，默认 0.750）
 }
 
 // TableName 显式表名（全模块约定：GORM 复数化不可靠，一律显式声明）。
@@ -44,3 +46,16 @@ type AgentTool struct {
 
 // TableName 显式表名。
 func (AgentTool) TableName() string { return "agent_tools" }
+
+// AgentKnowledgeBase 对应 agent_knowledge_bases 表：Agent ↔ 知识库绑定（多对多），
+// 定义 RAG 召回范围（chat 发消息时按绑定 KB 检索注入，rag_injection_spec.md）。
+// 复合 PK(agent_id, knowledge_base_id) 无代理 id，不能 embed 带 id 的 mixin
+// （provider ProviderHealth 同款自声明）；双向 ON DELETE CASCADE（00004）。
+// kb 存在性由 FK 23503 翻译 ErrKnowledgeBaseNotFound（agent 不依赖 rag，FK 是唯一校验）。
+type AgentKnowledgeBase struct {
+	AgentID         uint64 `gorm:"primaryKey;not null"` // agents.id，ON DELETE CASCADE
+	KnowledgeBaseID uint64 `gorm:"primaryKey;not null"` // knowledge_bases.id，ON DELETE CASCADE
+}
+
+// TableName 显式表名。
+func (AgentKnowledgeBase) TableName() string { return "agent_knowledge_bases" }

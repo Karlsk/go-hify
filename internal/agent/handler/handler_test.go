@@ -215,6 +215,7 @@ func TestCreate_Sentinels(t *testing.T) {
 	}{
 		{"模型不存在（provider 哨兵透传）", providerapi.ErrModelNotFound, providerapi.ErrModelNotFound.Error(), http.StatusNotFound},
 		{"工具不存在（FK 翻译）", agentapi.ErrToolNotFound, agentapi.ErrToolNotFound.Error(), http.StatusNotFound},
+		{"知识库不存在（FK 翻译）", agentapi.ErrKnowledgeBaseNotFound, agentapi.ErrKnowledgeBaseNotFound.Error(), http.StatusNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

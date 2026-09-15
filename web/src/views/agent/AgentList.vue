@@ -25,6 +25,9 @@
       <template #toolCount="{ row }">
         {{ row.tool_count }}
       </template>
+      <template #kbCount="{ row }">
+        {{ row.kb_count }}
+      </template>
       <template #enabled="{ row }">
         <el-tag :type="row.enabled ? 'success' : 'info'" size="small">
           {{ row.enabled ? '启用' : '停用' }}
@@ -144,6 +147,53 @@
               MCP 工具接入后可在此勾选；当前仅保留已保存的绑定
             </el-text>
           </el-tab-pane>
+
+          <el-tab-pane label="知识库绑定">
+            <!-- 绑定 = RAG 检索注入范围（chat 发消息时按绑定 KB 召回注入 system prompt）；
+                 multiple-limit 对齐后端 MaxKBBindings=10。已保存但被停用的 KB 不在选项里，
+                 回填显示裸 id，不动则绑定随 PUT 保留（检索时 rag 侧静默剔除停用 KB） -->
+            <el-select
+              v-model="form.kbIds"
+              multiple
+              :loading="kbLoading"
+              :multiple-limit="10"
+              placeholder="选择知识库（可多选，最多 10 个）"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="kb in kbOptions"
+                :key="kb.value"
+                :label="kb.label"
+                :value="kb.value"
+              />
+            </el-select>
+            <el-text v-if="kbOptions.length === 0" size="small" type="info">
+              尚无启用的知识库；可先到「知识库管理」创建并上传文档
+            </el-text>
+            <!-- RAG 检索注入参数：与绑定范围同属 KB 检索语义，chat buildSystemPrompt 读取 -->
+            <el-form-item label="RAG 检索数" prop="ragTopK">
+              <div class="field-with-hint">
+                <el-input-number
+                  v-model="form.ragTopK"
+                  :min="1"
+                  :max="20"
+                />
+                <span class="field-hint">每次检索取回的片段数（默认 3）</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="相似度阈值" prop="ragMinSimilarity">
+              <div class="field-with-hint">
+                <el-input-number
+                  v-model="form.ragMinSimilarity"
+                  :min="0"
+                  :max="1"
+                  :step="0.05"
+                  :precision="2"
+                />
+                <span class="field-hint">低于此值的片段被过滤（默认 0.75）</span>
+              </div>
+            </el-form-item>
+          </el-tab-pane>
         </el-tabs>
       </template>
     </HifyFormDialog>
@@ -169,6 +219,7 @@ import {
   type AgentItem,
 } from '@/api/agent'
 import { getModelList, getProviderList, type ModelItem } from '@/api/provider'
+import { getKnowledgeBaseList } from '@/api/rag'
 
 // ---- 表格 ----
 
@@ -177,7 +228,8 @@ const columns: HifyTableColumn[] = [
   { label: '名称', prop: 'name' },
   { label: '关联模型', slot: 'modelName' },
   { label: '工具数', slot: 'toolCount', width: 80 },
-  // 次要列：窄屏（≤992）隐藏，保留 名称 / 模型 / 工具数 / 状态 / 操作 关键信息
+  { label: '知识库数', slot: 'kbCount', width: 90 },
+  // 次要列：窄屏（≤992）隐藏，保留 名称 / 模型 / 工具数 / 知识库数 / 状态 / 操作 关键信息
   { label: 'Temperature', prop: 'temperature', width: 110, hideBelow: BREAKPOINTS.md },
   { label: '状态', slot: 'enabled', width: 80 },
   { label: '创建时间', slot: 'createdAt', width: 150, hideBelow: BREAKPOINTS.md },
@@ -216,6 +268,25 @@ async function loadModelOptions(): Promise<void> {
 
 const toolOptions: Array<{ value: string; label: string }> = []
 
+// ---- 知识库下拉数据源（弹窗打开时现拉：只列启用的 KB，与模型下拉同策略） ----
+
+const kbOptions = ref<Array<{ value: string; label: string }>>([])
+const kbLoading = ref(false)
+
+async function loadKbOptions(): Promise<void> {
+  kbLoading.value = true
+  try {
+    const page = await getKnowledgeBaseList({ page: 1, page_size: 100 })
+    kbOptions.value = page.list
+      .filter((kb) => kb.enabled)
+      .map((kb) => ({ value: kb.id, label: kb.name }))
+  } catch {
+    // 拦截器已提示；空选项即反馈
+  } finally {
+    kbLoading.value = false
+  }
+}
+
 /** Temperature 刻度（el-slider marks）：0 / 0.5 / 1 三档参照 */
 const TEMP_MARKS: Record<number, string> = { 0: '0', 0.5: '0.5', 1: '1' }
 
@@ -233,6 +304,9 @@ interface AgentForm {
   maxContextTurns: number
   enabled: boolean
   toolIds: string[]
+  kbIds: string[]
+  ragTopK: number
+  ragMinSimilarity: number
 }
 
 const dialogRef = ref<{ open: (data?: AgentForm) => void }>()
@@ -250,6 +324,9 @@ const emptyForm = (): AgentForm => ({
   maxContextTurns: 10,
   enabled: true,
   toolIds: [],
+  kbIds: [],
+  ragTopK: 3,
+  ragMinSimilarity: 0.75,
 })
 
 const rules: FormRules = {
@@ -260,15 +337,17 @@ const rules: FormRules = {
 
 function openCreate(): void {
   isEdit.value = false
-  // 先拉模型选项再开弹窗（量小可接受；保持选项新鲜）
-  void loadModelOptions().then(() => dialogRef.value?.open())
+  // 先拉模型 / 知识库选项再开弹窗（量小可接受；保持选项新鲜）
+  void Promise.all([loadModelOptions(), loadKbOptions()]).then(() =>
+    dialogRef.value?.open(),
+  )
 }
 
-/** 编辑：列表行无 tool_ids，先取详情再回填 */
+/** 编辑：列表行无 tool_ids / knowledge_base_ids，先取详情再回填 */
 function openEdit(row: AgentItem): void {
   isEdit.value = true
-  void Promise.all([loadModelOptions(), getAgent(row.id)])
-    .then(([, detail]) => {
+  void Promise.all([loadModelOptions(), loadKbOptions(), getAgent(row.id)])
+    .then(([, , detail]) => {
       dialogRef.value?.open(toForm(detail))
     })
     .catch(() => {
@@ -288,6 +367,9 @@ function toForm(d: AgentDetail): AgentForm {
     maxContextTurns: d.max_context_turns,
     enabled: d.enabled,
     toolIds: d.tool_ids,
+    kbIds: d.knowledge_base_ids,
+    ragTopK: d.rag_top_k,
+    ragMinSimilarity: d.rag_min_similarity,
   }
 }
 
@@ -302,6 +384,9 @@ function onSubmit(form: AgentForm, done: (ok?: boolean) => void): void {
     max_output_tokens: form.maxOutputTokens ?? undefined,
     max_context_turns: form.maxContextTurns,
     tool_ids: form.toolIds.map(Number),
+    knowledge_base_ids: form.kbIds.map(Number),
+    rag_top_k: form.ragTopK,
+    rag_min_similarity: form.ragMinSimilarity,
   }
   if (form.id === '') {
     void createAgent(payload)

@@ -47,6 +47,18 @@ type Store interface {
 	DeleteToolsByAgent(ctx context.Context, agentID uint64) error
 	// CreateTools 批量绑定（GORM 切片插入 = 单条多 VALUES INSERT）；空列表直接返回。
 	CreateTools(ctx context.Context, agentID uint64, toolIDs []uint64) error
+	// ListKBIDsByAgent 读某 Agent 绑定的知识库 id 列表（knowledge_base_id 升序，
+	// 顺序稳定供 chat 检索注入）。
+	ListKBIDsByAgent(ctx context.Context, agentID uint64) ([]uint64, error)
+	// CountKBsByAgentIDs 列表聚合用批量计数：绑定 KB 数按 Agent 分组（GROUP BY +
+	// 聚合，一条查询覆盖当页全部 id，防 N+1）。map 无键 = 0。
+	CountKBsByAgentIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error)
+	// DeleteKBsByAgent 清空某 Agent 的全部 KB 绑定（更新路径事务内先删后插；
+	// 复合 PK 保证幂等）。
+	DeleteKBsByAgent(ctx context.Context, agentID uint64) error
+	// CreateKBs 批量绑定 KB（切片插入 = 单条多 VALUES INSERT）；空列表直接返回。
+	// kb_id 不存在时 FK 23503 由 service 翻译（kb 存在性的唯一校验机制）。
+	CreateKBs(ctx context.Context, agentID uint64, kbIDs []uint64) error
 	// WithTx 事务包装：fn 拿到共享同一 tx 句柄的 Store（仍以 Store 接口身份传入）。
 	// 事务只包必须原子化的写（agent 行 + 绑定行），事务内禁外部调用。
 	WithTx(ctx context.Context, fn func(tx Store) error) error
@@ -82,9 +94,11 @@ func New(store Store, models providerapi.ModelService, cm cacheManager) agentapi
 
 // ---- AgentService ----
 
-// Create 创建 Agent：模型存在性预检（经 provider api）→ 同一事务内落 agent 行 + 绑定行。
-// 错误：providerapi.ErrModelNotFound（主/备用模型不存在，含预检后被并发删除的 FK 兜底）、
-// agentapi.ErrToolNotFound（tool_ids 含不存在的工具，FK 23503 翻译）。
+// Create 创建 Agent：模型存在性预检（经 provider api）→ 同一事务内落 agent 行 + 绑定行
+// （工具 + 知识库）。错误：providerapi.ErrModelNotFound（主/备用模型不存在，含预检后被
+// 并发删除的 FK 兜底）、agentapi.ErrToolNotFound（tool_ids 含不存在的工具，FK 23503 翻译）、
+// agentapi.ErrKnowledgeBaseNotFound（knowledge_base_ids 含不存在的 KB，FK 23503 翻译——
+// agent 不依赖 rag，FK 是 KB 存在性的唯一校验）。
 func (s *agentService) Create(ctx context.Context, req agentapi.CreateAgentReq) (*agentapi.AgentSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate create agent: %w", err)
@@ -107,6 +121,12 @@ func (s *agentService) Create(ctx context.Context, req agentapi.CreateAgentReq) 
 			}
 			return fmt.Errorf("bind tools: %w", err)
 		}
+		if err := tx.CreateKBs(ctx, a.ID, req.KnowledgeBaseIDs); err != nil {
+			if isFKViolation(err) {
+				return agentapi.ErrKnowledgeBaseNotFound
+			}
+			return fmt.Errorf("bind knowledge bases: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
@@ -116,7 +136,7 @@ func (s *agentService) Create(ctx context.Context, req agentapi.CreateAgentReq) 
 	return &schema, nil
 }
 
-// Get 详情（含绑定工具 id）：先查缓存，miss 落库并回填。
+// Get 详情（含绑定工具 / KB id）：先查缓存，miss 落库并回填。
 // 错误：agentapi.ErrAgentNotFound。
 func (s *agentService) Get(ctx context.Context, req agentapi.GetAgentReq) (*agentapi.AgentDetailSchema, error) {
 	if err := req.Validate(); err != nil {
@@ -141,7 +161,11 @@ func (s *agentService) Get(ctx context.Context, req agentapi.GetAgentReq) (*agen
 	if err != nil {
 		return nil, fmt.Errorf("list agent tools %d: %w", req.ID, err)
 	}
-	detail := toDetailSchema(a, toolIDs)
+	kbIDs, err := s.store.ListKBIDsByAgent(ctx, req.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent knowledge bases %d: %w", req.ID, err)
+	}
+	detail := toDetailSchema(a, toolIDs, kbIDs)
 	if err := s.cache.Set(ctx, cache.NameAgent, key, detail); err != nil {
 		slog.WarnContext(ctx, "set agent cache failed", "key", key, "err", err)
 	}
@@ -174,7 +198,7 @@ func (s *agentService) List(ctx context.Context, req agentapi.ListAgentsReq) (*a
 }
 
 // withAggregates 当页聚合（批量现读，防 N+1，provider withAggregates 先例）：
-// 工具数走本模块 agent_tools 分组计数；模型展示名走 provider api（model_id 去重后
+// 工具 / KB 数走本模块绑定表分组计数；模型展示名走 provider api（model_id 去重后
 // ListByIDs，去重后 ≤ 页大小 100 不超其上限）。缺行（模型被删的悬空引用）不报错，
 // ModelName 留零值 ""——前端 fallback 显示 model_id。
 func (s *agentService) withAggregates(ctx context.Context, agents []Agent, items []agentapi.AgentListItem) error {
@@ -192,6 +216,10 @@ func (s *agentService) withAggregates(ctx context.Context, agents []Agent, items
 	if err != nil {
 		return fmt.Errorf("count agent tools: %w", err)
 	}
+	kbCounts, err := s.store.CountKBsByAgentIDs(ctx, agentIDs)
+	if err != nil {
+		return fmt.Errorf("count agent knowledge bases: %w", err)
+	}
 	names := make(map[string]string, len(modelIDs))
 	if len(modelIDs) > 0 {
 		models, err := s.models.ListByIDs(ctx, providerapi.ListModelsByIDsReq{IDs: modelIDs})
@@ -204,14 +232,16 @@ func (s *agentService) withAggregates(ctx context.Context, agents []Agent, items
 	}
 	for i := range items {
 		items[i].ToolCount = toolCounts[agents[i].ID]
+		items[i].KBCount = kbCounts[agents[i].ID]
 		items[i].ModelName = names[items[i].ModelID]
 	}
 	return nil
 }
 
 // Update 整体更新（PUT 语义）：先取实体（区分 404 与静默不命中，且保住 created_at 等
-// DB 生成列）→ 模型预检 → 同一事务内 Save + 绑定先删后插 → 提交后失效缓存。
-// 错误：agentapi.ErrAgentNotFound、providerapi.ErrModelNotFound、agentapi.ErrToolNotFound。
+// DB 生成列）→ 模型预检 → 同一事务内 Save + 绑定（工具 / KB）先删后插 → 提交后失效缓存。
+// 错误：agentapi.ErrAgentNotFound、providerapi.ErrModelNotFound、agentapi.ErrToolNotFound、
+// agentapi.ErrKnowledgeBaseNotFound。
 func (s *agentService) Update(ctx context.Context, req agentapi.UpdateAgentReq) (*agentapi.AgentSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate update agent: %w", err)
@@ -243,6 +273,15 @@ func (s *agentService) Update(ctx context.Context, req agentapi.UpdateAgentReq) 
 				return agentapi.ErrToolNotFound
 			}
 			return fmt.Errorf("bind tools: %w", err)
+		}
+		if err := tx.DeleteKBsByAgent(ctx, req.ID); err != nil {
+			return fmt.Errorf("unbind knowledge bases: %w", err)
+		}
+		if err := tx.CreateKBs(ctx, req.ID, req.KnowledgeBaseIDs); err != nil {
+			if isFKViolation(err) {
+				return agentapi.ErrKnowledgeBaseNotFound
+			}
+			return fmt.Errorf("bind knowledge bases: %w", err)
 		}
 		return nil
 	})
@@ -338,18 +377,36 @@ func resolveEnabled(e *bool) bool {
 	return *e
 }
 
+// resolveRAGTopK 未传 → 缺省 3（与 DB DEFAULT 对齐）；指针区分「未传」与显式值。
+func resolveRAGTopK(v *int) int {
+	if v == nil {
+		return agentapi.DefaultRAGTopK
+	}
+	return *v
+}
+
+// resolveRAGMinSimilarity 未传 → 缺省 0.75（与 DB DEFAULT 对齐）。
+func resolveRAGMinSimilarity(v *float64) float64 {
+	if v == nil {
+		return agentapi.DefaultRAGMinSimilarity
+	}
+	return *v
+}
+
 // toModelCreate 创建请求 → model（id / 时间戳由 DB 生成）。
 func toModelCreate(req agentapi.CreateAgentReq) *Agent {
 	return &Agent{
-		Name:            req.Name,
-		Description:     req.Description,
-		ModelID:         req.ModelID,
-		FallbackModelID: req.FallbackModelID,
-		SystemPrompt:    req.SystemPrompt,
-		Temperature:     resolveTemperature(req.Temperature),
-		MaxOutputTokens: req.MaxOutputTokens,
-		MaxContextTurns: resolveMaxContextTurns(req.MaxContextTurns),
-		Enabled:         resolveEnabled(req.Enabled),
+		Name:             req.Name,
+		Description:      req.Description,
+		ModelID:          req.ModelID,
+		FallbackModelID:  req.FallbackModelID,
+		SystemPrompt:     req.SystemPrompt,
+		Temperature:      resolveTemperature(req.Temperature),
+		MaxOutputTokens:  req.MaxOutputTokens,
+		MaxContextTurns:  resolveMaxContextTurns(req.MaxContextTurns),
+		Enabled:          resolveEnabled(req.Enabled),
+		RAGTopK:          resolveRAGTopK(req.RAGTopK),
+		RAGMinSimilarity: resolveRAGMinSimilarity(req.RAGMinSimilarity),
 	}
 }
 
@@ -365,19 +422,23 @@ func applyUpdate(a *Agent, req agentapi.UpdateAgentReq) {
 	a.MaxOutputTokens = req.MaxOutputTokens
 	a.MaxContextTurns = resolveMaxContextTurns(req.MaxContextTurns)
 	a.Enabled = resolveEnabled(req.Enabled)
+	a.RAGTopK = resolveRAGTopK(req.RAGTopK)
+	a.RAGMinSimilarity = resolveRAGMinSimilarity(req.RAGMinSimilarity)
 }
 
 // toSchema model → 响应 schema（id / 外键字符串化，接口规范）。
 func toSchema(a *Agent) agentapi.AgentSchema {
 	s := agentapi.AgentSchema{
-		Name:            a.Name,
-		Description:     a.Description,
-		ModelID:         strconv.FormatUint(a.ModelID, 10),
-		SystemPrompt:    a.SystemPrompt,
-		Temperature:     a.Temperature,
-		MaxOutputTokens: a.MaxOutputTokens,
-		MaxContextTurns: a.MaxContextTurns,
-		Enabled:         a.Enabled,
+		Name:             a.Name,
+		Description:      a.Description,
+		ModelID:          strconv.FormatUint(a.ModelID, 10),
+		SystemPrompt:     a.SystemPrompt,
+		Temperature:      a.Temperature,
+		MaxOutputTokens:  a.MaxOutputTokens,
+		MaxContextTurns:  a.MaxContextTurns,
+		Enabled:          a.Enabled,
+		RAGTopK:          a.RAGTopK,
+		RAGMinSimilarity: a.RAGMinSimilarity,
 	}
 	s.ID = strconv.FormatUint(a.ID, 10)
 	s.CreatedAt = a.CreatedAt
@@ -389,15 +450,19 @@ func toSchema(a *Agent) agentapi.AgentSchema {
 	return s
 }
 
-// toDetailSchema model + 绑定 id → 详情 schema；ToolIDs 用 make 初始化
-// （空绑定序列化成 [] 而非 null，接口规范《空值约定》）。
-func toDetailSchema(a *Agent, toolIDs []uint64) agentapi.AgentDetailSchema {
+// toDetailSchema model + 绑定 id（工具 / KB）→ 详情 schema；ToolIDs / KnowledgeBaseIDs
+// 用 make 初始化（空绑定序列化成 [] 而非 null，接口规范《空值约定》）。
+func toDetailSchema(a *Agent, toolIDs, kbIDs []uint64) agentapi.AgentDetailSchema {
 	d := agentapi.AgentDetailSchema{
-		AgentSchema: toSchema(a),
-		ToolIDs:     make([]string, 0, len(toolIDs)),
+		AgentSchema:      toSchema(a),
+		ToolIDs:          make([]string, 0, len(toolIDs)),
+		KnowledgeBaseIDs: make([]string, 0, len(kbIDs)),
 	}
 	for _, id := range toolIDs {
 		d.ToolIDs = append(d.ToolIDs, strconv.FormatUint(id, 10))
+	}
+	for _, id := range kbIDs {
+		d.KnowledgeBaseIDs = append(d.KnowledgeBaseIDs, strconv.FormatUint(id, 10))
 	}
 	return d
 }

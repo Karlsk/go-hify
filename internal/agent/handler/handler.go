@@ -122,6 +122,8 @@ func failAgent(c *gin.Context, err error) {
 		respond.Fail(c, http.StatusConflict, agentapi.ErrAgentInUse.Error(), "Agent 有历史会话，无法删除；可先删除相关会话或改为停用")
 	case errors.Is(err, agentapi.ErrToolNotFound):
 		respond.Fail(c, http.StatusNotFound, agentapi.ErrToolNotFound.Error(), "绑定的工具不存在")
+	case errors.Is(err, agentapi.ErrKnowledgeBaseNotFound):
+		respond.Fail(c, http.StatusNotFound, agentapi.ErrKnowledgeBaseNotFound.Error(), "绑定的知识库不存在")
 	case errors.Is(err, providerapi.ErrModelNotFound):
 		respond.Fail(c, http.StatusNotFound, providerapi.ErrModelNotFound.Error(), "模型不存在")
 	default:

@@ -33,10 +33,15 @@ type stubStore struct {
 	deleteTools func(ctx context.Context, agentID uint64) error
 	createTools func(ctx context.Context, agentID uint64, toolIDs []uint64) error
 	countTools  func(ctx context.Context, ids []uint64) (map[uint64]int64, error)
+	listKBs     func(ctx context.Context, agentID uint64) ([]uint64, error)
+	deleteKBs   func(ctx context.Context, agentID uint64) error
+	createKBs   func(ctx context.Context, agentID uint64, kbIDs []uint64) error
+	countKBs    func(ctx context.Context, ids []uint64) (map[uint64]int64, error)
 
 	calls struct {
 		getByID, createAgent, updateAgent, deleteAgent int
 		deleteTools, createTools                       int
+		deleteKBs, createKBs                           int
 	}
 }
 
@@ -115,6 +120,38 @@ func (s *stubStore) CountToolsByAgentIDs(ctx context.Context, ids []uint64) (map
 	return map[uint64]int64{}, nil
 }
 
+// ListKBIDsByAgent 默认无绑定（nil）；Get 详情测试按需注入。
+func (s *stubStore) ListKBIDsByAgent(ctx context.Context, agentID uint64) ([]uint64, error) {
+	if s.listKBs != nil {
+		return s.listKBs(ctx, agentID)
+	}
+	return nil, nil
+}
+
+// CountKBsByAgentIDs 默认空 map。
+func (s *stubStore) CountKBsByAgentIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+	if s.countKBs != nil {
+		return s.countKBs(ctx, ids)
+	}
+	return map[uint64]int64{}, nil
+}
+
+func (s *stubStore) DeleteKBsByAgent(ctx context.Context, agentID uint64) error {
+	s.calls.deleteKBs++
+	if s.deleteKBs != nil {
+		return s.deleteKBs(ctx, agentID)
+	}
+	return nil
+}
+
+func (s *stubStore) CreateKBs(ctx context.Context, agentID uint64, kbIDs []uint64) error {
+	s.calls.createKBs++
+	if s.createKBs != nil {
+		return s.createKBs(ctx, agentID, kbIDs)
+	}
+	return nil
+}
+
 // stubModels 覆写 Get（存在性预检）与 ListByIDs（列表聚合名映射）；
 // 其余方法由内嵌接口兜底（本 service 只用这两个）。
 type stubModels struct {
@@ -170,11 +207,13 @@ func fkErr() error {
 
 func sampleAgent(id uint64) *Agent {
 	a := &Agent{
-		Name:         "客服助手",
-		Description:  "售后问答",
-		ModelID:      5,
-		SystemPrompt: "你是售后客服",
-		Temperature:  0.7,
+		Name:             "客服助手",
+		Description:      "售后问答",
+		ModelID:          5,
+		SystemPrompt:     "你是售后客服",
+		Temperature:      0.7,
+		RAGTopK:          3,
+		RAGMinSimilarity: 0.75,
 	}
 	a.ID = id
 	return a
@@ -207,6 +246,7 @@ func TestCreate_Happy(t *testing.T) {
 	resp, err := svc.Create(context.Background(), agentapi.CreateAgentReq{
 		Name: "客服助手", ModelID: 5, FallbackModelID: &fb,
 		SystemPrompt: "你是售后客服", Temperature: &temp, ToolIDs: []uint64{10, 12},
+		KnowledgeBaseIDs: []uint64{7, 8},
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "42", resp.ID, "RETURNING 回填的 id 字符串化")
@@ -215,6 +255,7 @@ func TestCreate_Happy(t *testing.T) {
 	assert.Equal(t, 0.3, resp.Temperature)
 	assert.Equal(t, 1, st.calls.createAgent)
 	assert.Equal(t, 1, st.calls.createTools, "绑定同事务落库")
+	assert.Equal(t, 1, st.calls.createKBs, "KB 绑定同事务落库")
 	assert.Empty(t, cm.deletedKeys, "新建无旧缓存可失效")
 }
 
@@ -288,6 +329,14 @@ func TestCreate_FKOnTools(t *testing.T) {
 	assert.ErrorIs(t, err, agentapi.ErrToolNotFound, "FK 23503 → 工具不存在")
 }
 
+func TestCreate_FKOnKBs(t *testing.T) {
+	st := &stubStore{createKBs: func(ctx context.Context, id uint64, ids []uint64) error { return fkErr() }}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	_, err := svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 5, KnowledgeBaseIDs: []uint64{999}})
+	assert.ErrorIs(t, err, agentapi.ErrKnowledgeBaseNotFound, "FK 23503 → 知识库不存在（agent 不依赖 rag，FK 是唯一校验）")
+}
+
 func TestCreate_FKOnAgent(t *testing.T) {
 	st := &stubStore{createAgent: func(ctx context.Context, a *Agent) error { return fkErr() }}
 	svc := newSvc(st, okModels(), &stubCache{})
@@ -318,7 +367,7 @@ func TestGet_CacheHit(t *testing.T) {
 }
 
 func TestGet_CacheMiss(t *testing.T) {
-	st := &stubStore{}
+	st := &stubStore{listKBs: func(ctx context.Context, agentID uint64) ([]uint64, error) { return []uint64{7, 8}, nil }}
 	var setKey string
 	var setVal any
 	cm := &stubCache{set: func(ctx context.Context, name, key string, val any) error {
@@ -331,10 +380,12 @@ func TestGet_CacheMiss(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "客服助手", resp.Name)
 	assert.Equal(t, []string{"10", "12"}, resp.ToolIDs, "绑定 id 字符串化")
+	assert.Equal(t, []string{"7", "8"}, resp.KnowledgeBaseIDs, "KB 绑定 id 字符串化")
 	assert.Equal(t, "detail:1", setKey)
 	detail, ok := setVal.(agentapi.AgentDetailSchema)
 	assert.True(t, ok)
 	assert.Equal(t, []string{"10", "12"}, detail.ToolIDs, "缓存载荷含绑定明细")
+	assert.Equal(t, []string{"7", "8"}, detail.KnowledgeBaseIDs, "缓存载荷含 KB 绑定（chat 检索注入读此缓存）")
 }
 
 func TestGet_CacheMissEmptyTools(t *testing.T) {
@@ -344,6 +395,7 @@ func TestGet_CacheMissEmptyTools(t *testing.T) {
 	resp, err := svc.Get(context.Background(), agentapi.GetAgentReq{ID: 1})
 	assert.NoError(t, err)
 	assert.Equal(t, []string{}, resp.ToolIDs, "空绑定返 [] 不返 null")
+	assert.Equal(t, []string{}, resp.KnowledgeBaseIDs, "空 KB 绑定同样返 [] 不返 null")
 }
 
 func TestGet_CacheReadErrorFallsBack(t *testing.T) {
@@ -383,6 +435,10 @@ func TestList(t *testing.T) {
 			assert.Equal(t, []uint64{1, 2, 3}, ids, "当页 id 一次批量计数")
 			return map[uint64]int64{1: 2, 3: 1}, nil // agent 2 无绑定 → map 无键 = 0
 		},
+		countKBs: func(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+			assert.Equal(t, []uint64{1, 2, 3}, ids, "KB 计数同样当页一次批量")
+			return map[uint64]int64{3: 2}, nil // agent 1/2 无 KB 绑定 → 0
+		},
 	}
 	models := &stubModels{
 		get: func(ctx context.Context, req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
@@ -399,13 +455,16 @@ func TestList(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, int64(3), resp.Total)
 	assert.Len(t, resp.Items, 3)
-	// 聚合列：模型名映射 + 工具计数（缺行 / 无绑定归零值）。
+	// 聚合列：模型名映射 + 工具/KB 计数（缺行 / 无绑定归零值）。
 	assert.Equal(t, "gpt-4o", resp.Items[0].ModelName)
 	assert.Equal(t, int64(2), resp.Items[0].ToolCount)
+	assert.Equal(t, int64(0), resp.Items[0].KBCount)
 	assert.Equal(t, "gpt-4o", resp.Items[1].ModelName, "同模型去重不影响映射")
 	assert.Equal(t, int64(0), resp.Items[1].ToolCount)
+	assert.Equal(t, int64(0), resp.Items[1].KBCount)
 	assert.Equal(t, "", resp.Items[2].ModelName, "悬空引用 → 空串，前端 fallback model_id")
 	assert.Equal(t, int64(1), resp.Items[2].ToolCount)
+	assert.Equal(t, int64(2), resp.Items[2].KBCount)
 }
 
 func TestList_AggregateErrors(t *testing.T) {
@@ -458,6 +517,7 @@ func TestUpdate_Happy(t *testing.T) {
 
 	resp, err := svc.Update(context.Background(), agentapi.UpdateAgentReq{
 		ID: 1, Name: "改名", ModelID: 6, SystemPrompt: "新提示词", ToolIDs: []uint64{12},
+		KnowledgeBaseIDs: []uint64{8},
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "1", resp.ID)
@@ -465,6 +525,8 @@ func TestUpdate_Happy(t *testing.T) {
 	assert.Equal(t, 1, st.calls.updateAgent)
 	assert.Equal(t, 1, st.calls.deleteTools, "绑定先删")
 	assert.Equal(t, 1, st.calls.createTools, "后插")
+	assert.Equal(t, 1, st.calls.deleteKBs, "KB 绑定先删")
+	assert.Equal(t, 1, st.calls.createKBs, "后插")
 	assert.Equal(t, []string{"detail:1"}, cm.deletedKeys, "提交后写时删 key")
 }
 
@@ -509,6 +571,18 @@ func TestUpdate_FKOnTools(t *testing.T) {
 	_, err := svc.Update(context.Background(), agentapi.UpdateAgentReq{ID: 1, Name: "x", ModelID: 5, ToolIDs: []uint64{999}})
 	assert.ErrorIs(t, err, agentapi.ErrToolNotFound)
 	assert.Empty(t, cm.deletedKeys, "事务失败不失效缓存（DB 未变，缓存仍有效）")
+}
+
+func TestUpdate_FKOnKBs(t *testing.T) {
+	st := &stubStore{createKBs: func(ctx context.Context, id uint64, ids []uint64) error { return fkErr() }}
+	cm := &stubCache{}
+	svc := newSvc(st, okModels(), cm)
+
+	_, err := svc.Update(context.Background(), agentapi.UpdateAgentReq{
+		ID: 1, Name: "x", ModelID: 5, KnowledgeBaseIDs: []uint64{999},
+	})
+	assert.ErrorIs(t, err, agentapi.ErrKnowledgeBaseNotFound, "FK 23503 → 知识库不存在")
+	assert.Empty(t, cm.deletedKeys, "事务失败不失效缓存")
 }
 
 // ---- Delete ----
