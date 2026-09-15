@@ -19,6 +19,7 @@ import {
   getConversationList,
   getConversationMessages,
   sendMessageStream,
+  type Citation,
   type ConversationItem,
   type DoneFrame,
   type ErrorFrame,
@@ -36,6 +37,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'tool'
   content: string
   toolCalls: ToolCall[]
+  /** assistant 行的 RAG 引用来源（buildSystemPrompt 检索命中）；user / tool 行恒 [] */
+  citations: Citation[]
   createdAt: string
   /** assistant 行的流式状态；user / tool 服务端行恒 'done' */
   state: MessageState
@@ -55,6 +58,7 @@ function toChatMessage(m: MessageItem): ChatMessage {
     role: m.role,
     content: m.content,
     toolCalls: m.tool_calls ?? [],
+    citations: m.citations ?? [],
     createdAt: m.created_at,
     state: 'done',
   }
@@ -218,6 +222,7 @@ export function useChat() {
         role: 'user',
         content: text,
         toolCalls: [],
+        citations: [],
         createdAt: new Date().toISOString(),
         state: 'done',
         local: true,
@@ -227,6 +232,7 @@ export function useChat() {
         role: 'assistant',
         content: '',
         toolCalls: [],
+        citations: [],
         createdAt: new Date().toISOString(),
         state: 'loading',
         local: true,
@@ -262,6 +268,10 @@ export function useChat() {
             assistant.retryable = frame.retryable
             onSendFailed(frame.code)
             void loadConversations()
+          },
+          // RAG 引用来源（首个 delta 前到达；空引用不发此帧）
+          onCitations: (cites) => {
+            assistant.citations = cites
           },
         },
         signal,

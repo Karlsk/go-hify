@@ -24,7 +24,7 @@
       <div
         v-for="(msg, idx) in messages"
         :key="msg.id"
-        v-memo="[msg.content, msg.state, msg.errorText, msg.passiveInterrupt]"
+        v-memo="[msg.content, msg.state, msg.errorText, msg.passiveInterrupt, msg.citations]"
         class="msg-list__row"
         :class="[
           msg.role === 'user' ? 'msg-list__row--user' : 'msg-list__row--assistant',
@@ -61,6 +61,12 @@
               <span v-if="msg.state === 'streaming'" class="stream-cursor"></span>
               <!-- 被动流中断：保留部分正文 + 弱化标注（主动 abort 不标注，§14.4） -->
               <span v-if="msg.passiveInterrupt" class="msg-bubble__interrupted">（连接中断）</span>
+              <!-- RAG 引用来源 tag 行：buildSystemPrompt 检索命中的文档清单（assistant 行持久化） -->
+              <div v-if="msg.citations.length > 0" class="msg-citations">
+                <span v-for="c in msg.citations" :key="c.document_id" class="msg-citations__tag">
+                  📄 {{ c.document_name }} · {{ c.similarity.toFixed(2) }}
+                </span>
+              </div>
             </template>
           </div>
         </template>
@@ -249,6 +255,26 @@ watch(
   margin-left: var(--hf-space-1);
   color: var(--hf-text-3);
   font-size: var(--hf-font-size-xs);
+}
+
+/* RAG 引用来源 tag 行：气泡下方紧凑排列（📄 文档名 · 相似度） */
+.msg-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hf-space-2);
+  margin-top: var(--hf-space-2);
+}
+
+.msg-citations__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hf-space-1);
+  padding: 2px var(--hf-space-2);
+  border-radius: var(--hf-radius-sm);
+  background-color: var(--hf-bg-muted);
+  color: var(--hf-text-2);
+  font-size: var(--hf-font-size-xs);
+  white-space: nowrap;
 }
 
 /* ---- 等待首字：三点跳动（时长由 token 算术，reduced-motion 由 main.css 全局降级） ---- */

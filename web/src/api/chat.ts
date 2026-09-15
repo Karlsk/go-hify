@@ -30,12 +30,20 @@ export interface ToolCall {
   args: Record<string, unknown>
 }
 
+/** RAG 引用来源（assistant 行 citations jsonb；buildSystemPrompt 检索命中 → 按 document_id 去重取最高 similarity） */
+export interface Citation {
+  document_id: string
+  document_name: string
+  similarity: number
+}
+
 /** 消息行（append-only，id 单调递增即消息顺序） */
 export interface MessageItem {
   id: string
   role: 'user' | 'assistant' | 'tool'
   content: string
   tool_calls: ToolCall[]
+  citations: Citation[]
   created_at: string
 }
 
@@ -98,12 +106,20 @@ export interface ToolResultFrame {
   retryable: boolean
 }
 
+/** citations 帧：RAG 检索命中 → 引用来源清单（首个 delta 前发；空引用不发此帧） */
+export interface CitationFrame {
+  type: 'citations'
+  citations: Citation[]
+  retryable: boolean
+}
+
 export type StreamFrame =
   | DeltaFrame
   | DoneFrame
   | ErrorFrame
   | ToolCallFrame
   | ToolResultFrame
+  | CitationFrame
 
 // ---- 请求方法 ----
 
@@ -141,6 +157,7 @@ export interface StreamCallbacks {
   onDelta: (content: string) => void
   onDone: (frame: DoneFrame) => void
   onError: (frame: ErrorFrame) => void
+  onCitations?: (citations: Citation[]) => void
 }
 
 /** 流式发消息：startSSE 薄封装，onEvent 内 JSON.parse 后按 type 分发。
@@ -172,6 +189,9 @@ export async function sendMessageStream(
           break
         case 'error':
           callbacks.onError(frame)
+          break
+        case 'citations':
+          callbacks.onCitations?.(frame.citations)
           break
       }
     },
