@@ -1116,7 +1116,7 @@ HTTP 状态映射：
 | `CONVERSATION_NOT_FOUND` | 404 | `chatapi.ErrConversationNotFound` |
 | `MODEL_CONTEXT_TOO_LONG` | 400 | `chatapi.ErrModelContextTooLong`（chat service 翻译自 llm `InvalidRequest`） |
 | `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound` |
-| `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound` |
+| `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound`（KB 不存在）；`agentapi.ErrKnowledgeBaseNotFound`（agent 侧绑定写入同码哨兵，FK 23503 翻译——agent 不依赖 rag，FK 是 KB 存在性的唯一校验） |
 | `MCP_SERVER_NOT_FOUND` | 404 | `mcpapi.ErrMCPServerNotFound` |
 | `INTERNAL_ERROR` | 500 | `errs.ErrInternal`（兜底，不向前端泄露细节） |
 
@@ -1156,6 +1156,7 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 
 | type | data | 时机 |
 |---|---|---|
+| `citations` | `{citations: [{document_id, document_name, similarity}]}` | RAG 引用来源（首个 delta 前发；空引用不发此帧） |
 | `delta` | `{content: "..."}` | 每个 token 片段 |
 | `tool_call` | `{id, tool, args}` | 触发 MCP 工具调用 |
 | `tool_result` | `{id, tool, result}` | 工具返回 |
