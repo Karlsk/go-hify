@@ -19,6 +19,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
+	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 )
 
 // happyScript 两个文本 delta + 尾帧 usage/finish；只允许被调一次。
@@ -269,7 +270,7 @@ func TestStreamProviderBusyNoExecution(t *testing.T) {
 	st := newMemStore()
 	factory := &stubClientFactory{err: llm.ErrProviderBusy}
 	execs := &execRecorder{}
-	svc := New(st, &stubAgents{agent: testAgent(true)}, &stubProviders{cfg: testLLMConfig()}, factory, execs).(*chatService)
+	svc := New(st, &stubAgents{agent: testAgent(true)}, &stubProviders{cfg: testLLMConfig()}, factory, execs, &stubRags{}).(*chatService)
 	convID := createConv(t, svc)
 
 	err := svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "x"}, func(chatapi.StreamEvent) error { return nil })
@@ -457,4 +458,236 @@ func TestTranslateLLMErrorSentinelPassthrough(t *testing.T) {
 	err = translateLLMError(&llm.Error{Class: llm.ClassAuth, Err: errors.New("401")})
 	assert.ErrorIs(t, err, llm.ErrProviderUnavailable)
 	assert.NotErrorIs(t, err, errs.ErrServiceUnavailable) // Auth 走分类表，不落 SERVICE_UNAVAILABLE 兜底
+}
+
+// ---- RAG 检索注入（rag_injection_spec.md §4） ----
+
+// ragChunks 三个片段：两个 ≥0.75 过阈值、一个 0.74 被过滤（DocumentID 供引用清单断言）。
+func ragChunks() []ragapi.RetrievedChunk {
+	return []ragapi.RetrievedChunk{
+		{DocumentID: "101", Content: "退货需在签收后 7 天内申请", Similarity: 0.93, DocumentName: "退货政策.md"},
+		{DocumentID: "102", Content: "运费由买家承担", Similarity: 0.76, DocumentName: "运费说明.txt"},
+		{DocumentID: "103", Content: "低于阈值的片段", Similarity: 0.74, DocumentName: "低分文档.md"},
+	}
+}
+
+func TestAugmentSystemPrompt(t *testing.T) {
+	cases := []struct {
+		name   string
+		base   string
+		chunks []ragapi.RetrievedChunk
+		want   string
+	}{
+		{
+			name: "base + 命中片段 + 文档名",
+			base: "你是售后客服",
+			chunks: []ragapi.RetrievedChunk{
+				{Content: "片段一", DocumentName: "退货政策.md"},
+				{Content: "片段二", DocumentName: "运费说明.txt"},
+			},
+			want: "你是售后客服\n\n请基于以下参考资料回答用户问题。\n" +
+				"如果资料中没有相关信息，直接说“我没有找到相关资料”，不要编造。\n\n" +
+				"【参考资料】\n[1] 片段一 (来源: 退货政策.md)\n[2] 片段二 (来源: 运费说明.txt)",
+		},
+		{
+			name:   "D3：base 为空 → 资料段起头",
+			base:   "",
+			chunks: []ragapi.RetrievedChunk{{Content: "片段", DocumentName: "doc.md"}},
+			want: "请基于以下参考资料回答用户问题。\n" +
+				"如果资料中没有相关信息，直接说“我没有找到相关资料”，不要编造。\n\n" +
+				"【参考资料】\n[1] 片段 (来源: doc.md)",
+		},
+		{
+			name:   "文档名为空：不加来源后缀",
+			base:   "b",
+			chunks: []ragapi.RetrievedChunk{{Content: "片段"}},
+			want: "b\n\n请基于以下参考资料回答用户问题。\n" +
+				"如果资料中没有相关信息，直接说“我没有找到相关资料”，不要编造。\n\n" +
+				"【参考资料】\n[1] 片段",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, augmentSystemPrompt(tc.base, tc.chunks))
+		})
+	}
+}
+
+func TestBuildSystemPrompt(t *testing.T) {
+	ctx := context.Background()
+	kbAgent := testAgent(true)
+	kbAgent.KnowledgeBaseIDs = []string{"7", "8"}
+
+	t.Run("无 KB 绑定：不调 Retrieve，原样返回、无引用", func(t *testing.T) {
+		rags := &stubRags{err: errors.New("不应被调")}
+		svc := &chatService{rags: rags}
+		a := testAgent(true)
+		a.KnowledgeBaseIDs = nil
+		got, cites := svc.buildSystemPrompt(ctx, a, "退货政策是什么")
+		assert.Equal(t, "你是 Hify 助手", got)
+		assert.Empty(t, cites)
+		assert.Equal(t, 0, rags.calls, "空绑定零检索调用（需求：没有就跳过）")
+	})
+
+	t.Run("有绑定：TopK=3 + KB id 数值化传参，过滤后拼接 + 引用清单", func(t *testing.T) {
+		rags := &stubRags{resp: ragChunks()}
+		svc := &chatService{rags: rags}
+		got, cites := svc.buildSystemPrompt(ctx, kbAgent, "退货政策是什么")
+		assert.Equal(t, 1, rags.calls)
+		assert.Equal(t, 3, rags.lastReq.TopK)
+		assert.Equal(t, []uint64{7, 8}, rags.lastReq.KBIDs)
+		assert.Equal(t, "退货政策是什么", rags.lastReq.Query)
+		assert.Contains(t, got, "你是 Hify 助手\n\n请基于以下参考资料回答用户问题。")
+		assert.Contains(t, got, "[1] 退货需在签收后 7 天内申请 (来源: 退货政策.md)")
+		assert.Contains(t, got, "[2] 运费由买家承担 (来源: 运费说明.txt)")
+		assert.NotContains(t, got, "低于阈值的片段", "0.74 < 0.75 被过滤")
+		assert.NotContains(t, got, "[3]")
+		// 引用清单：过滤后的两个命中（按 document_id 升序），被滤片段不出现
+		assert.Equal(t, []chatapi.Citation{
+			{DocumentID: "101", DocumentName: "退货政策.md", Similarity: 0.93},
+			{DocumentID: "102", DocumentName: "运费说明.txt", Similarity: 0.76},
+		}, cites)
+	})
+
+	t.Run("检索失败：降级照常对话（D2），原样返回、无引用", func(t *testing.T) {
+		rags := &stubRags{err: ragapi.ErrEmbeddingModelMismatch}
+		svc := &chatService{rags: rags}
+		got, cites := svc.buildSystemPrompt(ctx, kbAgent, "q")
+		assert.Equal(t, "你是 Hify 助手", got)
+		assert.Empty(t, cites)
+	})
+
+	t.Run("命中全部低于阈值：不加资料段，原样返回、无引用", func(t *testing.T) {
+		rags := &stubRags{resp: []ragapi.RetrievedChunk{{Content: "低分", Similarity: 0.1}}}
+		svc := &chatService{rags: rags}
+		got, cites := svc.buildSystemPrompt(ctx, kbAgent, "q")
+		assert.Equal(t, "你是 Hify 助手", got)
+		assert.Empty(t, cites)
+	})
+
+	t.Run("空 system_prompt 有命中：仍注入资料段（D3）", func(t *testing.T) {
+		rags := &stubRags{resp: []ragapi.RetrievedChunk{{Content: "资料", Similarity: 0.9}}}
+		svc := &chatService{rags: rags}
+		a := testAgent(true)
+		a.SystemPrompt = ""
+		a.KnowledgeBaseIDs = []string{"7"}
+		got, cites := svc.buildSystemPrompt(ctx, a, "q")
+		assert.True(t, strings.HasPrefix(got, "请基于以下参考资料回答用户问题。"), "资料段起头无前导空行")
+		assert.Contains(t, got, "[1] 资料")
+		assert.Len(t, cites, 1)
+	})
+
+	t.Run("自定义 RAGTopK / RAGMinSimilarity 透传给 Retrieve", func(t *testing.T) {
+		rags := &stubRags{resp: []ragapi.RetrievedChunk{
+			{DocumentID: "1", Content: "高分", Similarity: 0.9},
+			{DocumentID: "2", Content: "中分", Similarity: 0.65},
+		}}
+		svc := &chatService{rags: rags}
+		a := testAgent(true)
+		a.RAGTopK = 5
+		a.RAGMinSimilarity = 0.6
+		a.KnowledgeBaseIDs = []string{"7"}
+		got, cites := svc.buildSystemPrompt(ctx, a, "q")
+		assert.Equal(t, 5, rags.lastReq.TopK, "RAGTopK=5 透传给 Retrieve")
+		assert.Contains(t, got, "[1] 高分", "0.9 >= 0.6 通过")
+		assert.Contains(t, got, "[2] 中分", "0.65 >= 0.6 通过（默认 0.75 会过滤）")
+		assert.Len(t, cites, 2)
+	})
+}
+
+func TestDedupeCitations(t *testing.T) {
+	// 同文档多块命中只留最高相似度；输出按 document_id 升序稳定排序。
+	kept := []ragapi.RetrievedChunk{
+		{DocumentID: "102", DocumentName: "b.md", Similarity: 0.8},
+		{DocumentID: "101", DocumentName: "a.md", Similarity: 0.9},
+		{DocumentID: "101", DocumentName: "a.md", Similarity: 0.95}, // 同文档更高分
+		{DocumentID: "101", DocumentName: "a.md", Similarity: 0.85}, // 同文档更低分
+	}
+	assert.Equal(t, []chatapi.Citation{
+		{DocumentID: "101", DocumentName: "a.md", Similarity: 0.95},
+		{DocumentID: "102", DocumentName: "b.md", Similarity: 0.8},
+	}, dedupeCitations(kept))
+}
+
+func TestStreamRAGInjection(t *testing.T) {
+	// 端到端：agent 绑 KB → 发消息 → 检索注入增强 system prompt → 发给 LLM 的首条消息。
+	agent := testAgent(true)
+	agent.KnowledgeBaseIDs = []string{"7"}
+	h := newServiceWithAgent(t, agent, happyScript)
+	h.rags.resp = []ragapi.RetrievedChunk{{Content: "退货需在签收后 7 天内申请", Similarity: 0.9, DocumentName: "退货政策.md"}}
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "退货政策"}, collectEvents(&events, ""))
+	assert.NoError(t, err)
+	assert.Equal(t, 1, h.rags.calls, "每条 user 消息独立检索一次")
+
+	msgs := h.streamer.lastMsgs()
+	if assert.NotEmpty(t, msgs) {
+		sys := msgs[0]
+		assert.Equal(t, schema.System, sys.Role)
+		assert.Contains(t, sys.Content, "你是 Hify 助手\n\n请基于以下参考资料回答用户问题。")
+		assert.Contains(t, sys.Content, "[1] 退货需在签收后 7 天内申请 (来源: 退货政策.md)")
+	}
+}
+
+func TestStreamRAGInjectionCitations(t *testing.T) {
+	// 端到端：检索命中 → SSE citations 事件（首个 delta 前）+ assistant 行落库引用 +
+	// 一次输出模式 reply.Citations。同文档两块命中去重取最高分。
+	// 可重复 script：本测试发两条消息（Stream + SendMessage），happyScript 是单次的。
+	script := func(int) (*schema.StreamReader[*schema.Message], error) {
+		return chunkStream(delta("你好"), delta("，世界"), tailChunk(12, 6, "stop")), nil
+	}
+	agent := testAgent(true)
+	agent.KnowledgeBaseIDs = []string{"7"}
+	h := newServiceWithAgent(t, agent, script)
+	h.rags.resp = []ragapi.RetrievedChunk{
+		{DocumentID: "101", DocumentName: "退货政策.md", Similarity: 0.93, Content: "退货需在签收后 7 天内申请"},
+		{DocumentID: "101", DocumentName: "退货政策.md", Similarity: 0.88, Content: "7 天内联系客服"},
+		{DocumentID: "102", DocumentName: "运费说明.txt", Similarity: 0.76, Content: "运费由买家承担"},
+	}
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "退货政策"}, collectEvents(&events, ""))
+	assert.NoError(t, err)
+
+	// citations 事件是首事件（先于所有 delta），去重 + 升序
+	assert.Equal(t, chatapi.EventCitations, events[0].Type)
+	assert.Equal(t, []chatapi.Citation{
+		{DocumentID: "101", DocumentName: "退货政策.md", Similarity: 0.93},
+		{DocumentID: "102", DocumentName: "运费说明.txt", Similarity: 0.76},
+	}, events[0].Citations)
+	assert.Equal(t, chatapi.EventDelta, events[1].Type)
+
+	// assistant 行引用随消息落库（历史消息接口可回放）
+	ms := h.store.messagesOf(convID)
+	if assert.Len(t, ms, 2) {
+		assert.Equal(t, events[0].Citations, ms[1].Citations)
+	}
+
+	// 一次输出模式：引用经 reply 返回（空态为 [] 不为 null）
+	reply, err := h.svc.SendMessage(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "再问一次"})
+	if assert.NoError(t, err) && assert.NotNil(t, reply) {
+		assert.Equal(t, events[0].Citations, reply.Citations)
+	}
+}
+
+func TestStreamRAGNoCitationsEvent(t *testing.T) {
+	// 未命中（全滤）：不发 citations 事件、assistant 行引用为空 []（不返 null）。
+	agent := testAgent(true)
+	agent.KnowledgeBaseIDs = []string{"7"}
+	h := newServiceWithAgent(t, agent, happyScript)
+	h.rags.resp = []ragapi.RetrievedChunk{{DocumentID: "103", DocumentName: "低分文档.md", Similarity: 0.1}}
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "q"}, collectEvents(&events, ""))
+	assert.NoError(t, err)
+	assert.Equal(t, chatapi.EventDelta, events[0].Type, "空引用不发 citations 事件，首事件直接是 delta")
+
+	ms := h.store.messagesOf(convID)
+	if assert.Len(t, ms, 2) {
+		assert.Equal(t, []chatapi.Citation{}, ms[1].Citations, "空引用落库为 []（store 归一）")
+	}
 }

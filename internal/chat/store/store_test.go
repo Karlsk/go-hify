@@ -12,6 +12,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	chatapi "github.com/Karlsk/go-hify/internal/chat/api"
 	chatsvc "github.com/Karlsk/go-hify/internal/chat/service"
 )
 
@@ -36,15 +37,15 @@ func newMockDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 // 列清单（与 store.go 的 select 常量一致，供 NewRows 用）。
 var (
 	conversationCols = []string{"id", "user_id", "agent_id", "title", "created_at", "updated_at"}
-	messageCols      = []string{"id", "conversation_id", "role", "content", "tool_calls", "created_at"}
+	messageCols      = []string{"id", "conversation_id", "role", "content", "tool_calls", "citations", "created_at"}
 )
 
 func conversationRows(id, userID, agentID uint64, title string, now time.Time) *sqlmock.Rows {
 	return sqlmock.NewRows(conversationCols).AddRow(id, userID, agentID, title, now, now)
 }
 
-func messageRows(id, conversationID uint64, role, content, toolCallsJSON string, now time.Time) *sqlmock.Rows {
-	return sqlmock.NewRows(messageCols).AddRow(id, conversationID, role, content, toolCallsJSON, now)
+func messageRows(id, conversationID uint64, role, content, toolCallsJSON, citationsJSON string, now time.Time) *sqlmock.Rows {
+	return sqlmock.NewRows(messageCols).AddRow(id, conversationID, role, content, toolCallsJSON, citationsJSON, now)
 }
 
 const getConversationSQL = `SELECT id, user_id, agent_id, title, created_at, updated_at FROM "conversations" WHERE "conversations"."id" = $1 ORDER BY "conversations"."id" LIMIT $2`
@@ -53,9 +54,9 @@ const listConversationsFirstSQL = `SELECT id, user_id, agent_id, title, created_
 
 const listConversationsCursorSQL = `SELECT id, user_id, agent_id, title, created_at, updated_at FROM "conversations" WHERE user_id = $1 AND (updated_at, id) < ($2, $3) ORDER BY updated_at DESC, id DESC LIMIT $4`
 
-const listMessagesAfterSQL = `SELECT id, conversation_id, role, content, tool_calls, created_at FROM "messages" WHERE conversation_id = $1 AND id > $2 ORDER BY id LIMIT $3`
+const listMessagesAfterSQL = `SELECT id, conversation_id, role, content, tool_calls, citations, created_at FROM "messages" WHERE conversation_id = $1 AND id > $2 ORDER BY id LIMIT $3`
 
-const listRecentMessagesSQL = `SELECT id, conversation_id, role, content, tool_calls, created_at FROM "messages" WHERE conversation_id = $1 ORDER BY id DESC LIMIT $2`
+const listRecentMessagesSQL = `SELECT id, conversation_id, role, content, tool_calls, citations, created_at FROM "messages" WHERE conversation_id = $1 ORDER BY id DESC LIMIT $2`
 
 // ---- conversations ----
 
@@ -214,7 +215,8 @@ func TestCreateMessage(t *testing.T) {
 	err := s.CreateMessage(context.Background(), m)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(101), m.ID)
-	assert.Equal(t, []map[string]any{}, m.ToolCalls) // nil 归一为空集合，防 jsonb null
+	assert.Equal(t, []map[string]any{}, m.ToolCalls)   // nil 归一为空集合，防 jsonb null
+	assert.Equal(t, []chatapi.Citation{}, m.Citations) // 同款归一（user 行无引用）
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -225,13 +227,16 @@ func TestListMessagesAfter(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta(listMessagesAfterSQL)).
 		WithArgs(uint64(9), uint64(100), 50).
-		WillReturnRows(messageRows(101, 9, "user", "问", "[]", now).
-			AddRow(102, 9, "assistant", "答", "[]", now))
+		WillReturnRows(messageRows(101, 9, "user", "问", "[]", "[]", now).
+			AddRow(102, 9, "assistant", "答", "[]",
+				`[{"document_id":"7","document_name":"deploy.md","similarity":0.87}]`, now))
 
 	ms, err := s.ListMessagesAfter(context.Background(), 9, 100, 50)
 	assert.NoError(t, err)
 	assert.Len(t, ms, 2)
 	assert.Equal(t, uint64(101), ms[0].ID) // 正序
+	assert.Equal(t, "deploy.md", ms[1].Citations[0].DocumentName, "citations 须在列清单内（漏列 → 恒空，历史消息看不到引用来源）")
+	assert.Equal(t, 0.87, ms[1].Citations[0].Similarity)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -242,10 +247,10 @@ func TestListRecentMessages(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta(listRecentMessagesSQL)).
 		WithArgs(uint64(9), 40).
-		WillReturnRows(messageRows(104, 9, "assistant", "答", "[]", now).
-			AddRow(103, 9, "tool", "{...}", "[]", now.Add(-time.Second)).
-			AddRow(102, 9, "assistant", "", `[{"id":"call_1","tool":"query_orders","args":{}}]`, now.Add(-2*time.Second)).
-			AddRow(101, 9, "user", "问", "[]", now.Add(-3*time.Second)))
+		WillReturnRows(messageRows(104, 9, "assistant", "答", "[]", "[]", now).
+			AddRow(103, 9, "tool", "{...}", "[]", "[]", now.Add(-time.Second)).
+			AddRow(102, 9, "assistant", "", `[{"id":"call_1","tool":"query_orders","args":{}}]`, "[]", now.Add(-2*time.Second)).
+			AddRow(101, 9, "user", "问", "[]", "[]", now.Add(-3*time.Second)))
 
 	ms, err := s.ListRecentMessages(context.Background(), 9, 40)
 	assert.NoError(t, err)

@@ -8,15 +8,17 @@ import (
 
 	"gorm.io/gorm"
 
+	chatapi "github.com/Karlsk/go-hify/internal/chat/api"
 	chatsvc "github.com/Karlsk/go-hify/internal/chat/service"
 )
 
 var _ chatsvc.Store = (*Store)(nil) // 编译期断言：Store 实现了 service.Store
 
 // 显式列清单（禁 SELECT *，CLAUDE.md《SQL 编写规范》；列序与迁移 SQL 一致）。
+// 加列必须同步补进清单——漏列 → 扫描恒零值（agent selectAgent 踩过的坑，不重犯）。
 const (
 	selectConversation = "id, user_id, agent_id, title, created_at, updated_at"
-	selectMessage      = "id, conversation_id, role, content, tool_calls, created_at"
+	selectMessage      = "id, conversation_id, role, content, tool_calls, citations, created_at"
 )
 
 // Store 实现 chatsvc.Store；error 原样上抛，业务翻译在 service 层。
@@ -103,11 +105,14 @@ func (s *Store) DeleteConversation(ctx context.Context, id uint64) error {
 
 // ---- messages ----
 
-// CreateMessage 追加一条消息；ToolCalls 为 nil 时归一为空集合（serializer 会把 nil 写成
-// json null 落库，绕过列 DEFAULT '[]'）。
+// CreateMessage 追加一条消息；ToolCalls / Citations 为 nil 时归一为空集合（serializer 会把
+// nil 写成 json null 落库，绕过列 DEFAULT '[]'）。
 func (s *Store) CreateMessage(ctx context.Context, m *chatsvc.Message) error {
 	if m.ToolCalls == nil {
 		m.ToolCalls = []map[string]any{}
+	}
+	if m.Citations == nil {
+		m.Citations = []chatapi.Citation{}
 	}
 	return s.db.WithContext(ctx).Create(m).Error
 }

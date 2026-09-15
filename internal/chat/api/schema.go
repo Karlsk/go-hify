@@ -23,6 +23,7 @@ const (
 	EventDelta      = "delta"       // 每个 token 片段
 	EventToolCall   = "tool_call"   // 触发 MCP 工具调用（v1 预留：契约先定，工具循环后补）
 	EventToolResult = "tool_result" // 工具返回（v1 预留）
+	EventCitations  = "citations"   // RAG 引用来源（检索注入命中文档清单，首个 delta 前发一次）
 	EventDone       = "done"        // 正常结束（message_id + usage + finish_reason）
 	EventError      = "error"       // 异常结束（code + retryable）
 )
@@ -43,12 +44,21 @@ type ToolCall struct {
 	Args map[string]any `json:"args"` // 由 service 保证非 nil（空参返 {} 不返 null）
 }
 
+// Citation RAG 引用来源条目：检索注入命中文档（按 document_id 去重、相似度取最高）。
+// SSE citations 事件、messages.citations 落库、历史消息响应三处共用。
+type Citation struct {
+	DocumentID   string  `json:"document_id"`   // 字符串化 knowledge 侧 documents.id
+	DocumentName string  `json:"document_name"` // 展示名（悬空引用——文档已删——为 ""）
+	Similarity   float64 `json:"similarity"`    // 命中相似度（1 - 余弦距离）
+}
+
 // MessageSchema 消息响应。append-only 表无 updated_at，不 embed schema.BaseSchema，自行声明表头。
 type MessageSchema struct {
 	ID        string     `json:"id"`   // 字符串化；单调递增 = 消息顺序 = 翻页游标
 	Role      string     `json:"role"` // user / assistant / tool
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls"` // assistant 中间行专用；service 保证非 nil（空返 []）
+	Citations []Citation `json:"citations"`  // assistant 行 RAG 引用来源；service 保证非 nil（空返 []）
 	CreatedAt time.Time  `json:"created_at"`
 }
 
@@ -79,10 +89,11 @@ type Usage struct {
 // AssistantReplySchema 一次输出模式（stream:false）的响应：最终 assistant 消息。
 // 错误走标准错误信封 + 正常 HTTP 状态码（流未开始，状态码可用）。
 type AssistantReplySchema struct {
-	MessageID    string `json:"message_id"` // 落库后的 assistant messages.id（重新生成/反馈锚定）
-	Content      string `json:"content"`
-	Usage        Usage  `json:"usage"`
-	FinishReason string `json:"finish_reason"`
+	MessageID    string     `json:"message_id"` // 落库后的 assistant messages.id（重新生成/反馈锚定）
+	Content      string     `json:"content"`
+	Usage        Usage      `json:"usage"`
+	FinishReason string     `json:"finish_reason"`
+	Citations    []Citation `json:"citations"` // RAG 引用来源（同 SSE citations 事件；空返 []）
 }
 
 // ---- SSE 事件 ----
@@ -97,6 +108,7 @@ type StreamEvent struct {
 	Tool         string         `json:"tool,omitempty"`          // tool_call / tool_result
 	Args         map[string]any `json:"args,omitempty"`          // tool_call
 	Result       any            `json:"result,omitempty"`        // tool_result
+	Citations    []Citation     `json:"citations,omitempty"`     // citations
 	MessageID    string         `json:"message_id,omitempty"`    // done
 	Usage        *Usage         `json:"usage,omitempty"`         // done
 	FinishReason string         `json:"finish_reason,omitempty"` // done
@@ -118,6 +130,11 @@ func ToolCallEvent(id, tool string, args map[string]any) StreamEvent {
 // ToolResultEvent 工具返回（v1 预留）。
 func ToolResultEvent(id, tool string, result any) StreamEvent {
 	return StreamEvent{Type: EventToolResult, ID: id, Tool: tool, Result: result}
+}
+
+// CitationsEvent RAG 引用来源（检索注入命中文档；首个 delta 前发一次，空引用不发）。
+func CitationsEvent(items []Citation) StreamEvent {
+	return StreamEvent{Type: EventCitations, Citations: items}
 }
 
 // DoneEvent 正常结束。

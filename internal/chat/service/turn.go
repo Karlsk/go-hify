@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
+	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 )
 
 const (
@@ -39,6 +41,10 @@ const (
 	rowsPerTurnEstimate = 5
 	// titleMaxRunes 会话标题截断长度（首条用户消息生成）。
 	titleMaxRunes = 30
+	// ragInjectionTopK chat 检索注入取回片段数（需求给定钉值；rag cfg.TopK 默认 5 仅服务 HTTP 检索测试）。
+	ragInjectionTopK = 3
+	// ragMinSimilarity 注入阈值（需求给定）：RetrievedChunk.Similarity = 1 - 余弦距离，低于该值过滤。
+	ragMinSimilarity = 0.75
 )
 
 // llmSetup setupTurn 装配出的一轮调用配置快照。
@@ -87,7 +93,12 @@ func (s *chatService) runTurn(ctx context.Context, req chatapi.SendMessageReq, e
 		}
 	}
 
-	msgs := assembleMessages(setup.agent, history, req.Content)
+	// system prompt 现拼（不落库）：agent 原提示词 + 可选 RAG 检索注入（IO 在 buildSystemPrompt 内）。
+	sysPrompt, citations := s.buildSystemPrompt(ctx, setup.agent, req.Content)
+	if citations == nil {
+		citations = []chatapi.Citation{} // 空引用也返 []（reply 契约：列表字段不返 null）
+	}
+	msgs := assembleMessages(sysPrompt, history, req.Content)
 	start := time.Now()
 	stream, err := setup.client.Stream(ctx, msgs, callOptions(setup.agent))
 	if err != nil {
@@ -98,6 +109,14 @@ func (s *chatService) runTurn(ctx context.Context, req chatapi.SendMessageReq, e
 		}
 		s.recordExecution(ctx, setup, msgs, start, "", chatapi.Usage{}, "", err)
 		return nil, translateLLMError(err)
+	}
+
+	// citations 事件在流建立后、首个 delta 前发（emit 之前的失败以 error 返回——此时 handler
+	// 尚未写 200 头，还能回标准错误信封）；空引用不发。
+	if emit != nil && len(citations) > 0 {
+		if eerr := emit(chatapi.CitationsEvent(citations)); eerr != nil {
+			return nil, nil // 前端已断连：与 delta 同款处理，静默收尾（user 消息已落库无碍）
+		}
 	}
 
 	var (
@@ -139,12 +158,12 @@ func (s *chatService) runTurn(ctx context.Context, req chatapi.SendMessageReq, e
 	}
 	_ = stream.Close() // 幂等：EOF 已自动收尾，错误 / 断连路径显式释放槽位
 
-	reply := &chatapi.AssistantReplySchema{Content: content.String(), Usage: usage, FinishReason: finishReason}
+	reply := &chatapi.AssistantReplySchema{Content: content.String(), Usage: usage, FinishReason: finishReason, Citations: citations}
 
 	// ---- 收尾（顺序：assistant 落库 → touch → executions → done / error 事件）----
 
 	// 已生成内容一律落库（含失败 / 断连的部分内容）：下轮上下文完整是硬需求
-	if assistant := s.persistAssistant(ctx, setup.conv.ID, reply.Content); assistant != nil {
+	if assistant := s.persistAssistant(ctx, setup.conv.ID, reply.Content, citations); assistant != nil {
 		reply.MessageID = strconv.FormatUint(assistant.ID, 10)
 	}
 	if terr := s.store.TouchConversation(ctx, setup.conv.ID); terr != nil {
@@ -258,18 +277,123 @@ func truncateTurns(ms []Message, maxTurns int) []Message {
 	return kept[start:]
 }
 
-// assembleMessages 组装发给 LLM 的消息序列：[system（agent 现取）] + 截断后历史 + 当前用户消息。
-// system prompt 不落库（每次由 agent 配置拼装，改提示词下一轮立即生效——data_flow 决策）。
-func assembleMessages(a *agentapi.AgentDetailSchema, history []Message, content string) []*schema.Message {
+// assembleMessages 组装发给 LLM 的消息序列：[system（已增强——agent 原提示词 + 可选
+// RAG 注入资料段）] + 截断后历史 + 当前用户消息。system prompt 不落库（每次现拼，
+// 改提示词 / 换 KB 绑定下一轮立即生效——data_flow 决策）。
+func assembleMessages(systemPrompt string, history []Message, content string) []*schema.Message {
 	msgs := make([]*schema.Message, 0, len(history)+2)
-	if a.SystemPrompt != "" {
-		msgs = append(msgs, schema.SystemMessage(a.SystemPrompt))
+	if systemPrompt != "" {
+		msgs = append(msgs, schema.SystemMessage(systemPrompt))
 	}
 	for i := range history {
 		msgs = append(msgs, toEinoMessage(&history[i]))
 	}
 	msgs = append(msgs, schema.UserMessage(content))
 	return msgs
+}
+
+// ragInjectionInstruction 注入段的指令部分（需求给定原文，逐字对齐 spec §4.4 模板）。
+const ragInjectionInstruction = "请基于以下参考资料回答用户问题。\n如果资料中没有相关信息，直接说“我没有找到相关资料”，不要编造。"
+
+// buildSystemPrompt 组装本轮 system prompt 与 RAG 引用来源：agent 原 prompt + 可选检索注入。
+// 第二返回值是命中引用清单（按 document_id 去重、相似度取最高），SSE citations 事件与
+// assistant 落库共用；未注入（空绑定 / 降级 / 全滤）路径返回 nil，调用方决定空态形态。
+// 空绑定零检索调用（需求「没有就跳过」）；检索失败降级返回原 prompt 并 WARN（D2：
+// RAG 不是对话硬依赖，混嵌入模型 / 供应商忙 / DB 错一律照常对话）；命中按
+// ragMinSimilarity 过滤，全滤掉不加资料段（资料段单独存在无意义）。
+func (s *chatService) buildSystemPrompt(ctx context.Context, a *agentapi.AgentDetailSchema, query string) (string, []chatapi.Citation) {
+	if len(a.KnowledgeBaseIDs) == 0 {
+		return a.SystemPrompt, nil
+	}
+	kbIDs := make([]uint64, 0, len(a.KnowledgeBaseIDs))
+	for _, id := range a.KnowledgeBaseIDs {
+		n, err := strconv.ParseUint(id, 10, 64)
+		if err != nil {
+			// 详情 schema 的 id 一定数字（service 层字符串化产生）；脏数据防御：跳过注入照常对话
+			slog.WarnContext(ctx, "chat: agent kb id not numeric; skip rag injection", "agent_id", a.ID, "kb_id", id)
+			return a.SystemPrompt, nil
+		}
+		kbIDs = append(kbIDs, n)
+	}
+	topK := a.RAGTopK
+	if topK < 1 {
+		topK = ragInjectionTopK // agent 缓存载荷可能缺字段（旧缓存条目 TTL 兜底）
+	}
+	chunks, err := s.rags.Retrieve(ctx, ragapi.RetrieveReq{Query: query, TopK: topK, KBIDs: kbIDs})
+	if err != nil {
+		slog.WarnContext(ctx, "chat: rag retrieve failed; fallback to plain system prompt", "agent_id", a.ID, "err", err)
+		return a.SystemPrompt, nil
+	}
+	minSim := a.RAGMinSimilarity
+	if minSim <= 0 {
+		minSim = ragMinSimilarity // agent 缓存载荷可能缺字段（旧缓存条目 TTL 兜底）
+	}
+	kept := make([]ragapi.RetrievedChunk, 0, len(chunks))
+	for _, c := range chunks {
+		if c.Similarity >= minSim {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) == 0 {
+		return a.SystemPrompt, nil
+	}
+	return augmentSystemPrompt(a.SystemPrompt, kept), dedupeCitations(kept)
+}
+
+// dedupeCitations 命中片段 → 引用清单：同一文档多块命中只留相似度最高的一条（前端展示
+// 的是「引用了哪些文档」而非「哪些块」）。kept 非空则返回非 nil。
+func dedupeCitations(kept []ragapi.RetrievedChunk) []chatapi.Citation {
+	best := make(map[string]chatapi.Citation, len(kept))
+	for _, c := range kept {
+		cur, ok := best[c.DocumentID]
+		if !ok || c.Similarity > cur.Similarity {
+			best[c.DocumentID] = chatapi.Citation{
+				DocumentID:   c.DocumentID,
+				DocumentName: c.DocumentName,
+				Similarity:   c.Similarity,
+			}
+		}
+	}
+	// 输出稳定：按 DocumentID 升序（检索结果本身相似度降序，去重后直接收集顺序不稳定）
+	ids := make([]string, 0, len(best))
+	for id := range best {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]chatapi.Citation, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, best[id])
+	}
+	return out
+}
+
+// augmentSystemPrompt agent 原 prompt + 过滤后的命中片段 → 最终 system prompt
+// （模板逐字：base 与资料段之间空一行；[n] 编号自 1 起；chunk 内容原文不截断；
+// DocumentName 非空时加 (来源: xxx) 后缀——LLM 自然引用文档名作答）。
+// base 为空且有命中时输出以资料段开头（D3），无前导空行。
+func augmentSystemPrompt(base string, chunks []ragapi.RetrievedChunk) string {
+	var b strings.Builder
+	if base != "" {
+		b.WriteString(base)
+		b.WriteString("\n\n")
+	}
+	b.WriteString(ragInjectionInstruction)
+	b.WriteString("\n\n【参考资料】\n")
+	for i, c := range chunks {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("[")
+		b.WriteString(strconv.Itoa(i + 1))
+		b.WriteString("] ")
+		b.WriteString(c.Content)
+		if c.DocumentName != "" {
+			b.WriteString(" (来源: ")
+			b.WriteString(c.DocumentName)
+			b.WriteString(")")
+		}
+	}
+	return b.String()
 }
 
 // toEinoMessage 单条历史消息 → eino 消息。v1 历史只有 user / assistant；tool 中间行与
@@ -335,10 +459,10 @@ func callOptions(a *agentapi.AgentDetailSchema) *llm.CallOptions {
 	return opts
 }
 
-// persistAssistant 落 assistant 消息；失败只 WARN 不阻断——流式 token 已发出无法撤回，
-// 消息丢失只影响下轮上下文（done 事件以空 message_id 降级）。
-func (s *chatService) persistAssistant(ctx context.Context, conversationID uint64, content string) *Message {
-	m := &Message{ConversationID: conversationID, Role: chatapi.RoleAssistant, Content: content}
+// persistAssistant 落 assistant 消息（含 RAG 引用来源）；失败只 WARN 不阻断——流式 token
+// 已发出无法撤回，消息丢失只影响下轮上下文（done 事件以空 message_id 降级）。
+func (s *chatService) persistAssistant(ctx context.Context, conversationID uint64, content string, citations []chatapi.Citation) *Message {
+	m := &Message{ConversationID: conversationID, Role: chatapi.RoleAssistant, Content: content, Citations: citations}
 	if err := s.store.CreateMessage(ctx, m); err != nil {
 		slog.WarnContext(ctx, "chat: persist assistant message failed", "conversation_id", conversationID, "err", err)
 		return nil

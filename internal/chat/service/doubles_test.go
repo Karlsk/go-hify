@@ -21,6 +21,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
+	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	"gorm.io/gorm"
 )
 
@@ -252,11 +253,13 @@ func (s *stubAgents) Get(_ context.Context, req agentapi.GetAgentReq) (*agentapi
 func testAgent(enabled bool) *agentapi.AgentDetailSchema {
 	return &agentapi.AgentDetailSchema{
 		AgentSchema: agentapi.AgentSchema{
-			ModelID:         "3",
-			SystemPrompt:    "你是 Hify 助手",
-			Temperature:     0.7,
-			MaxContextTurns: 10,
-			Enabled:         enabled,
+			ModelID:          "3",
+			SystemPrompt:     "你是 Hify 助手",
+			Temperature:      0.7,
+			MaxContextTurns:  10,
+			Enabled:          enabled,
+			RAGTopK:          3,
+			RAGMinSimilarity: 0.75,
 		},
 		ToolIDs: []string{},
 	}
@@ -272,6 +275,25 @@ func (s *stubProviders) ResolveLLMConfig(context.Context, providerapi.ResolveLLM
 		return nil, s.err
 	}
 	return s.cfg, nil
+}
+
+// stubRags rag 检索注入 stub：按需注入 resp / err；记录调用次数与最近一次请求
+// （buildSystemPrompt 分支测试断言 TopK / KBIDs / 是否被调）。
+type stubRags struct {
+	resp []ragapi.RetrievedChunk
+	err  error
+
+	calls   int
+	lastReq ragapi.RetrieveReq
+}
+
+func (s *stubRags) Retrieve(_ context.Context, req ragapi.RetrieveReq) ([]ragapi.RetrievedChunk, error) {
+	s.calls++
+	s.lastReq = req
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.resp, nil
 }
 
 func testLLMConfig() *providerapi.LLMConfig {
@@ -428,13 +450,15 @@ func newServiceWithAgent(t *testing.T, agent *agentapi.AgentDetailSchema, script
 	fs := &captureStreamer{script: script}
 	factory := &stubClientFactory{client: llm.NewClient("test", fastProfile(), fs)}
 	execs := &execRecorder{}
+	rags := &stubRags{}
 	svc := New(st,
 		&stubAgents{agent: agent},
 		&stubProviders{cfg: testLLMConfig()},
 		factory,
 		execs,
+		rags,
 	)
-	return &chatServiceForTest{svc: svc.(*chatService), store: st, streamer: fs, factory: factory, execs: execs}
+	return &chatServiceForTest{svc: svc.(*chatService), store: st, streamer: fs, factory: factory, execs: execs, rags: rags}
 }
 
 // chatServiceForTest 聚合句柄，方便断言内部替身状态。
@@ -444,6 +468,7 @@ type chatServiceForTest struct {
 	streamer *captureStreamer
 	factory  *stubClientFactory
 	execs    *execRecorder
+	rags     *stubRags
 }
 
 // roles 把消息序列压成 "role:content" 串，断言上下文组装最直观。

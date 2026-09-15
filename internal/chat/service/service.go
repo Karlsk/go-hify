@@ -22,6 +22,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/page"
 	platformschema "github.com/Karlsk/go-hify/internal/platform/schema"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
+	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 )
 
 // Store 数据层接口：定义在消费方（本包），store 包实现，组合根注入——依赖倒置。
@@ -86,6 +87,12 @@ type (
 	executionWriter interface {
 		Create(ctx context.Context, e *logging.Execution) error
 	}
+
+	// ragRetriever chat 用到的 rag 能力（知识库检索注入——按绑定 KB 召回 chunk，
+	// ragapi.KnowledgeBaseService 的单方法收窄）。
+	ragRetriever interface {
+		Retrieve(ctx context.Context, req ragapi.RetrieveReq) ([]ragapi.RetrievedChunk, error)
+	}
 )
 
 // chatService 实现 chatapi.ChatService。
@@ -95,11 +102,12 @@ type chatService struct {
 	providers llmConfigResolver
 	clients   llmClientFactory
 	execs     executionWriter
+	rags      ragRetriever
 }
 
 // New 组装 chatService，返回 api 接口；由组合根注入 handler 与上游模块。
-func New(store Store, agents agentGetter, providers llmConfigResolver, clients llmClientFactory, execs executionWriter) chatapi.ChatService {
-	return &chatService{store: store, agents: agents, providers: providers, clients: clients, execs: execs}
+func New(store Store, agents agentGetter, providers llmConfigResolver, clients llmClientFactory, execs executionWriter, rags ragRetriever) chatapi.ChatService {
+	return &chatService{store: store, agents: agents, providers: providers, clients: clients, execs: execs, rags: rags}
 }
 
 // convCursorKey 会话列表 keyset 复合排序键（updated_at DESC, id DESC），经 page 编码为不透明 cursor。
@@ -246,18 +254,23 @@ func toMessageSchema(m *Message) *chatapi.MessageSchema {
 	}
 	if len(m.ToolCalls) == 0 {
 		s.ToolCalls = []chatapi.ToolCall{} // 空返 [] 不返 null（接口规范《空值约定》）
-		return s
-	}
-	tcs := make([]chatapi.ToolCall, 0, len(m.ToolCalls))
-	for _, tc := range m.ToolCalls {
-		id, _ := tc["id"].(string)
-		tool, _ := tc["tool"].(string)
-		args, _ := tc["args"].(map[string]any)
-		if args == nil {
-			args = map[string]any{}
+	} else {
+		tcs := make([]chatapi.ToolCall, 0, len(m.ToolCalls))
+		for _, tc := range m.ToolCalls {
+			id, _ := tc["id"].(string)
+			tool, _ := tc["tool"].(string)
+			args, _ := tc["args"].(map[string]any)
+			if args == nil {
+				args = map[string]any{}
+			}
+			tcs = append(tcs, chatapi.ToolCall{ID: id, Tool: tool, Args: args})
 		}
-		tcs = append(tcs, chatapi.ToolCall{ID: id, Tool: tool, Args: args})
+		s.ToolCalls = tcs
 	}
-	s.ToolCalls = tcs
+	if len(m.Citations) == 0 {
+		s.Citations = []chatapi.Citation{} // 同款空态约定
+	} else {
+		s.Citations = m.Citations // model 与 schema 同用 chatapi.Citation，直传
+	}
 	return s
 }

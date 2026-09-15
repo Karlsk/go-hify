@@ -21,6 +21,7 @@ func TestEventConstants(t *testing.T) {
 	assert.Equal(t, "delta", EventDelta)
 	assert.Equal(t, "tool_call", EventToolCall)
 	assert.Equal(t, "tool_result", EventToolResult)
+	assert.Equal(t, "citations", EventCitations)
 	assert.Equal(t, "done", EventDone)
 	assert.Equal(t, "error", EventError)
 }
@@ -42,6 +43,10 @@ func TestStreamEventJSON(t *testing.T) {
 			`{"type":"tool_call","id":"call_1","tool":"query_orders","args":{"day":"yesterday"},"retryable":false}`},
 		{"tool_result", ToolResultEvent("call_1", "query_orders", "3 rows"),
 			`{"type":"tool_result","id":"call_1","tool":"query_orders","result":"3 rows","retryable":false}`},
+		{"citations", CitationsEvent([]Citation{
+			{DocumentID: "7", DocumentName: "deploy.md", Similarity: 0.87},
+			{DocumentID: "9", DocumentName: "faq.md", Similarity: 0.82},
+		}), `{"type":"citations","citations":[{"document_id":"7","document_name":"deploy.md","similarity":0.87},{"document_id":"9","document_name":"faq.md","similarity":0.82}],"retryable":false}`},
 		{"done", DoneEvent("102", Usage{Input: 120, Output: 80}, "stop"),
 			`{"type":"done","message_id":"102","usage":{"input":120,"output":80},"finish_reason":"stop","retryable":false}`},
 		{"error", ErrorEvent("RATE_LIMITED", "供应商限流，请稍后再试", true),

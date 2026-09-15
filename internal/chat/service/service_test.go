@@ -25,7 +25,7 @@ import (
 func newCRUDService(agents agentGetter, providers llmConfigResolver) (*chatService, *memStore) {
 	st := newMemStore()
 	svc := New(st, agents, providers,
-		&stubClientFactory{client: nil}, &execRecorder{}).(*chatService)
+		&stubClientFactory{client: nil}, &execRecorder{}, &stubRags{}).(*chatService)
 	return svc, st
 }
 
@@ -152,6 +152,7 @@ func TestListMessagesPagination(t *testing.T) {
 	assert.Equal(t, chatapi.RoleUser, res.Items[0].Role) // 正序
 	assert.Equal(t, "答", res.Items[3].Content)
 	assert.NotNil(t, res.Items[0].ToolCalls) // nil 归一为 []，前端免空判断
+	assert.NotNil(t, res.Items[0].Citations) // 同款空态归一（历史消息响应）
 
 	// 次页从 after_id 续
 	res2, err := svc.ListMessages(userCtx(), chatapi.ListMessagesReq{ConversationID: convID, AfterID: res.NextAfterID, Limit: 4})
@@ -296,6 +297,17 @@ func TestToMessageSchemaToolCalls(t *testing.T) {
 	assert.Equal(t, "query_orders", s.ToolCalls[0].Tool)
 	assert.Equal(t, map[string]any{"day": "yesterday"}, s.ToolCalls[0].Args)
 	assert.Equal(t, map[string]any{}, s.ToolCalls[1].Args)
+}
+
+func TestToMessageSchemaCitations(t *testing.T) {
+	// nil → []（空值约定，与 ToolCalls 同款）
+	s := toMessageSchema(&Message{BaseAppendOnly: db.BaseAppendOnly{ID: 7}, Role: chatapi.RoleUser, Content: "问"})
+	assert.Equal(t, []chatapi.Citation{}, s.Citations)
+
+	// 有引用直传（model 与 schema 同用 chatapi.Citation）
+	cites := []chatapi.Citation{{DocumentID: "101", DocumentName: "退货政策.md", Similarity: 0.93}}
+	s = toMessageSchema(&Message{BaseAppendOnly: db.BaseAppendOnly{ID: 8}, Role: chatapi.RoleAssistant, Content: "答", Citations: cites})
+	assert.Equal(t, cites, s.Citations)
 }
 
 func TestToEinoMessageVariants(t *testing.T) {
