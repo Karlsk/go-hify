@@ -1,6 +1,6 @@
 # Workflow 模块数据模型与设计（db_model）
 
-> 状态：**设计定稿，未落库**（2026-09-15，四轮讨论收敛）：三表结构（workflows / workflow_nodes / workflow_edges）、分支语义（condition 节点求值 + 出边存匹配值）、status 三态（draft/published/disabled）均经用户拍板。迁移 `00016_workflow_schema.sql` 与 service model 已随 impl_spec_01 落地（2026-09-15，含 00006 旧单表替换修订，见 §3 注记），api / store / handler 待 spec 02-04；全部落地后同步 [docs/design/data-model.md](../../design/data-model.md)、CLAUDE.md 索引地图与错误码表（新增 `WORKFLOW_NOT_PUBLISHED` / `WORKFLOW_NAME_CONFLICT`）。
+> 状态：**设计定稿，未落库**（2026-09-15，四轮讨论收敛）：三表结构（workflows / workflow_nodes / workflow_edges）、分支语义（condition 节点求值 + 出边存匹配值）、status 三态（draft/published/disabled）均经用户拍板。迁移 `00016_workflow_schema.sql` 与 service model 已随 impl_spec_01 落地（2026-09-15，含 00006 旧单表替换修订，见 §3 注记）；2026-09-16 追加节点类型 `api` / `end`（迁移 `00017_workflow_node_type_widen.sql` 加宽 CHECK，见 §3/§4 注记与决策 #12）。api / store / handler 待 spec 02-04；全部落地后同步 [docs/design/data-model.md](../../design/data-model.md)、CLAUDE.md 索引地图与错误码表（新增 `WORKFLOW_NOT_PUBLISHED` / `WORKFLOW_NAME_CONFLICT`）。
 > 本文记录 workflow 模块数据模型与核心设计的最终结论与决策理由；表归属总览见 data-model.md，建表通用规范见 CLAUDE.md《数据库规范》。
 
 ## 1. 概念模型：一份 DSL 拆三张表
@@ -35,7 +35,7 @@ erDiagram
         bigint id PK
         bigint workflow_id FK "CASCADE"
         text node_key "图内唯一 uq(workflow_id, node_key)；出边与 {{表达式}} 都引用它"
-        text type "llm/tool/condition/knowledge_retrieval，text+CHECK"
+        text type "llm/tool/condition/knowledge_retrieval/api/end，text+CHECK（00017 加宽）"
         text name "展示名，默认空串"
         jsonb config "类型专属配置；入库前经 api.ParseNodeConfig 按 type 强校验"
         timestamptz created_at "append-only 形态（整图替换，行只 INSERT/DELETE）"
@@ -111,6 +111,8 @@ DROP TABLE IF EXISTS workflows;
 ```
 
 > 〔2026-09-15 修订（实施时用户拍板）：迁移 00006 已建旧单表 `workflows`（`config jsonb` 整图存储，即决策 #1 否决的形态），上方 `CREATE TABLE workflows` 会撞名。实际落盘的 00016 Up 在本 DDL 前增加 `DROP TABLE IF EXISTS workflows;`，Down 在删三表后按 00006 原样建回旧单表（对称回滚）。全仓无代码读写旧表、无 FK 指向它，替换零风险。〕
+>
+> 〔2026-09-16 追加（用户拍板）：节点类型加宽——新增 `api`（直接 HTTP 调用）与 `end`（显式终止，可选）。迁移 `00017_workflow_node_type_widen.sql` 把上方 inline CHECK（PG 自动名 `workflow_nodes_type_check`）替换为六值版本并同步 `config` 列 COMMENT；00016 文件不改（迁移只增不改）。〕
 
 ## 4. 节点类型与 config 格式
 
@@ -120,6 +122,8 @@ DROP TABLE IF EXISTS workflows;
 | `tool` | MCP 工具调用 | `tool_id`、`args?`（值支持 `{{var}}` 模板） | mcp 模块 api |
 | `condition` | 表达式求值，结果字符串供出边匹配 | `expression` | 纯内存求值，零外部调用 |
 | `knowledge_retrieval` | 知识库检索（结果注入上下文） | `knowledge_base_id`、`top_k?` | rag 模块 api |
+| `api` | 直接 HTTP 调用（不经 MCP 注册的轻量出站请求） | `url`、`method`（GET/POST/PUT/DELETE/PATCH）、`headers?`、`body?`、`timeout_sec?`（0=默认 10s，1-60）、`ssl_verify?`（默认 false = 跳过证书校验，内网自签端点） | 执行器 `callApi`（SSRF 防护与 TLS 配置归执行器，spec 05） |
+| `end` | 显式终止节点（**可选**，2026-09-16 拍板）：`output` 模板拼工作流终稿，空 = 取最后执行节点输出 | `output?` | 执行器 `buildOutput`，零外部调用 |
 
 ```jsonc
 // config 按类型各异，存同一 jsonb 列（判别字段 = 同行 type 列）
@@ -127,6 +131,8 @@ DROP TABLE IF EXISTS workflows;
 { "tool_id": "12", "args": { "order_id": "{{input.order_id}}" } }
 { "expression": "{{classify}} == 'ORDER_QUERY'" }
 { "knowledge_base_id": "7", "top_k": 3 }
+{ "url": "https://api.example.com/orders", "method": "POST", "headers": { "X-Request-Id": "{{input.req_id}}" }, "body": "{\"id\":\"{{input.id}}\"}", "timeout_sec": 30, "ssl_verify": true }
+{ "output": "回复：{{reply}}" }
 ```
 
 模板变量：`{{input}}` = 工作流输入；`{{<node_key>}}` = 该节点的输出（执行上下文按 node_key 存每个节点的产出，condition 求值结果同样以 node_key 落上下文，后续节点可复用）。
@@ -146,6 +152,7 @@ DROP TABLE IF EXISTS workflows;
 | 9 | **jsonb 内引用存在性由 service 经下游 api 校验** | jsonb 列建不了 FK；保存路径顺路校验（model_id→provider、knowledge_base_id→rag）。拒绝把 id 提升为可空真列换 FK——半数节点类型用不上，稀疏列违反"列尽量 NOT NULL"。〔2026-09-15 修订（用户拍板）：tool_id 推迟到执行器 fail-fast——mcp api 未建且 jsonb 无 FK 兜底（agent 模块靠真列 FK 23503 的路径对 jsonb 不存在），mcp 建成后回补保存期预检〕 |
 | 10 | **name 唯一**（uq_workflows_name） | 少量静态配置、同名无意义；与 providers/users 同组（CLAUDE.md 索引地图"PK + 业务唯一键"）。与 agents"不唯一"的差异：工作流被 JSON/对话按名引用的场景更近，保留辨识度 |
 | 11 | **节点 ≤ 50、连线 ≤ 100**（binding 封顶） | 防巨图拖垮校验与执行；一期线性+分支用不到更多 |
+| 12 | **节点类型加宽 `api` / `end`**（2026-09-16 拍板） | `api`：一次性出站调用不值得注册 MCP——url/method/headers/body/timeout_sec/ssl_verify 完整版字段，SSRF 防护与 TLS 配置归执行器；`ssl_verify` 默认 **false**（跳过证书校验）——内网自签端点是主要场景，显式默认值换配置省心，风险已知悉。`end`：显式终止 + `output` 模板（`buildOutput`），**可选不强求**——无出边 = 隐式结束的既有语义保留（向后兼容，既有图零改动），但 end 节点本身禁出边（§7 条 10）。拒绝「强制每图必有 end」：破坏既有图与示例，收益仅是显式性 |
 
 ## 6. 状态机与生命周期
 
@@ -182,6 +189,7 @@ POST/PUT /workflows  {name, start_node_key, nodes[], edges[]}
 7. 无不可达节点（存在但入口走不到 = 脏配置，早暴露）；
 8. 节点 1..50、边 0..100（binding 封顶）；
 9. jsonb 内引用存在性经下游 api 校验：model_id→provider、knowledge_base_id→rag；tool_id 推迟到执行器（决策 #9 修订，mcp api 未建）。
+10. end 节点不得有出边（显式终止；不强制每图必有 end——无出边 = 隐式结束仍合法，决策 #12）。
 
 ## 8. Go 类型安全解析
 
@@ -199,6 +207,8 @@ type LLMConfig struct {
 func (LLMConfig) isNodeConfig() {}
 // ToolConfig{ToolID, Args map[string]string} / ConditionConfig{Expression}
 // / KnowledgeRetrievalConfig{KnowledgeBaseID, TopK} 同构，略
+// ApiCallConfig{URL, Method, Headers map[string]string, Body, TimeoutSec}
+// / EndConfig{Output} 同构（00017 加宽，2026-09-16 拍板），略
 
 // ParseNodeConfig 按 type 把 config 原始 JSON 解析为强类型；保存与加载共用同一入口。
 // 未知类型、字段错误都进不了库；各类型跨字段规则走 cfg.Validate()。
@@ -213,6 +223,10 @@ func ParseNodeConfig(t NodeType, raw json.RawMessage) (NodeConfig, error) {
         cfg = ConditionConfig{}
     case NodeKnowledgeRetrieval:
         cfg = KnowledgeRetrievalConfig{}
+    case NodeAPI:
+        cfg = ApiCallConfig{}
+    case NodeEnd:
+        cfg = EndConfig{}
     default:
         return nil, fmt.Errorf("%w: unknown node type %q", ErrInvalidNodeConfig, t)
     }
@@ -288,6 +302,10 @@ case api.ConditionConfig:
     out = e.evaluate(cfg.Expression, vars)   // 结果存 vars[current]，出边拿它匹配
 case api.KnowledgeRetrievalConfig:
     out = e.retrieve(ctx, cfg, vars)         // rag api
+case api.ApiCallConfig:
+    out = e.callApi(ctx, cfg, vars)          // 直接 HTTP 出站（SSRF 防护在此层，spec 05）
+case api.EndConfig:
+    out = e.buildOutput(cfg, vars)           // output 模板 → 工作流终稿，零外部调用
 default:
     return fmt.Errorf("unhandled node config %T (key=%s)", cfg, current)
 }
@@ -297,7 +315,7 @@ default:
 
 - **快照语义**：执行开始一次性加载整图（两表 → 内存 Map），进行中执行不受并发编辑影响。
 - **路由规则**：condition 节点求值后，按声明顺序取首条 `condition` 匹配的出边；**无命中出边 = 执行错误 fail-fast**（记日志 + executions），不静默终止；配置建议为 condition 节点配全分支（true/false）。
-- **终止**：当前节点无出边 = 工作流结束，该节点输出即工作流输出。
+- **终止**：当前节点无出边 = 工作流结束，该节点输出即工作流输出；显式 `end` 节点（可选，决策 #12）到达时按其 `output` 模板拼终稿（空 = 同现行为），end 节点禁出边（§7 条 10）。
 - **LLM 调用一律走 `platform/llm`**（bulkhead / 熔断 / 三层超时 / 重试只在这一层），每次调用照常记 executions——工作流节点的调用也进 executions（data-model.md 既有关系）。工作流级总时长上限（多节点累计）归执行器常量，后续 spec 定。
 - **依赖方向**：workflow → mcp / rag / provider / agent / platform，**不得依赖 chat**；chat → workflow 单向（对话中触发工作流执行，复用同一 execute 接口，跨模块走 workflow api）。
 

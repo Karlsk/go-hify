@@ -41,15 +41,19 @@ type UpsertReq struct {
 type NodeReq struct {
     Key    string          `json:"key" binding:"required,max=64"`
     Type   NodeType        `json:"type" binding:"required"`
-    Name   string          `json:"name,max=128"`
+    Name   string          `json:"name" binding:"omitempty,max=128"`
     Config json.RawMessage `json:"config" binding:"required"`
 }
 type EdgeReq struct {
     SourceNodeKey string  `json:"source_node_key" binding:"required,max=64"`
     TargetNodeKey string  `json:"target_node_key" binding:"required,max=64"`
-    Condition     *string `json:"condition,max=128"` // nil = 无条件；指针区分"没传"与"空串"
+    Condition     *string `json:"condition" binding:"omitempty,max=128"` // nil = 无条件；指针区分"没传"与"空串"
 }
 ```
+
+> 〔2026-09-16 修订（实施 spec 02 时用户拍板）：① NodeReq.Name 与 EdgeReq.Condition 原写 `json:"name,max=128"` / `json:"condition,max=128"` 系笔误——`max=128` 落在 json tag 里会被 encoding/json 当未知选项静默忽略，长度上限不生效，已改为 binding tag（`omitempty,max=128`）。② 下方 WorkflowSummarySchema.ID 原写 `json:"id,string"` 同系笔误——`,string` 选项只用于数字字段，挂在 string 字段上会双重编码（`"id":"\"42\""`），已改为 `json:"id"`，与 platform/schema.BaseSchema 一致。〕
+>
+> 〔2026-09-16 追加（用户拍板）：节点类型加宽 `api` / `end`——密封 config 新增 `ApiCallConfig{url, method, headers?, body?, timeout_sec?, ssl_verify?}`（直接 HTTP 调用；ssl_verify 默认 false = 跳过证书校验，内网自签场景）与 `EndConfig{output?}`（显式终止，可选）；图校验新增 R9（end 节点不得有出边）；DB CHECK 由迁移 00017 加宽为六值。end **不强制每图必有**——既有图（无出边 = 隐式结束）不受影响。〕
 
 - 请求体**不含 `status`**——状态只能经 publish / disable 动作改变（编辑不降级，db_model 决策 #6）。
 - `binding` tag 管字段格式，`UpsertReq.Validate()` 管跨字段图规则（引用 db_model.md §7 九条，不在此重复）。
@@ -59,7 +63,7 @@ type EdgeReq struct {
 ```go
 // 摘要（列表用，不带图）
 type WorkflowSummarySchema struct {
-    ID          string `json:"id,string"`
+    ID          string `json:"id"`
     Name        string `json:"name"`
     Description string `json:"description"`
     Status      string `json:"status"`
@@ -135,7 +139,7 @@ POST /api/v1/workflows
 
 ### POST 创建
 - `status` 置 `draft`（服务端定，不看请求体）。
-- service：图校验九条（db_model.md §7）→ jsonb 内引用存在性经下游 api 校验（`model_id`→provider、`knowledge_base_id`→rag；`tool_id` 推迟到执行器 fail-fast——mcp api 未建且 jsonb 无 FK 兜底，2026-09-15 拍板）→ `Store.Create` 一事务写三表（workflows 1 行 + nodes / edges 各一条多 VALUES INSERT，任一失败整体回滚）。
+- service：图校验十条（db_model.md §7，2026-09-16 追加 end 禁出边）→ jsonb 内引用存在性经下游 api 校验（`model_id`→provider、`knowledge_base_id`→rag；`tool_id` 推迟到执行器 fail-fast——mcp api 未建且 jsonb 无 FK 兜底，2026-09-15 拍板）→ `Store.Create` 一事务写三表（workflows 1 行 + nodes / edges 各一条多 VALUES INSERT，任一失败整体回滚）。
 - 撞 `uq_workflows_name`（PG 23505）→ service 翻译 `ErrWorkflowNameConflict` → 409。
 - 成功 201 返回 `WorkflowDetailSchema`（组装回读，round-trip 即校验）。
 

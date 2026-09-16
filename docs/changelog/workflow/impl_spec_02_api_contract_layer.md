@@ -1,6 +1,6 @@
 # Workflow 实现 spec 02：api 契约层
 
-> 状态：**待实施**（2026-09-15 定稿；供 rdp-implementation 以 TDD 消费）。
+> 状态：**已实施**（2026-09-15 定稿，2026-09-16 实施；含四处契约修订与一轮节点类型加宽 `api` / `end`，见 §2.3 注记）。
 > 上位契约：[db_model.md](./db_model.md) §8（类型安全解析设计）、[api_contract.md](./api_contract.md) §1/§3（路由与 Schema）。冲突时停下来问用户。
 > 前置依赖：无硬依赖（不 import service 层）；建议在 spec 01 后实施保持篇序。
 > 规范引用（实施逐条对照）：CLAUDE.md《接口规范》——字段命名与类型（ID 字符串化 / snake_case / 枚举字符串 / 时间 RFC 3339）、空值约定（列表 `[]` 不 `null`）、错误处理（哨兵 Error() = error.code）；《代码组织规范》——api/ 叶子包规则（只 import 标准库，无 gin / gorm，`binding` 是纯字符串 tag）。
@@ -10,7 +10,7 @@
 | # | 交付物 | 路径 |
 |---|---|---|
 | 1 | 跨模块调用接口 `WorkflowService`（7 方法） | `internal/workflow/api/api.go`（替换占位） |
-| 2 | 常量 / 密封接口 / 四类 config / ParseNodeConfig / Req / Schema / 图校验 Validate | `internal/workflow/api/schema.go`（替换占位） |
+| 2 | 常量 / 密封接口 / 六类 config（含 00017 加宽的 api / end）/ ParseNodeConfig / Req / Schema / 图校验 Validate | `internal/workflow/api/schema.go`（替换占位） |
 | 3 | 补两个哨兵 | `internal/workflow/api/errors.go`（`ErrWorkflowNotFound` 已存在，保留） |
 
 **范围红线**：`WorkflowService` 本期**不含 Execute**（执行引擎后续 spec，届时扩接口 + handler + 装配，不回头改本篇）。
@@ -56,6 +56,8 @@ const (
     NodeTool               NodeType = "tool"
     NodeCondition          NodeType = "condition"
     NodeKnowledgeRetrieval NodeType = "knowledge_retrieval"
+    NodeAPI                NodeType = "api"  // 00017 加宽，2026-09-16 拍板
+    NodeEnd                NodeType = "end"  // 00017 加宽，2026-09-16 拍板
 )
 
 // ── NodeConfig 密封接口：实现集封闭本包，引擎 type switch 穷举（db_model §8）──
@@ -79,11 +81,25 @@ type KnowledgeRetrievalConfig struct {
     TopK            int    `json:"top_k,omitempty"` // 0 = 跟随 Agent/KB 默认；1-20
 }
 func (KnowledgeRetrievalConfig) isNodeConfig() {}
+type ApiCallConfig struct { // 直接 HTTP 调用（不经 MCP；执行器 callApi，SSRF 防护归执行器）
+    URL        string            `json:"url"`                   // 必填，合法 http/https
+    Method     string            `json:"method"`                // 必填，GET/POST/PUT/DELETE/PATCH
+    Headers    map[string]string `json:"headers,omitempty"`     // 值支持 {{var}} 模板
+    Body       string            `json:"body,omitempty"`        // 请求体模板字符串
+    TimeoutSec int               `json:"timeout_sec,omitempty"` // 0 = 默认 10s；1-60
+    SSLVerify  bool              `json:"ssl_verify,omitempty"`  // 默认 false = 跳过证书校验（内网自签）
+}
+func (ApiCallConfig) isNodeConfig() {}
+type EndConfig struct { // 显式终止（可选）；执行器 buildOutput
+    Output string `json:"output,omitempty"` // {{var}} 模板；空 = 取最后执行节点输出
+}
+func (EndConfig) isNodeConfig() {}
 
 // ── 分发解析：保存与加载共用唯一入口；未知类型进不了库 ──
 func ParseNodeConfig(t NodeType, raw json.RawMessage) (NodeConfig, error)
-// 每个 config 实现 Validate() error（必填与界：ModelID/Prompt/Expression/KnowledgeBaseID 非零非空；
-// TopK 为 0 或 1-20）。ErrInvalidNodeConfig 为包内私有错误变量，错误文案带节点类型。
+// 每个 config 实现 Validate() error（必填与界：ModelID/Prompt/Expression/KnowledgeBaseID/
+// ToolID 非零非空；TopK 为 0 或 1-20；URL 合法 http(s)、Method 白名单、TimeoutSec 0 或 1-60；
+// EndConfig 空配置即合法）。errInvalidNodeConfig 为包内私有错误变量，错误文案带节点类型。
 
 // ── 请求（api_contract §3 冻结；config 延迟解析）──
 type UpsertReq struct {
@@ -96,13 +112,13 @@ type UpsertReq struct {
 type NodeReq struct {
     Key    string          `json:"key" binding:"required,max=64"`
     Type   NodeType        `json:"type" binding:"required"`
-    Name   string          `json:"name,max=128"`
+    Name   string          `json:"name" binding:"omitempty,max=128"`
     Config json.RawMessage `json:"config" binding:"required"`
 }
 type EdgeReq struct {
     SourceNodeKey string  `json:"source_node_key" binding:"required,max=64"`
     TargetNodeKey string  `json:"target_node_key" binding:"required,max=64"`
-    Condition     *string `json:"condition,max=128"` // nil = 无条件
+    Condition     *string `json:"condition" binding:"omitempty,max=128"` // nil = 无条件
 }
 
 // UpdateWorkflowReq：ID 由 handler BindUri 后赋值（provider UpdateModelReq 同款，body 不含 id）。
@@ -128,11 +144,11 @@ type ListWorkflowsReq struct {
 }
 // 各 Req 的 Validate()：Get/Delete/Publish/Disable/List 返回 nil（service 归一化分页参数）。
 
-// UpsertReq.Validate 实现 §3.2 的 R1-R8 纯图规则（binding tag 已管字段格式与数量界，不重复）。
+// UpsertReq.Validate 实现 §3.2 的 R1-R9 纯图规则（binding tag 已管字段格式与数量界，不重复）。
 
 // ── 响应 Schema（api_contract §3 冻结）──
 type WorkflowSummarySchema struct {
-    ID          string    `json:"id,string"`
+    ID          string    `json:"id"`
     Name        string    `json:"name"`
     Description string    `json:"description"`
     Status      string    `json:"status"`
@@ -164,11 +180,15 @@ type WorkflowListResult struct {
 }
 ```
 
+> 〔2026-09-16 修订（实施时用户拍板，api_contract §3 同步）：① NodeReq.Name / EdgeReq.Condition 的 `max=128` 原落在 json tag 里（`json:"name,max=128"`）会被静默忽略，改为 binding tag `omitempty,max=128`；② WorkflowSummarySchema.ID 原 `json:"id,string"` 挂在 string 字段上会双重编码，改为 `json:"id"`（对齐 BaseSchema）；③ ToolConfig.Validate 补 ToolID 非零校验——「是否填了」是形状校验保存期挡，「存不存在」仍推迟执行器（决策 #9 修订的边界不变）。〕
+>
+> 〔2026-09-16 追加（用户拍板）：节点类型加宽——新增 `NodeAPI`/`NodeEnd` 常量、`ApiCallConfig`（完整版字段：url/method/headers?/body?/timeout_sec?/ssl_verify?，ssl_verify 默认 false = 跳过证书校验）与 `EndConfig`（output? 可选，空配置合法）、ParseNodeConfig 两个 case、图校验 R9（end 节点不得有出边）。命名沿用仓内惯例（config 类型不带 Node 前后缀）。end 可选不强求，既有图语义不变。DB CHECK 由迁移 00017 加宽（见 db_model §3 注记），迁移与 api 层同批落地。〕
+
 ## 3. 行为语义
 
 ### 3.1 ParseNodeConfig
 
-- switch `NodeType` 分发到四个 config 之一，`json.Unmarshal` 后调 `Validate()`；未知 type / 坏 JSON / 校验失败统一返回错误，**文案带类型与原因**（供上层拼节点 key）。
+- switch `NodeType` 分发到六个 config 之一，`json.Unmarshal` 后调 `Validate()`；未知 type / 坏 JSON / 校验失败统一返回错误，**文案带类型与原因**（供上层拼节点 key）。
 - 这是 config 的唯一强校验入口：保存路径（UpsertReq.Validate）与执行器加载路径共用（db_model §8）。
 
 ### 3.2 UpsertReq.Validate —— db_model §7 图校验的纯函数子集
@@ -183,6 +203,7 @@ type WorkflowListResult struct {
 | R6 | 非 condition 节点出边 ≤ 1 | 条 5 |
 | R7 | 无环：从 start 沿边遍历，重访即拒绝 | 条 6 |
 | R8 | 无不可达节点 | 条 7 |
+| R9 | end 节点不得有出边（显式终止；不强制每图必有 end，2026-09-16 追加） | 条 10 |
 
 数量界（§7 条 8）由 binding tag 管（min=1,max=50 / max=100）；引用存在性（§7 条 9）归 service（spec 04）——**三层各管一段，不重复校验**。
 
@@ -204,8 +225,8 @@ type WorkflowListResult struct {
 
 ## 5. 测试清单（表驱动，同包 `schema_test.go`）
 
-- ParseNodeConfig：4 类型 happy path；未知 type；坏 JSON；各 config Validate 失败（缺 model_id / prompt / expression / knowledge_base_id；TopK 越界 21 与负数）。
-- UpsertReq.Validate：R1 重复 key；R2 坏 config 且错误文案含节点 key；R3 start 不存在；R4 悬挂边（source 与 target 各一例）；R5 condition 出边缺 condition / 非 condition 出边带 condition；R6 非 condition 双出边；R7 环（a→b→a）；R8 不可达孤立节点；happy = api_contract §4 智能客服示例图通过。
+- ParseNodeConfig：4 类型 happy path；未知 type；坏 JSON；各 config Validate 失败（缺 model_id / prompt / tool_id / expression / knowledge_base_id；TopK 越界 21 与负数）；api / end happy（含 end 空配置与 output 模板）；api 校验失败带类型。
+- UpsertReq.Validate：R1 重复 key；R2 坏 config 且错误文案含节点 key；R3 start 不存在；R4 悬挂边（source 与 target 各一例）；R5 condition 出边缺 condition / 非 condition 出边带 condition；R6 非 condition 双出边；R7 环（a→b→a）；R8 不可达孤立节点；R9 end 节点带出边（图无环全可达，钉住规则独立）；happy = api_contract §4 智能客服示例图通过（无 end = 向后兼容）+ end 收尾线性图通过。
 - 序列化：Detail 的 id 为字符串、空 edges 为 `[]`、condition 为 `null`。
 
 ## 6. 验收门
