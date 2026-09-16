@@ -6,10 +6,10 @@ import "github.com/Karlsk/go-hify/internal/platform/db"
 // workflow_edges（db_model.md §1）。Status 常量在 workflow/api（api.WorkflowStatus）。
 type Workflow struct {
 	db.BaseMutable
-	Name         string `gorm:"not null"`  // 唯一（uq_workflows_name，db_model 决策 #10）
-	Description  string `gorm:"not null"`  // 默认空串
+	Name         string `gorm:"not null"`                       // 唯一（uq_workflows_name，db_model 决策 #10）
+	Description  string `gorm:"not null"`                       // 默认空串
 	StartNodeKey string `gorm:"column:start_node_key;not null"` // 入口节点 key，图校验保证存在
-	Status       string `gorm:"not null"`  // draft/published/disabled（DB CHECK 兜底）
+	Status       string `gorm:"not null"`                       // draft/published/disabled（DB CHECK 兜底）
 }
 
 func (Workflow) TableName() string { return "workflows" }
@@ -32,10 +32,10 @@ func (WorkflowNode) TableName() string { return "workflow_nodes" }
 // 非空 = 匹配 source（condition 节点）的求值结果（db_model 决策 #4）。
 type WorkflowEdge struct {
 	db.BaseAppendOnly
-	WorkflowID     uint64  `gorm:"column:workflow_id;not null"` // CASCADE
-	SourceNodeKey  string  `gorm:"column:source_node_key;not null"`
-	TargetNodeKey  string  `gorm:"column:target_node_key;not null"`
-	Condition      *string // nil = 无条件
+	WorkflowID    uint64  `gorm:"column:workflow_id;not null"` // CASCADE
+	SourceNodeKey string  `gorm:"column:source_node_key;not null"`
+	TargetNodeKey string  `gorm:"column:target_node_key;not null"`
+	Condition     *string // nil = 无条件
 }
 
 func (WorkflowEdge) TableName() string { return "workflow_edges" }
