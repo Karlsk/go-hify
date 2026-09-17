@@ -767,7 +767,7 @@ Hify 索引地图（建表时照抄；向量索引细节见《pgvector 索引规
 |---|---|
 | `models` | `(provider_id)` |
 | `mcp_tools` | `(mcp_server_id)` |
-| `agents` | `(model_id)`、`(fallback_model_id)` |
+| `agents` | `(model_id)`、`(fallback_model_id)`、`(workflow_id)`（spec 05） |
 | `agent_tools` | id PK + `uq(agent_id, tool_id)` + 反查 `(tool_id)` |
 | `agent_knowledge_bases` | PK `(agent_id, knowledge_base_id)` + 反查 `(knowledge_base_id)` |
 | `knowledge_bases` | `(embedding_model_id)` |
@@ -1118,9 +1118,10 @@ HTTP 状态映射：
 | `AGENT_IN_USE` | 409 | `agentapi.ErrAgentInUse`（Agent 有历史会话，删除被 FK RESTRICT 挡） |
 | `CONVERSATION_NOT_FOUND` | 404 | `chatapi.ErrConversationNotFound` |
 | `MODEL_CONTEXT_TOO_LONG` | 400 | `chatapi.ErrModelContextTooLong`（chat service 翻译自 llm `InvalidRequest`） |
-| `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound` |
+| `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound`；`agentapi.ErrWorkflowNotFound`（agent 侧绑定写入同码哨兵，FK 23503 约束名分发翻译——agent 不依赖 workflow，FK 是其存在性的唯一校验） |
 | `WORKFLOW_NAME_CONFLICT` | 409 | `workflowapi.ErrWorkflowNameConflict`（workflow 名称唯一约束） |
 | `WORKFLOW_NOT_PUBLISHED` | 503 | `workflowapi.ErrWorkflowNotPublished`（workflow 未发布，执行被拒） |
+| `WORKFLOW_IN_USE` | 409 | `workflowapi.ErrWorkflowInUse`（被 agent 绑定，删除被 FK RESTRICT 挡，spec 05） |
 | `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound`（KB 不存在）；`agentapi.ErrKnowledgeBaseNotFound`（agent 侧绑定写入同码哨兵，FK 23503 翻译——agent 不依赖 rag，FK 是 KB 存在性的唯一校验） |
 | `MCP_SERVER_NOT_FOUND` | 404 | `mcpapi.ErrMCPServerNotFound` |
 | `INTERNAL_ERROR` | 500 | `errs.ErrInternal`（兜底，不向前端泄露细节） |

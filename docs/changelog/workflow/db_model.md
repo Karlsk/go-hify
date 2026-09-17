@@ -153,6 +153,7 @@ DROP TABLE IF EXISTS workflows;
 | 10 | **name 唯一**（uq_workflows_name） | 少量静态配置、同名无意义；与 providers/users 同组（CLAUDE.md 索引地图"PK + 业务唯一键"）。与 agents"不唯一"的差异：工作流被 JSON/对话按名引用的场景更近，保留辨识度 |
 | 11 | **节点 ≤ 50、连线 ≤ 100**（binding 封顶） | 防巨图拖垮校验与执行；一期线性+分支用不到更多 |
 | 12 | **节点类型加宽 `api` / `end`**（2026-09-16 拍板） | `api`：一次性出站调用不值得注册 MCP——url/method/headers/body/timeout_sec/ssl_verify 完整版字段，SSRF 防护与 TLS 配置归执行器；`ssl_verify` 默认 **false**（跳过证书校验）——内网自签端点是主要场景，显式默认值换配置省心，风险已知悉。`end`：显式终止 + `output` 模板（`buildOutput`），**可选不强求**——无出边 = 隐式结束的既有语义保留（向后兼容，既有图零改动），但 end 节点本身禁出边（§7 条 10）。拒绝「强制每图必有 end」：破坏既有图与示例，收益仅是显式性 |
+| 13 | **agent → workflow 绑定：`agents.workflow_id` 可空真列 + `fk_agents_workflow` ON DELETE RESTRICT**（2026-09-17 拍板，spec 05） | 五项拍板：A=RESTRICT（被绑定时挡删 workflow → 409 `WORKFLOW_IN_USE`，nodes/edges 随删除 CASCADE）；B=绑定期不校验发布态、B2=执行读实时版本（无发布快照，编辑立即生效）——均由消费方（chat/执行器）经 workflowapi 在执行期把关；C=既有 Create/PUT 字段化 `workflow_id`（PUT 全量语义：缺省/null = 解绑）；C2=不与任何现有字段互斥（叠加语义）。双向哨兵：agent 侧 23503 按约束名分发（`fk_agents_workflow` → `agentapi.ErrWorkflowNotFound` 404，与 workflowapi 同码各持一份、KB 先例；model 侧约束名/无约束名兜底 → `ErrModelNotFound`）——依赖清单只允许 workflow → agent，FK 是绑定期 workflow 存在性的唯一校验。拒绝 service 预检存在性——依赖方向不容 agent import workflowapi，且 FK 已是原子兜底 |
 
 ## 6. 状态机与生命周期
 

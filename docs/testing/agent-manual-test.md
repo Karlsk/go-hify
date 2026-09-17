@@ -215,3 +215,42 @@ docker exec hify-redis-test redis-cli --scan --pattern 'hify:cache:agent-cache:*
 - 前端链路（经 5173 Vite 代理，与浏览器同路径）：列表 / 模型下拉（provider→models 过滤
   enabled chat）/ 创建（数值转换载荷）/ 更新 / 详情回填 / 删除 204 全通；
   Vite 代理目标改为随 `SERVER_PORT` 环境变量（start.sh export），本地 8081 端口不再写死
+
+## 12. workflow 绑定（spec 05，2026-09-17 落地，待人工走查）
+
+前置：迁移 00018 已应用（`make migrate-status` 18 条 applied）；沿用 §2 的登录 jar；
+§3 的模型（model_id=1）可直接用作 llm 节点。
+
+```bash
+# 1) 造一个最小工作流（线性单 llm 节点），记下 id
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"绑定冒烟","start_node_key":"classify","nodes":[{"key":"classify","type":"llm","config":{"model_id":"1","prompt":"p"}}],"edges":[]}' \
+  | jq -c '.data.id'    # → "42"（记为 WF_ID；llm 节点 config 里 model_id 是字符串）
+
+# 2) 绑定（创建带 workflow_id；PUT 重绑同款）
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/agents -H 'Content-Type: application/json' \
+  -d '{"name":"绑工作流的助手","model_id":1,"workflow_id":42}' | jq -c '.data.workflow_id'   # → "42"
+curl -s -b /tmp/hify-jar localhost:8081/api/v1/agents/2 | jq -c '.data.workflow_id'          # → "42"（详情回显）
+
+# 3) 解绑：PUT 全量体缺省 workflow_id（= null）
+curl -s -b /tmp/hify-jar -X PUT localhost:8081/api/v1/agents/2 -H 'Content-Type: application/json' \
+  -d '{"name":"绑工作流的助手","model_id":1}' | jq -c '.data.workflow_id'   # → null
+
+# 4) 绑不存在的 workflow → 404（FK 23503 按约束名分发，不是 MODEL_NOT_FOUND）
+tw() { curl -s -o /tmp/r.json -w '%{http_code} ' -b /tmp/hify-jar -X PUT localhost:8081/api/v1/agents/2 \
+       -H 'Content-Type: application/json' -d "$1"; jq -c '{code: .error.code}' /tmp/r.json; }
+tw '{"name":"x","model_id":1,"workflow_id":99999}'   # 404 WORKFLOW_NOT_FOUND（spec 05 §4.4 分发）
+tw '{"name":"x","model_id":1,"workflow_id":0}'       # 400 VALIDATION_FAILED（binding gt=0）
+
+# 5) 被绑定的 workflow 删除被挡 → 409；解绑后可删（nodes/edges 随 CASCADE 清理）
+tw '{"name":"x","model_id":1,"workflow_id":42}'      # 200（先绑回）
+curl -s -o /tmp/r.json -w '%{http_code} ' -b /tmp/hify-jar -X DELETE localhost:8081/api/v1/workflows/42
+jq -c '{code: .error.code}' /tmp/r.json   # → 409 WORKFLOW_IN_USE；解绑（第 3 步）后再删 → 204（nodes/edges 级联清理）
+```
+
+要点：
+
+- 请求侧 `workflow_id` 是**数字**（与 model_id 同款），响应侧字符串化（`"42"`）或 null 两态。
+- 404 分发依据是约束名 `fk_agents_workflow`（00018 显式命名）；model 侧约束
+  （`agents_model_id_fkey`）仍译 `MODEL_NOT_FOUND`——两者同是 23503，行为不同。
+- 409 `WORKFLOW_IN_USE` 先解绑（PUT agent 缺省 workflow_id）或删 agent，再删 workflow。

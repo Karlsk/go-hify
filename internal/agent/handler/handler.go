@@ -124,6 +124,8 @@ func failAgent(c *gin.Context, err error) {
 		respond.Fail(c, http.StatusNotFound, agentapi.ErrToolNotFound.Error(), "绑定的工具不存在")
 	case errors.Is(err, agentapi.ErrKnowledgeBaseNotFound):
 		respond.Fail(c, http.StatusNotFound, agentapi.ErrKnowledgeBaseNotFound.Error(), "绑定的知识库不存在")
+	case errors.Is(err, agentapi.ErrWorkflowNotFound):
+		respond.Fail(c, http.StatusNotFound, agentapi.ErrWorkflowNotFound.Error(), "绑定的工作流不存在")
 	case errors.Is(err, providerapi.ErrModelNotFound):
 		respond.Fail(c, http.StatusNotFound, providerapi.ErrModelNotFound.Error(), "模型不存在")
 	default:

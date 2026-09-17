@@ -606,6 +606,20 @@ func TestDeleteError(t *testing.T) {
 	assert.ErrorIs(t, err, boom)
 }
 
+func TestDeleteInUse(t *testing.T) {
+	// spec 05 US3：被 agent 绑定的 workflow 删除被 fk_agents_workflow RESTRICT 挡下
+	//（23503）→ ErrWorkflowInUse 409；DB 未变，不删缓存 key。
+	st := &stubStore{deleteFn: func(id uint64) (bool, error) {
+		return false, &pgconn.PgError{Code: "23503", ConstraintName: "fk_agents_workflow"}
+	}}
+	cm := &recordCache{}
+	svc := New(st, nil, nil, cm)
+
+	err := svc.Delete(context.Background(), workflowapi.DeleteWorkflowReq{ID: 42})
+	assert.ErrorIs(t, err, workflowapi.ErrWorkflowInUse, "agents FK RESTRICT 23503 → 409 挡删")
+	assert.Empty(t, cm.seq, "删除被挡 DB 未变，不删 key")
+}
+
 // statusStore 状态动作用 store：第 N 次 GetByID 返回 statuses[N-1]（首查 404 判定、
 // 回源二次读各取一），UpdateStatus 恒 moved。
 func statusStore(moved bool, statuses ...string) *stubStore {

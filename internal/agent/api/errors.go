@@ -23,6 +23,12 @@ var (
 	//（rag_injection_spec.md §3.1）。
 	ErrKnowledgeBaseNotFound = errors.New("KNOWLEDGE_BASE_NOT_FOUND")
 
+	// ErrWorkflowNotFound 绑定的工作流不存在（404；workflow_id 撞 FK 23503 的翻译——
+	// agent 不得依赖 workflow（依赖清单），FK 是存在性的唯一校验机制，
+	// 与 ErrToolNotFound / ErrKnowledgeBaseNotFound 同款）。码与 workflowapi.ErrWorkflowNotFound
+	// 同名同义：agent api 不能 import workflow api，各持一份哨兵，前端语义无歧义。
+	ErrWorkflowNotFound = errors.New("WORKFLOW_NOT_FOUND")
+
 	// ErrAgentDisabled Agent 已停用（503）：保留配置、新会话被拒——区别于 ErrAgentNotFound
 	//（不存在）。仅跨模块消费方（chat 建会话 / 发消息）产生与判断；
 	// agent 模块自身无对应端点（enabled 是可设置字段，不是错误）。

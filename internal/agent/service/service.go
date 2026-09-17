@@ -80,6 +80,10 @@ const cacheKeyDetail = "detail:%d"
 // pgCodeFKViolation PG 外键违例错误码（constraint_violation 类）。
 const pgCodeFKViolation = "23503"
 
+// fkAgentsWorkflow agents.workflow_id 外键约束名（迁移 00018 显式命名，
+// agents 行级写语句 23503 的分发依据——见 translateAgentFK）。
+const fkAgentsWorkflow = "fk_agents_workflow"
+
 // agentService 实现 agentapi.AgentService。
 type agentService struct {
 	store  Store
@@ -98,7 +102,9 @@ func New(store Store, models providerapi.ModelService, cm cacheManager) agentapi
 // （工具 + 知识库）。错误：providerapi.ErrModelNotFound（主/备用模型不存在，含预检后被
 // 并发删除的 FK 兜底）、agentapi.ErrToolNotFound（tool_ids 含不存在的工具，FK 23503 翻译）、
 // agentapi.ErrKnowledgeBaseNotFound（knowledge_base_ids 含不存在的 KB，FK 23503 翻译——
-// agent 不依赖 rag，FK 是 KB 存在性的唯一校验）。
+// agent 不依赖 rag，FK 是 KB 存在性的唯一校验）、agentapi.ErrWorkflowNotFound
+// （workflow_id 指向不存在的 workflow，FK 23503 约束名分发翻译——agent 不依赖
+// workflow，FK 是其存在性的唯一校验）。
 func (s *agentService) Create(ctx context.Context, req agentapi.CreateAgentReq) (*agentapi.AgentSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate create agent: %w", err)
@@ -110,8 +116,8 @@ func (s *agentService) Create(ctx context.Context, req agentapi.CreateAgentReq) 
 	a := toModelCreate(req)
 	err := s.store.WithTx(ctx, func(tx Store) error {
 		if err := tx.CreateAgent(ctx, a); err != nil {
-			if isFKViolation(err) {
-				return providerapi.ErrModelNotFound // 预检后被并发删除，FK 兜底
+			if sent, ok := translateAgentFK(err); ok {
+				return sent // 23503 按约束名分发：workflow 不存在 / 模型不存在（含预检后被并发删除的兜底）
 			}
 			return fmt.Errorf("create agent: %w", err)
 		}
@@ -241,7 +247,8 @@ func (s *agentService) withAggregates(ctx context.Context, agents []Agent, items
 // Update 整体更新（PUT 语义）：先取实体（区分 404 与静默不命中，且保住 created_at 等
 // DB 生成列）→ 模型预检 → 同一事务内 Save + 绑定（工具 / KB）先删后插 → 提交后失效缓存。
 // 错误：agentapi.ErrAgentNotFound、providerapi.ErrModelNotFound、agentapi.ErrToolNotFound、
-// agentapi.ErrKnowledgeBaseNotFound。
+// agentapi.ErrKnowledgeBaseNotFound、agentapi.ErrWorkflowNotFound（重绑撞不存在的
+// workflow，23503 约束名分发翻译）。
 func (s *agentService) Update(ctx context.Context, req agentapi.UpdateAgentReq) (*agentapi.AgentSchema, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validate update agent: %w", err)
@@ -260,8 +267,8 @@ func (s *agentService) Update(ctx context.Context, req agentapi.UpdateAgentReq) 
 	applyUpdate(a, req)
 	err = s.store.WithTx(ctx, func(tx Store) error {
 		if err := tx.UpdateAgent(ctx, a); err != nil {
-			if isFKViolation(err) {
-				return providerapi.ErrModelNotFound
+			if sent, ok := translateAgentFK(err); ok {
+				return sent // 23503 按约束名分发（与 Create 同款，spec 05 §4.4）
 			}
 			return fmt.Errorf("update agent %d: %w", req.ID, err)
 		}
@@ -352,6 +359,21 @@ func isFKViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == pgCodeFKViolation
 }
 
+// translateAgentFK agents 行级写语句（INSERT / UPDATE）的 23503 按约束名分发：
+// fk_agents_workflow → workflow 不存在；model 侧约束（00004 内联 REFERENCES 的 PG
+// 自动命名）与无约束名兜底 → 模型不存在（保持既有语义，spec 05 §4.4）。
+// 非 23503 / 非 PG 错误返回 false（不翻译，原样包装上抛）。
+func translateAgentFK(err error) (error, bool) {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != pgCodeFKViolation {
+		return nil, false
+	}
+	if pgErr.ConstraintName == fkAgentsWorkflow {
+		return agentapi.ErrWorkflowNotFound, true
+	}
+	return providerapi.ErrModelNotFound, true
+}
+
 // resolveTemperature 未传 → 缺省 0.7；显式 0（严谨模式）合法，指针区分两者。
 func resolveTemperature(t *float64) float64 {
 	if t == nil {
@@ -407,6 +429,7 @@ func toModelCreate(req agentapi.CreateAgentReq) *Agent {
 		Enabled:          resolveEnabled(req.Enabled),
 		RAGTopK:          resolveRAGTopK(req.RAGTopK),
 		RAGMinSimilarity: resolveRAGMinSimilarity(req.RAGMinSimilarity),
+		WorkflowID:       req.WorkflowID,
 	}
 }
 
@@ -424,6 +447,7 @@ func applyUpdate(a *Agent, req agentapi.UpdateAgentReq) {
 	a.Enabled = resolveEnabled(req.Enabled)
 	a.RAGTopK = resolveRAGTopK(req.RAGTopK)
 	a.RAGMinSimilarity = resolveRAGMinSimilarity(req.RAGMinSimilarity)
+	a.WorkflowID = req.WorkflowID // PUT 全量语义：缺省 / null = 解绑回 nil
 }
 
 // toSchema model → 响应 schema（id / 外键字符串化，接口规范）。
@@ -446,6 +470,10 @@ func toSchema(a *Agent) agentapi.AgentSchema {
 	if a.FallbackModelID != nil {
 		fb := strconv.FormatUint(*a.FallbackModelID, 10)
 		s.FallbackModelID = &fb
+	}
+	if a.WorkflowID != nil {
+		wid := strconv.FormatUint(*a.WorkflowID, 10)
+		s.WorkflowID = &wid
 	}
 	return s
 }

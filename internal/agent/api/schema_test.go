@@ -84,6 +84,65 @@ func TestValidateAgent_Update(t *testing.T) {
 	})
 }
 
+// ---- workflow 绑定（spec 05：可空外键，Create/PUT 字段化）----
+
+func TestWorkflowID_ReqJSON(t *testing.T) {
+	// 请求侧数值进：缺省 / null 均为 nil（PUT 全量语义下 = 解绑），显式传值为指针；
+	// CreateAgentReq / UpdateAgentReq 两处同款（impl spec 05 §4.2）。
+	unmarshal := func(body string) (create CreateAgentReq, update UpdateAgentReq) {
+		assert.NoError(t, json.Unmarshal([]byte(body), &create))
+		assert.NoError(t, json.Unmarshal([]byte(body), &update))
+		return
+	}
+
+	absentC, absentU := unmarshal(`{"name":"x","model_id":5}`)
+	assert.Nil(t, absentC.WorkflowID, "Create 缺省 = 不绑定")
+	assert.Nil(t, absentU.WorkflowID, "Update 缺省 = 解绑（PUT 全量提交约定）")
+
+	nullC, nullU := unmarshal(`{"name":"x","model_id":5,"workflow_id":null}`)
+	assert.Nil(t, nullC.WorkflowID, "Create 显式 null = 不绑定")
+	assert.Nil(t, nullU.WorkflowID, "Update 显式 null = 解绑")
+
+	boundC, boundU := unmarshal(`{"name":"x","model_id":5,"workflow_id":3}`)
+	if assert.NotNil(t, boundC.WorkflowID, "Create 带 workflow_id 落指针") {
+		assert.Equal(t, uint64(3), *boundC.WorkflowID)
+	}
+	if assert.NotNil(t, boundU.WorkflowID, "Update 带 workflow_id 落指针") {
+		assert.Equal(t, uint64(3), *boundU.WorkflowID)
+	}
+}
+
+func TestWorkflowID_SchemaJSON(t *testing.T) {
+	// 响应侧字符串化外键（JS 2^53 精度保护），null=未绑定——与 fallback_model_id 同款两态。
+	t.Run("未绑定 → null", func(t *testing.T) {
+		b, err := json.Marshal(AgentSchema{})
+		assert.NoError(t, err)
+		var m map[string]any
+		assert.NoError(t, json.Unmarshal(b, &m))
+		assert.Nil(t, m["workflow_id"], "存量 agent 默认态 → null")
+	})
+	t.Run("已绑定 → 字符串化", func(t *testing.T) {
+		wid := "3"
+		b, err := json.Marshal(AgentSchema{WorkflowID: &wid})
+		assert.NoError(t, err)
+		var m map[string]any
+		assert.NoError(t, json.Unmarshal(b, &m))
+		assert.Equal(t, "3", m["workflow_id"])
+	})
+}
+
+func TestValidateAgent_WorkflowID(t *testing.T) {
+	// 拍板 C2 叠加语义：workflow_id 无跨字段规则，带值不影响 Validate，
+	// 且与 tool_ids / knowledge_base_ids 并存合法（零新增规则）。
+	wid := uint64(3)
+	c := CreateAgentReq{Name: "客服助手", ModelID: 5, WorkflowID: &wid,
+		ToolIDs: []uint64{10}, KnowledgeBaseIDs: []uint64{7}}
+	assert.NoError(t, c.Validate())
+
+	u := UpdateAgentReq{ID: 1, Name: "客服助手", ModelID: 5, WorkflowID: &wid}
+	assert.NoError(t, u.Validate())
+}
+
 func TestAgentSchema_JSON(t *testing.T) {
 	// 响应形态：id / model_id 字符串化，可空字段显式 null，snake_case 字段名。
 	s := AgentSchema{}

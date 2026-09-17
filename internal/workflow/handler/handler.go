@@ -138,6 +138,8 @@ func failWorkflow(c *gin.Context, err error) {
 		respond.Fail(c, http.StatusNotFound, workflowapi.ErrWorkflowNotFound.Error(), err.Error())
 	case errors.Is(err, workflowapi.ErrWorkflowNameConflict):
 		respond.Fail(c, http.StatusConflict, workflowapi.ErrWorkflowNameConflict.Error(), err.Error())
+	case errors.Is(err, workflowapi.ErrWorkflowInUse): // 409：被 agent 绑定挡删（spec 05）
+		respond.Fail(c, http.StatusConflict, workflowapi.ErrWorkflowInUse.Error(), err.Error())
 	case errors.Is(err, workflowapi.ErrWorkflowNotPublished):
 		respond.Fail(c, http.StatusServiceUnavailable, workflowapi.ErrWorkflowNotPublished.Error(), err.Error())
 	default:

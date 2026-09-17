@@ -13,7 +13,7 @@ import (
 
 // selectAgent 显式列清单（禁 SELECT *）：agents 无大文本列，此处主要为对齐全仓规范
 // 与防加列耦合。
-const selectAgent = "id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, rag_top_k, rag_min_similarity, created_at, updated_at"
+const selectAgent = "id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, rag_top_k, rag_min_similarity, workflow_id, created_at, updated_at"
 
 // Store 实现 agentsvc.Store。
 type Store struct{ db *gorm.DB }

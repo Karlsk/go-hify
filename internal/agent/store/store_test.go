@@ -35,12 +35,12 @@ func newMockDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 }
 
 // 列清单（与 store.go 的 selectAgent 一致，供 NewRows 用）。
-var agentCols = []string{"id", "name", "description", "model_id", "fallback_model_id", "system_prompt", "temperature", "max_output_tokens", "max_context_turns", "enabled", "rag_top_k", "rag_min_similarity", "created_at", "updated_at"}
+var agentCols = []string{"id", "name", "description", "model_id", "fallback_model_id", "system_prompt", "temperature", "max_output_tokens", "max_context_turns", "enabled", "rag_top_k", "rag_min_similarity", "workflow_id", "created_at", "updated_at"}
 
 // avals 展开为 agents 一行（列序 = agentCols）；基础列填典型值，变体由参数带入。
 // max_context_turns=10 / enabled=true / rag 3、0.75 固定（store 层无缺省逻辑，值原样扫描）。
-func avals(id, modelID uint64, fallback, maxTok *int64, now time.Time) []driver.Value {
-	return []driver.Value{id, "客服助手", "回答售后问题", modelID, fallback, "你是售后客服", 0.7, maxTok, 10, true, 3, 0.75, now, now}
+func avals(id, modelID uint64, fallback, maxTok *int64, wf *uint64, now time.Time) []driver.Value {
+	return []driver.Value{id, "客服助手", "回答售后问题", modelID, fallback, "你是售后客服", 0.7, maxTok, 10, true, 3, 0.75, wf, now, now}
 }
 
 // agentRows 单行 agents 结果集。
@@ -48,11 +48,11 @@ func agentRows(vals []driver.Value) *sqlmock.Rows {
 	return sqlmock.NewRows(agentCols).AddRow(vals...)
 }
 
-const getAgentByIDSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, rag_top_k, rag_min_similarity, created_at, updated_at FROM "agents" WHERE "agents"."id" = $1 ORDER BY "agents"."id" LIMIT $2`
+const getAgentByIDSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, rag_top_k, rag_min_similarity, workflow_id, created_at, updated_at FROM "agents" WHERE "agents"."id" = $1 ORDER BY "agents"."id" LIMIT $2`
 
 const listAgentsCountSQL = `SELECT count(*) FROM "agents"`
 
-const listAgentsPageSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, rag_top_k, rag_min_similarity, created_at, updated_at FROM "agents" ORDER BY id LIMIT $1`
+const listAgentsPageSQL = `SELECT id, name, description, model_id, fallback_model_id, system_prompt, temperature, max_output_tokens, max_context_turns, enabled, rag_top_k, rag_min_similarity, workflow_id, created_at, updated_at FROM "agents" ORDER BY id LIMIT $1`
 
 const deleteAgentSQL = `DELETE FROM "agents" WHERE "agents"."id" = $1`
 
@@ -72,12 +72,14 @@ func TestCreateAgent(t *testing.T) {
 	db, mock := newMockDB(t)
 	s := New(db)
 	now := time.Now()
+	wf := uint64(3)
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "agents"`)).
+	// spec 05：INSERT 列清单须含 workflow_id（漏列 → 绑定静默丢）。
+	mock.ExpectQuery(`INSERT INTO "agents".*workflow_id`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(1, now, now))
 	mock.ExpectCommit()
 
-	a := &agentsvc.Agent{Name: "客服助手", ModelID: 5, SystemPrompt: "你是售后客服", Temperature: 0.7}
+	a := &agentsvc.Agent{Name: "客服助手", ModelID: 5, SystemPrompt: "你是售后客服", Temperature: 0.7, WorkflowID: &wf}
 	err := s.CreateAgent(context.Background(), a)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(1), a.ID) // RETURNING 回填主键
@@ -104,16 +106,36 @@ func TestGetAgentByID(t *testing.T) {
 	maxTok := int64(4096)
 	mock.ExpectQuery(regexp.QuoteMeta(getAgentByIDSQL)).
 		WithArgs(uint64(1), 1).
-		WillReturnRows(agentRows(avals(1, 5, nil, &maxTok, now)))
+		WillReturnRows(agentRows(avals(1, 5, nil, &maxTok, nil, now)))
 
 	a, err := s.GetAgentByID(context.Background(), 1)
 	assert.NoError(t, err)
 	assert.Equal(t, "客服助手", a.Name)
 	assert.Equal(t, uint64(5), a.ModelID)
 	assert.Nil(t, a.FallbackModelID, "未设置备用模型 → nil")
+	assert.Nil(t, a.WorkflowID, "未绑定工作流 → nil")
 	assert.Equal(t, int64(4096), *a.MaxOutputTokens)
 	assert.Equal(t, 3, a.RAGTopK, "rag_top_k 须在列清单内（漏列 → 恒零值，chat 读不到配置）")
 	assert.Equal(t, 0.75, a.RAGMinSimilarity, "rag_min_similarity 须在列清单内")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetAgentByID_WorkflowID(t *testing.T) {
+	// spec 05：workflow_id 须在 selectAgent 列清单内——漏列 → 恒 nil，
+	// 绑定被静默丢（同 rag_top_k 注释的坑）。
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	wf := uint64(3)
+	mock.ExpectQuery(regexp.QuoteMeta(getAgentByIDSQL)).
+		WithArgs(uint64(1), 1).
+		WillReturnRows(agentRows(avals(1, 5, nil, nil, &wf, now)))
+
+	a, err := s.GetAgentByID(context.Background(), 1)
+	assert.NoError(t, err)
+	if assert.NotNil(t, a.WorkflowID, "workflow_id 扫描回填") {
+		assert.Equal(t, uint64(3), *a.WorkflowID)
+	}
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -137,8 +159,8 @@ func TestListAgents(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectQuery(regexp.QuoteMeta(listAgentsPageSQL)).
 		WillReturnRows(sqlmock.NewRows(agentCols).
-			AddRow(avals(1, 5, nil, nil, now)...).
-			AddRow(avals(2, 6, nil, nil, now)...))
+			AddRow(avals(1, 5, nil, nil, nil, now)...).
+			AddRow(avals(2, 6, nil, nil, nil, now)...))
 
 	res, err := s.ListAgents(context.Background(), page.NewOffset(1, 20))
 	assert.NoError(t, err)
@@ -166,7 +188,8 @@ func TestUpdateAgent(t *testing.T) {
 	s := New(db)
 	mock.ExpectBegin()
 	// Save 全量 UPDATE（PUT 语义，零值一并覆盖）；参数序不定，故不校参。
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET`)).
+	// spec 05：SET 列清单须含 workflow_id（PUT 解绑 = 写 NULL 也走该列）。
+	mock.ExpectExec(`UPDATE "agents" SET.*workflow_id`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 

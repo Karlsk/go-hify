@@ -28,6 +28,8 @@ type AgentSchema struct {
 	// RAGTopK / RAGMinSimilarity RAG 检索注入参数（chat buildSystemPrompt 读此值）。
 	RAGTopK          int     `json:"rag_top_k"`
 	RAGMinSimilarity float64 `json:"rag_min_similarity"`
+	// WorkflowID 绑定的工作流（null=未绑定，字符串化外键）。
+	WorkflowID *string `json:"workflow_id"`
 }
 
 // AgentListItem 列表项：AgentSchema + 当页批量现读的聚合列（模型展示名 / 绑定工具数，
@@ -109,6 +111,10 @@ type CreateAgentReq struct {
 	// chat buildSystemPrompt 读此值替代钉死常量。
 	RAGTopK          *int     `json:"rag_top_k" binding:"omitempty,min=1,max=20"`
 	RAGMinSimilarity *float64 `json:"rag_min_similarity" binding:"omitempty,gte=0,lte=1"`
+	// WorkflowID 绑定的工作流（可空；nil = 不绑定 / PUT 全量语义下 = 解绑）。
+	// workflow 不存在时 FK 23503 由 service 翻译 ErrWorkflowNotFound（agent 不得
+	// 依赖 workflow（依赖清单），FK 是存在性的唯一校验——与 KnowledgeBaseIDs 同款）。
+	WorkflowID *uint64 `json:"workflow_id" binding:"omitempty,gt=0"`
 }
 
 // Validate 跨字段校验（字段格式由 binding tag 管）。
@@ -136,6 +142,8 @@ type UpdateAgentReq struct {
 	// RAGTopK / RAGMinSimilarity 同 CreateAgentReq。
 	RAGTopK          *int     `json:"rag_top_k" binding:"omitempty,min=1,max=20"`
 	RAGMinSimilarity *float64 `json:"rag_min_similarity" binding:"omitempty,gte=0,lte=1"`
+	// WorkflowID 同 CreateAgentReq（PUT 全量语义：缺省 / null = 解绑）。
+	WorkflowID *uint64 `json:"workflow_id" binding:"omitempty,gt=0"`
 }
 
 // Validate 跨字段校验；ID>0 由本方法兜底（防绕过 handler 的调用方）。

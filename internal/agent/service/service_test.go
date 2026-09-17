@@ -205,6 +205,11 @@ func fkErr() error {
 	return fmt.Errorf("insert bindings: %w", &pgconn.PgError{Code: "23503"})
 }
 
+// fkErrNamed 带约束名的 23503（spec 05 §4.4 起 agents 行级写语句按约束名分发）。
+func fkErrNamed(constraint string) error {
+	return fmt.Errorf("write agent: %w", &pgconn.PgError{Code: "23503", ConstraintName: constraint})
+}
+
 func sampleAgent(id uint64) *Agent {
 	a := &Agent{
 		Name:             "客服助手",
@@ -338,11 +343,95 @@ func TestCreate_FKOnKBs(t *testing.T) {
 }
 
 func TestCreate_FKOnAgent(t *testing.T) {
-	st := &stubStore{createAgent: func(ctx context.Context, a *Agent) error { return fkErr() }}
+	// fixture 补约束名（spec 05 §8）：model 约束是 00004 内联 REFERENCES 的 PG 自动命名。
+	st := &stubStore{createAgent: func(ctx context.Context, a *Agent) error { return fkErrNamed("agents_model_id_fkey") }}
 	svc := newSvc(st, okModels(), &stubCache{})
 
 	_, err := svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 999})
 	assert.ErrorIs(t, err, providerapi.ErrModelNotFound, "预检后模型被并发删除 → FK 兜底翻译")
+}
+
+func TestCreate_FKDispatchByConstraint(t *testing.T) {
+	// spec 05 §4.4 核心行为变更：agents 行级写语句上的 23503 按约束名分发——
+	// fk_agents_workflow → ErrWorkflowNotFound；model 侧约束与无约束名兜底保持
+	// ErrModelNotFound；非 23503 / 非 PG 错误原样包装（不吞错、不误译）。
+	cases := []struct {
+		name   string
+		inject error
+		want   error // 非 nil 断言 ErrorIs；nil 断言不是任何哨兵（原样包装上抛）
+	}{
+		{"workflow 约束名 → ErrWorkflowNotFound", fkErrNamed("fk_agents_workflow"), agentapi.ErrWorkflowNotFound},
+		{"model 约束名 → ErrModelNotFound", fkErrNamed("agents_model_id_fkey"), providerapi.ErrModelNotFound},
+		{"fallback model 约束名 → ErrModelNotFound", fkErrNamed("agents_fallback_model_id_fkey"), providerapi.ErrModelNotFound},
+		{"无约束名 → 兜底 ErrModelNotFound", fkErr(), providerapi.ErrModelNotFound},
+		{"非 23503 → 原样包装不翻译", fmt.Errorf("create agent: %w", &pgconn.PgError{Code: "23505"}), nil},
+		{"非 PG 错误 → 原样包装", errors.New("conn reset"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &stubStore{createAgent: func(ctx context.Context, a *Agent) error { return tc.inject }}
+			svc := newSvc(st, okModels(), &stubCache{})
+
+			_, err := svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 5})
+			assert.Error(t, err)
+			if tc.want != nil {
+				assert.ErrorIs(t, err, tc.want)
+			} else {
+				assert.NotErrorIs(t, err, agentapi.ErrWorkflowNotFound)
+				assert.NotErrorIs(t, err, providerapi.ErrModelNotFound)
+			}
+		})
+	}
+}
+
+func TestUpdate_FKDispatchByConstraint(t *testing.T) {
+	// Update 语句同样按约束名分发（spec 05 §4.4 替换 Create/Update 两处）。
+	st := &stubStore{updateAgent: func(ctx context.Context, a *Agent) error {
+		return fkErrNamed("fk_agents_workflow")
+	}}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	_, err := svc.Update(context.Background(), agentapi.UpdateAgentReq{ID: 1, Name: "x", ModelID: 5})
+	assert.ErrorIs(t, err, agentapi.ErrWorkflowNotFound, "重绑撞不存在的 workflow → 404 哨兵")
+}
+
+func TestCreate_WorkflowIDToModel(t *testing.T) {
+	// spec 05 US1：Create 带 workflow_id 落 model 直赋；toSchema 指针字符串化回显。
+	st := &stubStore{}
+	var captured *Agent
+	st.createAgent = func(ctx context.Context, a *Agent) error {
+		captured = a
+		return nil
+	}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	wid := uint64(3)
+	resp, err := svc.Create(context.Background(), agentapi.CreateAgentReq{
+		Name: "a", ModelID: 5, WorkflowID: &wid,
+	})
+	assert.NoError(t, err)
+	if assert.NotNil(t, captured.WorkflowID, "workflow_id 落 model") {
+		assert.Equal(t, uint64(3), *captured.WorkflowID)
+	}
+	if assert.NotNil(t, resp.WorkflowID, "已绑定响应字符串化") {
+		assert.Equal(t, "3", *resp.WorkflowID)
+	}
+}
+
+func TestCreate_WorkflowIDNilToModel(t *testing.T) {
+	// 缺省 = 不绑定（常态）：model 字段 nil，响应回 null。
+	st := &stubStore{}
+	var captured *Agent
+	st.createAgent = func(ctx context.Context, a *Agent) error {
+		captured = a
+		return nil
+	}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	resp, err := svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 5})
+	assert.NoError(t, err)
+	assert.Nil(t, captured.WorkflowID, "缺省 = 不绑定")
+	assert.Nil(t, resp.WorkflowID, "未绑定响应 null")
 }
 
 // ---- Get ----
@@ -561,6 +650,47 @@ func TestUpdate_EnabledAndContextApplied(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, captured.Enabled, "未传 enabled → 置回 true")
 	assert.Equal(t, 20, captured.MaxContextTurns)
+}
+
+func TestUpdate_WorkflowIDBindAndUnbind(t *testing.T) {
+	// spec 05 US1：PUT 全量语义——带 workflow_id 绑定 / 重绑；缺省（= null）解绑回 nil。
+	st := &stubStore{}
+	var captured *Agent
+	st.updateAgent = func(ctx context.Context, a *Agent) error {
+		captured = a
+		return nil
+	}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	wid := uint64(3)
+	resp, err := svc.Update(context.Background(), agentapi.UpdateAgentReq{
+		ID: 1, Name: "x", ModelID: 5, WorkflowID: &wid,
+	})
+	assert.NoError(t, err)
+	if assert.NotNil(t, captured.WorkflowID, "PUT 带 workflow_id 落 model") {
+		assert.Equal(t, uint64(3), *captured.WorkflowID)
+	}
+	if assert.NotNil(t, resp.WorkflowID) {
+		assert.Equal(t, "3", *resp.WorkflowID)
+	}
+
+	// 解绑：已绑定实体（workflow 9），PUT 体缺省 workflow_id → model 字段回 nil。
+	st2 := &stubStore{}
+	bound := sampleAgent(1)
+	nine := uint64(9)
+	bound.WorkflowID = &nine
+	st2.getByID = func(ctx context.Context, id uint64) (*Agent, error) { return bound, nil }
+	var captured2 *Agent
+	st2.updateAgent = func(ctx context.Context, a *Agent) error {
+		captured2 = a
+		return nil
+	}
+	svc2 := newSvc(st2, okModels(), &stubCache{})
+
+	resp2, err := svc2.Update(context.Background(), agentapi.UpdateAgentReq{ID: 1, Name: "x", ModelID: 5})
+	assert.NoError(t, err)
+	assert.Nil(t, captured2.WorkflowID, "PUT 缺省 workflow_id = 解绑（applyUpdate 直赋 nil）")
+	assert.Nil(t, resp2.WorkflowID, "解绑后响应回 null")
 }
 
 func TestUpdate_FKOnTools(t *testing.T) {

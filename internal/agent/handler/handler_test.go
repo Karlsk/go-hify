@@ -191,6 +191,7 @@ func TestCreate_ValidationFailed(t *testing.T) {
 		{"temperature 越界（binding lte）", `{"name":"x","model_id":5,"temperature":3}`},
 		{"tool_ids 重复（跨字段 Validate）", `{"name":"x","model_id":5,"tool_ids":[10,10]}`},
 		{"备用模型等于主模型（跨字段 Validate）", `{"name":"x","model_id":5,"fallback_model_id":5}`},
+		{"workflow_id 传 0（binding gt=0，spec 05）", `{"name":"x","model_id":5,"workflow_id":0}`},
 		{"坏 JSON", `{`},
 	}
 	for _, tc := range cases {
@@ -216,6 +217,7 @@ func TestCreate_Sentinels(t *testing.T) {
 		{"模型不存在（provider 哨兵透传）", providerapi.ErrModelNotFound, providerapi.ErrModelNotFound.Error(), http.StatusNotFound},
 		{"工具不存在（FK 翻译）", agentapi.ErrToolNotFound, agentapi.ErrToolNotFound.Error(), http.StatusNotFound},
 		{"知识库不存在（FK 翻译）", agentapi.ErrKnowledgeBaseNotFound, agentapi.ErrKnowledgeBaseNotFound.Error(), http.StatusNotFound},
+		{"工作流不存在（FK 23503 约束名分发翻译，spec 05）", agentapi.ErrWorkflowNotFound, agentapi.ErrWorkflowNotFound.Error(), http.StatusNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -304,6 +306,19 @@ func TestUpdate_IDFromPathWinsOverBody(t *testing.T) {
 	assert.Equal(t, []uint64{10}, svc.gotUpdateToolIDs)
 	d := decodeData[agentapi.AgentSchema](t, parseEnvelope(t, w.Body.Bytes()))
 	assert.Equal(t, "新名", d.Name)
+}
+
+func TestUpdate_ValidationFailed(t *testing.T) {
+	// UpdateAgentReq 与 Create 同款 binding（impl spec 05 §4.2 两处同款）：
+	// workflow_id 传 0 被 gt=0 拒绝 → 400。
+	r := newTestRouter(newFakeSvc())
+	w := doReq(t, r, http.MethodPut, "/api/v1/agents/1",
+		`{"name":"x","model_id":5,"workflow_id":0}`)
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.False(t, e.Success)
+	require.NotNil(t, e.Error)
+	assert.Equal(t, errs.ErrValidationFailed.Error(), e.Error.Code)
 }
 
 func TestUpdate_NotFound(t *testing.T) {

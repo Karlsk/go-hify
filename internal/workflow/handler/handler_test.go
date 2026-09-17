@@ -282,6 +282,17 @@ func TestDeleteRouteNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+func TestDeleteRouteInUse(t *testing.T) {
+	// spec 05 US3：被 agent 绑定 → 409 WORKFLOW_IN_USE 信封（双向删除互锁的
+	// workflow 侧出口）。
+	r := newTestRouter(&fakeSvc{injected: workflowapi.ErrWorkflowInUse})
+	w := doReq(t, r, http.MethodDelete, "/api/v1/workflows/42", "")
+	assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	require.NotNil(t, e.Error)
+	assert.Equal(t, "WORKFLOW_IN_USE", e.Error.Code)
+}
+
 func TestPublishDisableRoutes(t *testing.T) {
 	r := newTestRouter(&fakeSvc{})
 	w := doReq(t, r, http.MethodPost, "/api/v1/workflows/42/publish", "")

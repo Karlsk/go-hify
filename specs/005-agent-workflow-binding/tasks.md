@@ -25,7 +25,7 @@
 
 **Purpose**: 开工前只读核对（无代码产出）
 
-- [ ] T001 开工前核对：`make migrate-status` 确认 17 条 applied、下一号 00018（hify-pg-test 容器 5433 在位）；`go build ./... && go vet ./... && go test ./... -race -count=1` 基线绿
+- [x] T001 开工前核对：`make migrate-status` 确认 17 条 applied、下一号 00018（hify-pg-test 容器 5433 在位）；`go build ./... && go vet ./... && go test ./... -race -count=1` 基线绿
 
 ---
 
@@ -35,7 +35,7 @@
 
 **⚠️ CRITICAL**: 列不存在则 US1/US2/US3 全部无从落地
 
-- [ ] T002 [impl T1] 新建 `migrations/00018_agent_workflow_binding.sql`：SQL 逐字对齐 impl_spec_05 §4.1（加列 `workflow_id bigint` + `fk_agents_workflow` RESTRICT + `idx_agents_workflow_id` + `COMMENT ON`，Up/Down 成对）；`make migrate-up && make migrate-status` 确认 18 条 applied
+- [x] T002 [impl T1] 新建 `migrations/00018_agent_workflow_binding.sql`：SQL 逐字对齐 impl_spec_05 §4.1（加列 `workflow_id bigint` + `fk_agents_workflow` RESTRICT + `idx_agents_workflow_id` + `COMMENT ON`，Up/Down 成对）；`make migrate-up && make migrate-status` 确认 18 条 applied
 
 **Checkpoint**: 物理列就位，用户故事实现可开始
 
@@ -51,15 +51,15 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T003 [US1] [impl T2-RED] `internal/agent/api/schema_test.go` 补用例：`workflow_id` 序列化 null / "3" 两态（Req 与 Schema）；binding `gt=0` 传 0 → 绑定校验拒绝；`Validate` 行为不受影响（impl spec §8 第 1 条）
-- [ ] T004 [US1] [impl T3-RED/1] `internal/agent/service/service_test.go` 补用例：Create/Update 带 `WorkflowID` 落 model 转换；`toSchema` 指针字符串化 null/值两态；PUT `null` 解绑 → model 字段回 nil
-- [ ] T005 [US1] [impl T4-RED] `internal/agent/store/store_test.go` 补用例：`selectAgent` 期望 SQL 断言含 `workflow_id` 列；CreateAgent/UpdateAgent 语句参数含新列（sqlmock）
+- [x] T003 [US1] [impl T2-RED] `internal/agent/api/schema_test.go` 补用例：`workflow_id` 序列化 null / "3" 两态（Req 与 Schema）；binding `gt=0` 传 0 → 绑定校验拒绝；`Validate` 行为不受影响（impl spec §8 第 1 条）
+- [x] T004 [US1] [impl T3-RED/1] `internal/agent/service/service_test.go` 补用例：Create/Update 带 `WorkflowID` 落 model 转换；`toSchema` 指针字符串化 null/值两态；PUT `null` 解绑 → model 字段回 nil
+- [x] T005 [US1] [impl T4-RED] `internal/agent/store/store_test.go` 补用例：`selectAgent` 期望 SQL 断言含 `workflow_id` 列；CreateAgent/UpdateAgent 语句参数含新列（sqlmock）
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] [impl T2-GREEN] `internal/agent/api/schema.go`：`CreateAgentReq`/`UpdateAgentReq` 增 `WorkflowID *uint64`（`json:"workflow_id" binding:"omitempty,gt=0"`，置于 RAGMinSimilarity 后，两处同款）；`AgentSchema` 增 `WorkflowID *string`；`validateAgent` 签名与规则不动（§4.2 逐字）
-- [ ] T007 [US1] [impl T3-GREEN/1] `internal/agent/service/model.go` `Agent` 增 `WorkflowID *uint64`（RAGMinSimilarity 后）；`internal/agent/service/service.go` `toModelCreate`/`applyUpdate` 各加一行直赋、`toSchema` 尾部按 `FallbackModelID` 同款指针字符串化（§4.3）
-- [ ] T008 [US1] [impl T4-GREEN] `internal/agent/store/store.go` `selectAgent` 列清单加 `workflow_id`（§4 交付物 4）
+- [x] T006 [US1] [impl T2-GREEN] `internal/agent/api/schema.go`：`CreateAgentReq`/`UpdateAgentReq` 增 `WorkflowID *uint64`（`json:"workflow_id" binding:"omitempty,gt=0"`，置于 RAGMinSimilarity 后，两处同款）；`AgentSchema` 增 `WorkflowID *string`；`validateAgent` 签名与规则不动（§4.2 逐字）
+- [x] T007 [US1] [impl T3-GREEN/1] `internal/agent/service/model.go` `Agent` 增 `WorkflowID *uint64`（RAGMinSimilarity 后）；`internal/agent/service/service.go` `toModelCreate`/`applyUpdate` 各加一行直赋、`toSchema` 尾部按 `FallbackModelID` 同款指针字符串化（§4.3）
+- [x] T008 [US1] [impl T4-GREEN] `internal/agent/store/store.go` `selectAgent` 列清单加 `workflow_id`（§4 交付物 4）
 
 **Checkpoint**: 绑定/解绑/回显链路完整（此时 404 翻译仍是旧逻辑——US2 修正）
 
@@ -73,13 +73,13 @@
 
 ### Tests for User Story 2
 
-- [ ] T009 [US2] [impl T3-RED/2] `internal/agent/service/service_test.go` 补用例：23503 约束名分发表驱动（`fk_agents_workflow` → ErrWorkflowNotFound；`agents_model_id_fkey` → ErrModelNotFound；无约束名 / 非 23503 → 原样包装）；既有 model FK 用例 fixture 补 `ConstraintName` 字段
-- [ ] T010 [US2] [impl T5-RED] `internal/agent/handler/handler_test.go` httptest 表驱动补一行：ErrWorkflowNotFound → 404 信封
+- [x] T009 [US2] [impl T3-RED/2] `internal/agent/service/service_test.go` 补用例：23503 约束名分发表驱动（`fk_agents_workflow` → ErrWorkflowNotFound；`agents_model_id_fkey` → ErrModelNotFound；无约束名 / 非 23503 → 原样包装）；既有 model FK 用例 fixture 补 `ConstraintName` 字段
+- [x] T010 [US2] [impl T5-RED] `internal/agent/handler/handler_test.go` httptest 表驱动补一行：ErrWorkflowNotFound → 404 信封
 
 ### Implementation for User Story 2
 
-- [ ] T011 [US2] [impl T3-GREEN/2] `internal/agent/api/errors.go` 增哨兵 `ErrWorkflowNotFound = errors.New("WORKFLOW_NOT_FOUND")`（注释照 §4.2：与 workflowapi 同码各持一份，KB 先例）；`internal/agent/service/service.go` 增 `fkAgentsWorkflow` 常量 + `translateAgentFK`（§4.4 逐字），替换 Create/Update 事务内 `CreateAgent`/`UpdateAgent` 两处旧 `isFKViolation → ErrModelNotFound`（Tools/KBs 语句翻译不动，`isFKViolation` 保留）
-- [ ] T012 [US2] [impl T5-GREEN] `internal/agent/handler/handler.go` `failAgent` switch 加 `case errors.Is(err, agentapi.ErrWorkflowNotFound):` → 404（与 ErrToolNotFound / ErrKnowledgeBaseNotFound 同组）
+- [x] T011 [US2] [impl T3-GREEN/2] `internal/agent/api/errors.go` 增哨兵 `ErrWorkflowNotFound = errors.New("WORKFLOW_NOT_FOUND")`（注释照 §4.2：与 workflowapi 同码各持一份，KB 先例）；`internal/agent/service/service.go` 增 `fkAgentsWorkflow` 常量 + `translateAgentFK`（§4.4 逐字），替换 Create/Update 事务内 `CreateAgent`/`UpdateAgent` 两处旧 `isFKViolation → ErrModelNotFound`（Tools/KBs 语句翻译不动，`isFKViolation` 保留）
+- [x] T012 [US2] [impl T5-GREEN] `internal/agent/handler/handler.go` `failAgent` switch 加 `case errors.Is(err, agentapi.ErrWorkflowNotFound):` → 404（与 ErrToolNotFound / ErrKnowledgeBaseNotFound 同组）
 
 **Checkpoint**: agent 侧完整增量闭环（US1+US2 = spec 05 交付物 1-5）
 
@@ -93,11 +93,11 @@
 
 ### Tests for User Story 3
 
-- [ ] T013 [US3] [impl T6-RED] `internal/workflow/service/service_test.go` 补用例：store stub 返 `*pgconn.PgError{Code:"23503"}` → ErrWorkflowInUse；正常删除路径回归不受影响；`internal/workflow/handler/handler_test.go` 补 409 信封用例
+- [x] T013 [US3] [impl T6-RED] `internal/workflow/service/service_test.go` 补用例：store stub 返 `*pgconn.PgError{Code:"23503"}` → ErrWorkflowInUse；正常删除路径回归不受影响；`internal/workflow/handler/handler_test.go` 补 409 信封用例
 
 ### Implementation for User Story 3
 
-- [ ] T014 [US3] [impl T6-GREEN] `internal/workflow/api/errors.go` 增 `ErrWorkflowInUse = errors.New("WORKFLOW_IN_USE")`（§4.5 逐字）；`internal/workflow/service/service.go` 增 `pgCodeFKViolation = "23503"` 常量 + `isFKViolation` helper（agent/provider 同款）+ `Delete` 的 `err != nil` 分支最前翻译；`internal/workflow/handler/handler.go` `failWorkflow` 加 409 映射
+- [x] T014 [US3] [impl T6-GREEN] `internal/workflow/api/errors.go` 增 `ErrWorkflowInUse = errors.New("WORKFLOW_IN_USE")`（§4.5 逐字）；`internal/workflow/service/service.go` 增 `pgCodeFKViolation = "23503"` 常量 + `isFKViolation` helper（agent/provider 同款）+ `Delete` 的 `err != nil` 分支最前翻译；`internal/workflow/handler/handler.go` `failWorkflow` 加 409 映射
 
 **Checkpoint**: 三故事全部独立可测、闭环
 
@@ -105,9 +105,9 @@
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T015 [P] [impl T7] 文档同步（§7 逐条）：`CLAUDE.md` 错误码表 `WORKFLOW_NOT_PUBLISHED` 行后加 `WORKFLOW_IN_USE` 409 行、`WORKFLOW_NOT_FOUND` 行补 agentapi 同码注（照 KNOWLEDGE_BASE_NOT_FOUND 行格式）、索引地图 `agents` 行加 `(workflow_id)`；`docs/design/data-model.md` agents 表 + `workflow_id` 列、关系清单加 `agents N──1 workflows # ON DELETE RESTRICT（spec 05）`；`docs/changelog/workflow/db_model.md` 决策表加 #11（RESTRICT + 双向哨兵 + B2/C2 拍板结论与日期）
-- [ ] T016 [P]（可选，impl T8）`docs/testing/agent-manual-test.md` 补「workflow 绑定」小节（绑/解绑/404/409 冒烟 curl）
-- [ ] T017 spec 级验收（quickstart.md 命令块全跑）：`go build ./... && go vet ./... && go test ./... -race -count=1`；`go test ./internal/agent/... ./internal/workflow/... -race -cover` 两模块各 ≥80%；`grep -rn "internal/workflow" internal/agent/` 无输出；`make migrate-status` 18 applied；`git status --porcelain migrations/` 仅新增；§7 文档逐条核对
+- [x] T015 [P] [impl T7] 文档同步（§7 逐条）：`CLAUDE.md` 错误码表 `WORKFLOW_NOT_PUBLISHED` 行后加 `WORKFLOW_IN_USE` 409 行、`WORKFLOW_NOT_FOUND` 行补 agentapi 同码注（照 KNOWLEDGE_BASE_NOT_FOUND 行格式）、索引地图 `agents` 行加 `(workflow_id)`；`docs/design/data-model.md` agents 表 + `workflow_id` 列、关系清单加 `agents N──1 workflows # ON DELETE RESTRICT（spec 05）`；`docs/changelog/workflow/db_model.md` 决策表加 #11（RESTRICT + 双向哨兵 + B2/C2 拍板结论与日期）
+- [x] T016 [P]（可选，impl T8）`docs/testing/agent-manual-test.md` 补「workflow 绑定」小节（绑/解绑/404/409 冒烟 curl）
+- [x] T017 spec 级验收（quickstart.md 命令块全跑）：`go build ./... && go vet ./... && go test ./... -race -count=1`；`go test ./internal/agent/... ./internal/workflow/... -race -cover` 两模块各 ≥80%；`grep -rn "internal/workflow" internal/agent/` 无输出；`make migrate-status` 18 applied；`git status --porcelain migrations/` 仅新增；§7 文档逐条核对
 
 ---
 

@@ -150,6 +150,16 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == pgCodeUniqueViolation
 }
 
+// pgCodeFKViolation PG 外键违例错误码（constraint_violation 类；Delete 撞
+// fk_agents_workflow RESTRICT，spec 05 §4.5）。
+const pgCodeFKViolation = "23503"
+
+// isFKViolation 判断 PG 外键违例（23503，agent/provider 同款写法）。
+func isFKViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgCodeFKViolation
+}
+
 // Create：条 9 预检 → 组装 model 行 → store.Create（一事务三表）→ 三查组装 detail
 // 返回（round-trip 即校验）。不预热缓存（写路径，spec 04 §3）。
 func (s *workflowService) Create(ctx context.Context, req workflowapi.UpsertReq) (*workflowapi.WorkflowDetailSchema, error) {
@@ -314,11 +324,16 @@ func (s *workflowService) Update(ctx context.Context, req workflowapi.UpdateWork
 	return s.assembleDetail(ctx, req.ID)
 }
 
-// Delete：store.Delete 硬删（nodes / edges 由 FK CASCADE 清理）；affected=0 → 404
-// 哨兵。成功后 evict 删 key。
+// Delete：store.Delete 硬删（nodes / edges 由 FK CASCADE 清理）；被 agent 绑定
+//（agents.workflow_id FK RESTRICT → 23503）→ ErrWorkflowInUse 挡删；affected=0 →
+// 404 哨兵。成功后 evict 删 key。
+// 错误：workflowapi.ErrWorkflowNotFound、workflowapi.ErrWorkflowInUse。
 func (s *workflowService) Delete(ctx context.Context, req workflowapi.DeleteWorkflowReq) error {
 	deleted, err := s.store.Delete(ctx, req.ID)
 	if err != nil {
+		if isFKViolation(err) {
+			return workflowapi.ErrWorkflowInUse // 409：被 agent 绑定，先解绑或删 agent
+		}
 		return fmt.Errorf("delete workflow %d: %w", req.ID, err)
 	}
 	if !deleted {

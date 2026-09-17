@@ -18,6 +18,7 @@ erDiagram
     agents }o--|| models : "主/备用模型"
     agents }o--o{ mcp_tools : "agent_tools"
     agents }o--o{ knowledge_bases : "agent_knowledge_bases"
+    agents }o--o| workflows : "可选绑定（RESTRICT，spec 05）"
     knowledge_bases }o--|| models : "嵌入模型"
     knowledge_bases ||--o{ documents : ""
     documents ||--o{ chunks : "pgvector 向量"
@@ -44,7 +45,7 @@ erDiagram
 - `mcp_tools` — 各 server 暴露的工具（名称、描述、参数 schema）
 
 ### agent（关系枢纽）
-- `agents` — Agent 配置（系统提示词、温度、max_output_tokens；引用主模型 + 备用模型）
+- `agents` — Agent 配置（系统提示词、温度、max_output_tokens；引用主模型 + 备用模型；可选绑定一个工作流 `workflow_id`，spec 05）
 - `agent_tools` — 关联表：Agent ↔ MCP 工具（多对多；绑定=授权，粒度到工具不到 server）
 - `agent_knowledge_bases` — 关联表：Agent ↔ 知识库（多对多）
 
@@ -78,6 +79,7 @@ agents N──1 models         (model_id 主模型)
 agents N──1 models         (fallback_model_id 备用，一期不用)
 agents N──M mcp_tools      via agent_tools
 agents N──M knowledge_bases via agent_knowledge_bases
+agents N──1 workflows      (workflow_id 可空，ON DELETE RESTRICT，spec 05)
 
 knowledge_bases N──1 models (embedding_model_id 嵌入模型)
 knowledge_bases 1──N documents

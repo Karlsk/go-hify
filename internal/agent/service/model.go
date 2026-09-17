@@ -30,6 +30,7 @@ type Agent struct {
 	Enabled          bool    `gorm:"not null"`                                             // 停用开关：false=保留配置且新会话被拒
 	RAGTopK          int     `gorm:"not null;column:rag_top_k"`                            // RAG 检索注入取回片段数（1-20，默认 3）
 	RAGMinSimilarity float64 `gorm:"type:numeric(4,3);not null;column:rag_min_similarity"` // RAG 注入过滤阈值（0-1，默认 0.750）
+	WorkflowID       *uint64 // 绑定的工作流（nil=未绑定；fk_agents_workflow RESTRICT）
 }
 
 // TableName 显式表名（全模块约定：GORM 复数化不可靠，一律显式声明）。
