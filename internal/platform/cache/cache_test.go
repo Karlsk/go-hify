@@ -32,12 +32,15 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.DefaultTTL != DefaultTTL {
 		t.Fatalf("DefaultTTL = %v, want %v", cfg.DefaultTTL, DefaultTTL)
 	}
-	// provider-cache / agent-cache / rag-cache 均显式注册为 30 min。
-	if cfg.TTLs[NameProvider] != DefaultTTL || cfg.TTLs[NameAgent] != DefaultTTL || cfg.TTLs[NameRag] != DefaultTTL {
+	// provider-cache / agent-cache / rag-cache / workflow-cache 均显式注册为 30 min。
+	if cfg.TTLs[NameProvider] != DefaultTTL || cfg.TTLs[NameAgent] != DefaultTTL || cfg.TTLs[NameRag] != DefaultTTL || cfg.TTLs[NameWorkflow] != DefaultTTL {
 		t.Fatalf("TTLs = %+v, want all %v", cfg.TTLs, DefaultTTL)
 	}
 	if NameRag != "rag-cache" {
 		t.Fatalf("NameRag = %q, want rag-cache", NameRag)
+	}
+	if NameWorkflow != "workflow-cache" {
+		t.Fatalf("NameWorkflow = %q, want workflow-cache", NameWorkflow)
 	}
 }
 

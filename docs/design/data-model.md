@@ -59,7 +59,9 @@ erDiagram
 - 全链路数据流与字段明细见 [docs/changelog/chat/data_flow_and_model.md](../changelog/chat/data_flow_and_model.md)（executions 字段明细同此文档）
 
 ### workflow
-- `workflows` — JSON 配置定义（线性 + 条件分支节点）
+- `workflows` — 工作流主表（name 唯一、status 状态机、config 顶层 JSONB）
+- `workflow_nodes` — 节点（llm/knowledge_retrieval/condition/end，config 按类型密封）
+- `workflow_edges` — 边（source→target，condition 分支表达式）
 
 ### platform/logging
 - `executions` — 运行日志（每次 LLM 调用：输入/输出/工具链/token/耗时/供应商/模型/错误类，排障唯一线索）
@@ -87,6 +89,8 @@ conversations 1──N messages                    # 多轮上下文
 
 executions N──1 conversations / messages       # 对话路径的调用日志
 executions N──1 models / providers             # 记录调用的是哪家哪个模型
+workflows 1──N workflow_nodes                  # 一个工作流多个节点（ON DELETE CASCADE）
+workflows 1──N workflow_edges                  # 一个工作流多条边（ON DELETE CASCADE）
 workflows ──(LLM 节点调用)──▶ executions        # 工作流节点的调用也进 executions
 ```
 
@@ -107,7 +111,7 @@ workflows ──(LLM 节点调用)──▶ executions        # 工作流节点�
 | agents, agent_tools, agent_knowledge_bases | agent | `agent/service/model.go` |
 | knowledge_bases, documents, chunks | rag | `rag/service/model.go` |
 | conversations, messages | chat | `chat/service/model.go` |
-| workflows | workflow | `workflow/service/model.go` |
+| workflows, workflow_nodes, workflow_edges | workflow | `workflow/service/model.go` |
 | executions | platform/logging | `platform/logging/model.go` |
 
 > 跨模块数据需求一律在 service 层分次查询后组装，禁止 JOIN 他模块的表（见 CLAUDE.md《跨模块调用规则》禁止清单）。

@@ -776,7 +776,10 @@ Hify 索引地图（建表时照抄；向量索引细节见《pgvector 索引规
 | `conversations` | `(user_id, updated_at DESC, id DESC)`（列表分页）、`(agent_id)` |
 | `messages` | `(conversation_id, id)`（上下文按序取） |
 | `executions` | `(conversation_id, created_at)`、`(model_id)`；规模上来后 `BRIN (created_at)` + partial `(error_class) WHERE error_class IS NOT NULL` |
-| `providers`/`users`/`workflows`/`mcp_servers` | PK + 业务唯一键（`providers.name`、`users.username`） |
+| `workflows` | `uq_workflows_name (name)` |
+| `workflow_nodes` | `(workflow_id)` |
+| `workflow_edges` | `(workflow_id)` |
+| `providers`/`users`/`mcp_servers` | PK + 业务唯一键（`providers.name`、`users.username`） |
 
 ### SQL 编写规范
 
@@ -1116,6 +1119,8 @@ HTTP 状态映射：
 | `CONVERSATION_NOT_FOUND` | 404 | `chatapi.ErrConversationNotFound` |
 | `MODEL_CONTEXT_TOO_LONG` | 400 | `chatapi.ErrModelContextTooLong`（chat service 翻译自 llm `InvalidRequest`） |
 | `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound` |
+| `WORKFLOW_NAME_CONFLICT` | 409 | `workflowapi.ErrWorkflowNameConflict`（workflow 名称唯一约束） |
+| `WORKFLOW_NOT_PUBLISHED` | 503 | `workflowapi.ErrWorkflowNotPublished`（workflow 未发布，执行被拒） |
 | `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound`（KB 不存在）；`agentapi.ErrKnowledgeBaseNotFound`（agent 侧绑定写入同码哨兵，FK 23503 翻译——agent 不依赖 rag，FK 是 KB 存在性的唯一校验） |
 | `MCP_SERVER_NOT_FOUND` | 404 | `mcpapi.ErrMCPServerNotFound` |
 | `INTERNAL_ERROR` | 500 | `errs.ErrInternal`（兜底，不向前端泄露细节） |

@@ -44,6 +44,9 @@ import (
 	raghandler "github.com/Karlsk/go-hify/internal/rag/handler"
 	ragsvc "github.com/Karlsk/go-hify/internal/rag/service"
 	ragstore "github.com/Karlsk/go-hify/internal/rag/store"
+	workflowhandler "github.com/Karlsk/go-hify/internal/workflow/handler"
+	workflowsvc "github.com/Karlsk/go-hify/internal/workflow/service"
+	workflowstore "github.com/Karlsk/go-hify/internal/workflow/store"
 )
 
 // Run 是组合根装配入口，返回非 nil error 表示启动失败（由 main.go 决定退出码）。
@@ -146,6 +149,13 @@ func Run(cfg *config.Config) error {
 		slog.Warn("rag recovery: mark interrupted documents failed", "err", err)
 	}
 
+	// workflow：CRUD + 状态动作（执行引擎后续批次）。依赖既有实例零新建：modelSvc /
+	// ragSvc（provider / rag 段产物，条 9 预检用）+ ragCache（Cache 无状态、按
+	// NameWorkflow 命名空间隔离，spec 04 §5）；chat 本期不消费 workflow，执行器
+	// spec 再注入 chat 侧依赖。
+	workflowStore := workflowstore.New(gormDB)
+	workflowSvc := workflowsvc.New(workflowStore, modelSvc, ragSvc, ragCache)
+
 	// chat：对话引擎（依赖图最外层，零被依赖——将来可整体拆成独立服务）。
 	// 依赖方向：chat → agent（agentGetter）→ provider（llmConfigResolver）→ platform/llm（llmClientFactory）
 	//           chat → rag（ragRetriever，KB 检索注入）→ platform/logging（executionWriter）。
@@ -154,7 +164,7 @@ func Run(cfg *config.Config) error {
 	execStore := logging.NewExecutionStore(gormDB) // executions 表写入（每次 LLM 调用一行）
 	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore, ragSvc)
 
-	// mcp / workflow 后续批次再接入。
+	// mcp 后续批次再接入。
 
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()
@@ -182,8 +192,9 @@ func Run(cfg *config.Config) error {
 	providerhandler.New(providerSvc, modelSvc).RegisterRoutes(v1)          // provider：providers + models 双组 12 端点
 	agenthandler.New(agentSvc).RegisterRoutes(v1)                          // agent：agents 一组 5 端点
 	raghandler.New(ragSvc, int(cfg.Rag.MaxUploadBytes)).RegisterRoutes(v1) // rag：KB + documents 两组 11 端点
+	workflowhandler.New(workflowSvc).RegisterRoutes(v1)                    // workflow：workflows 一组 7 端点
 	chathandler.New(chatSvc).RegisterRoutes(v1)                            // chat：conversations + messages 5 端点
-	// TODO: 其余模块 handler.RegisterRoutes(v1)（mcp / workflow）
+	// TODO: 其余模块 handler.RegisterRoutes(v1)（mcp）
 
 	// ── ⑤ 启动（§组合根步骤 5）──────────────────────────────────────
 	slog.Info("hify ready", slog.String("addr", ":"+cfg.Server.Port), slog.String("version", version))
