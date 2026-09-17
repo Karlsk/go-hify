@@ -1185,3 +1185,8 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 2. **大列表分页**走游标——《数据库规范》强制 keyset、禁用 OFFSET（配置表例外）。
 3. **错误码**用字符串而非数字段——Hify 架构是哨兵错误 + `errors.Is`，字符串码天然一一对应。若坚持数字段（`1000-1999` 通用 / `2000-2999` provider / …），在 `platform/respond` 加一张 `sentinel→int` 映射表即可，信封其余不变。
 
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+<!-- SPECKIT END -->
