@@ -1188,5 +1188,8 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan
+shell commands, and other important information, read the current plan:
+[specs/005-agent-workflow-binding/plan.md](specs/005-agent-workflow-binding/plan.md)
+(feature: agent → workflow 绑定；冻结契约见
+docs/changelog/workflow/impl_spec_05_agent_binding.md §4)
 <!-- SPECKIT END -->
