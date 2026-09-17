@@ -42,12 +42,12 @@ type Store interface {
 ### 2.2 store 实现
 
 ```go
-var _ providersvc… → var _ service.Store = (*Store)(nil)  // 编译期断言（别名 workflowservice）
+var _ providersvc… → var _ service.Store = (*Store)(nil)  // 编译期断言（别名 workflowsvc）
 type Store struct{ db *gorm.DB }
 func New(db *gorm.DB) *Store { return &Store{db: db} }
 ```
 
-（import 别名 `workflowservice "…/internal/workflow/service"`，包名 service 与本包无冲突但别名遵循 `<module><layer>` 约定。）
+（import 别名 `workflowsvc "…/internal/workflow/service"`，包名 service 与本包无冲突但别名遵循 `<module><layer>` 约定——与 providersvc / agentsvc / ragsvc 同款三音节缩写。〔2026-09-17 修订：原 `workflowservice` 全拼，实现按仓内惯例用 `workflowsvc`，用户拍板文档对齐实现。〕）
 
 ## 3. 行为语义（SQL 形态冻结要点）
 
