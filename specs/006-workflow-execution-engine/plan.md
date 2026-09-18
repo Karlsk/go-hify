@@ -34,7 +34,7 @@ workflow 模块从纯配置管理升级为可运行：`WorkflowService` 扩 `Exe
 - 事务最小化：CreateRun 是唯一新事务（两批 INSERT，无外部调用）；节点执行不进事务
 - 总时长 5min `WithTimeoutCause(ctx, 5*time.Minute, ErrWorkflowTimeout)`；异步清理任务脱钩请求 ctx 用 `context.WithoutCancel`（rag pipeline.go:32 先例），随优雅关停退出（appCtx）
 
-**Scale/Scope**: 20-50 人内部使用；改动面 = workflow 四层（api 3 文件增 / service 4 新建 + 2 既有增 / store 1 增 / handler 1 增）+ migration 00019 + 组合根装配 + config 2 knob + 3 处文档同步。
+**Scale/Scope**: 20-50 人内部使用；改动面 = workflow 四层（api 3 文件增 / service 5 新建（execcontext / executor / execute / httpx / runscleaner）+ 2 既有增 / store 1 增 / handler 1 增）+ migration 00019 + 组合根装配 + config 2 knob + 3 处文档同步。
 
 ## Constitution Check
 

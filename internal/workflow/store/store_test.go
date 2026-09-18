@@ -409,6 +409,95 @@ func TestDeleteNotFound(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+// ---- CreateRun：一事务 run 1 行 + node_runs N 行（spec 06 O7，收尾统一写）----
+
+// testRun 构造一次执行收尾的 run + 两节点轨迹（含失败节点行），供 CreateRun 测试复用。
+func testRun() (*workflowsvc.WorkflowRun, []workflowsvc.WorkflowNodeRun) {
+	convID := uint64(88)
+	run := &workflowsvc.WorkflowRun{
+		WorkflowID: 42, WorkflowName: "智能客服分流", TriggerSource: "console",
+		ConversationID: &convID, TraceID: "trace-abc", Status: "succeeded",
+		Input: `{"input":"查订单"}`, Output: "订单已发货", DurationMs: 120,
+	}
+	nodeRuns := []workflowsvc.WorkflowNodeRun{
+		{RunID: 0, Seq: 1, NodeKey: "classify", NodeType: "llm", Status: "succeeded",
+			Input: `{"prompt":"判断意图"}`, Output: "ORDER_QUERY", DurationMs: 80},
+		{RunID: 0, Seq: 2, NodeKey: "router", NodeType: "condition", Status: "succeeded", DurationMs: 1},
+	}
+	return run, nodeRuns
+}
+
+func TestCreateRun(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	run, nodeRuns := testRun()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "workflow_runs"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(7, now))
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "workflow_node_runs"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(101, now).AddRow(102, now))
+	mock.ExpectCommit()
+
+	err := s.CreateRun(context.Background(), run, nodeRuns)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(7), run.ID) // RETURNING 回填主键
+	assert.Equal(t, uint64(7), nodeRuns[0].RunID)
+	assert.Equal(t, uint64(7), nodeRuns[1].RunID)
+	assert.Equal(t, 1, nodeRuns[0].Seq) // seq 由 service 生成，store 原样落
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateRunNodeRunsFailRollback(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	run, nodeRuns := testRun()
+	boom := errors.New("insert node runs failed")
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "workflow_runs"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(7, now))
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "workflow_node_runs"`)).
+		WillReturnError(boom)
+	mock.ExpectRollback()
+
+	err := s.CreateRun(context.Background(), run, nodeRuns)
+	assert.ErrorIs(t, err, boom) // %w 链保留：service 降级路径据此记 ERROR 日志
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateRunRunInsertFailRollback(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	run, nodeRuns := testRun()
+	boom := errors.New("insert run failed")
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "workflow_runs"`)).
+		WillReturnError(boom)
+	mock.ExpectRollback()
+
+	err := s.CreateRun(context.Background(), run, nodeRuns)
+	assert.ErrorIs(t, err, boom)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 空 node_runs 跳过第二条语句（一条多 VALUES INSERT 空集是非法 SQL，CreateEmptyEdges 同款处理）。
+func TestCreateRunEmptyNodeRuns(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	run, _ := testRun()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "workflow_runs"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(7, now))
+	mock.ExpectCommit()
+
+	err := s.CreateRun(context.Background(), run, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(7), run.ID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 // ---- SQL 错误路径：原样上抛 + %w 链保留（spec 03 §3 错误链路）----
 
 func TestStoreSQLErrors(t *testing.T) {
@@ -520,4 +609,35 @@ func TestStoreSQLErrors(t *testing.T) {
 			assert.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+// ---- DeleteRunsBefore：保留期批删（FR8，LIMIT 批次 + created_at 边界）----
+
+func TestDeleteRunsBefore(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	before := time.Date(2025, 9, 18, 0, 0, 0, 0, time.UTC)
+	mock.ExpectExec(regexp.QuoteMeta(deleteRunsBeforeSQL)).
+		WithArgs(before, 500).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+
+	n, err := s.DeleteRunsBefore(context.Background(), before, 500)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(3), n)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// SQL 失败：%w 链保留（cleaner 据此 WARN 放弃本轮）。
+func TestDeleteRunsBeforeError(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	before := time.Date(2025, 9, 18, 0, 0, 0, 0, time.UTC)
+	boom := errors.New("delete failed")
+	mock.ExpectExec(regexp.QuoteMeta(deleteRunsBeforeSQL)).
+		WithArgs(before, 500).
+		WillReturnError(boom)
+
+	_, err := s.DeleteRunsBefore(context.Background(), before, 500)
+	assert.ErrorIs(t, err, boom)
+	assert.NoError(t, mock.ExpectationsWereMet())
 }

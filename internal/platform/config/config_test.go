@@ -199,6 +199,57 @@ func TestMustLoad_RagInvalid(t *testing.T) {
 	}
 }
 
+// WorkflowCfg 默认值钉死（spec 06 O6/O7：私网默认放行、保留期默认 365）。
+func TestMustLoad_WorkflowDefaults(t *testing.T) {
+	setRequiredExcept(t, "")
+	cfg, recovered := mustLoadOrPanic(t)
+	if recovered != nil {
+		t.Fatalf("panic: %v", recovered)
+	}
+	if cfg.Workflow.APIBlockPrivate {
+		t.Error("APIBlockPrivate 默认应为 false（RFC1918 放行是既定决策）")
+	}
+	if cfg.Workflow.RunsRetentionDays != 365 {
+		t.Errorf("RunsRetentionDays = %d, want 默认 365", cfg.Workflow.RunsRetentionDays)
+	}
+}
+
+// WorkflowCfg env 透传：一键收紧私网 + 保留期自定义 / 关闭（0 语义必须透传，runscleaner 靠它区分开关）。
+func TestMustLoad_WorkflowEnvOverrides(t *testing.T) {
+	setRequiredExcept(t, "")
+	t.Setenv("WORKFLOW_API_BLOCK_PRIVATE", "true")
+	t.Setenv("WORKFLOW_RUNS_RETENTION_DAYS", "0")
+
+	cfg, recovered := mustLoadOrPanic(t)
+	if recovered != nil {
+		t.Fatalf("panic: %v", recovered)
+	}
+	if !cfg.Workflow.APIBlockPrivate {
+		t.Error("APIBlockPrivate = false, want true")
+	}
+	if cfg.Workflow.RunsRetentionDays != 0 {
+		t.Errorf("RunsRetentionDays = %d, want 0（关闭清理）", cfg.Workflow.RunsRetentionDays)
+	}
+}
+
+// 非法 env 值回退默认（envBool/envInt 不 panic，调用方默认兜底）。
+func TestMustLoad_WorkflowInvalidEnvFallsBack(t *testing.T) {
+	setRequiredExcept(t, "")
+	t.Setenv("WORKFLOW_API_BLOCK_PRIVATE", "not-a-bool")
+	t.Setenv("WORKFLOW_RUNS_RETENTION_DAYS", "not-a-number")
+
+	cfg, recovered := mustLoadOrPanic(t)
+	if recovered != nil {
+		t.Fatalf("panic: %v", recovered)
+	}
+	if cfg.Workflow.APIBlockPrivate {
+		t.Error("非法布尔应回退默认 false")
+	}
+	if cfg.Workflow.RunsRetentionDays != 365 {
+		t.Errorf("非法数值应回退默认 365, got %d", cfg.Workflow.RunsRetentionDays)
+	}
+}
+
 func TestMustLoad_MissingPGDSN(t *testing.T) {
 	setRequiredExcept(t, "PG_DSN")
 	_, recovered := mustLoadOrPanic(t)

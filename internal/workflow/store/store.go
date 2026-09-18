@@ -7,6 +7,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -177,4 +178,41 @@ func (s *Store) UpdateStatus(ctx context.Context, id uint64, from []string, to s
 		return false, fmt.Errorf("update workflow %d status: %w", id, res.Error)
 	}
 	return res.RowsAffected > 0, nil
+}
+
+// CreateRun 执行收尾一事务两批写（spec 06 O7）：INSERT workflow_runs RETURNING
+// id / created_at 回填 run → 回填 nodeRuns.RunID → 切片 Create = 单条多 VALUES
+// INSERT workflow_node_runs（Postgres 方言自动 RETURNING "id" 回填各行主键）。
+// nodeRuns 空则只写 run 行；任一批失败整体回滚（无 RUNNING 态——append-only
+// 收尾统一写，事务内零外部调用）。
+func (s *Store) CreateRun(ctx context.Context, run *workflowsvc.WorkflowRun, nodeRuns []workflowsvc.WorkflowNodeRun) error {
+	return s.db.WithContext(ctx).Transaction(func(gtx *gorm.DB) error {
+		if err := gtx.Create(run).Error; err != nil {
+			return fmt.Errorf("insert workflow %d run: %w", run.WorkflowID, err)
+		}
+		for i := range nodeRuns {
+			nodeRuns[i].RunID = run.ID // 主键落库后才分配，回填子表 FK
+		}
+		if len(nodeRuns) > 0 {
+			if err := gtx.Create(&nodeRuns).Error; err != nil {
+				return fmt.Errorf("insert workflow %d node runs: %w", run.WorkflowID, err)
+			}
+		}
+		return nil
+	})
+}
+
+// deleteRunsBeforeSQL 保留期批删（FR8）：id 子查询限定 created_at 边界与单批上限
+//（防长事务锁累积）；node_runs 随 FK ON DELETE CASCADE 连带删（00019 DDL）。
+const deleteRunsBeforeSQL = `DELETE FROM workflow_runs WHERE id IN (
+	SELECT id FROM workflow_runs WHERE created_at < $1 LIMIT $2)`
+
+// DeleteRunsBefore 批删保留期外的 run 行，返回实际删除行数（不满一批 = 清完，
+// 由调用方 RunsCleaner 循环驱动）。
+func (s *Store) DeleteRunsBefore(ctx context.Context, before time.Time, limit int) (int64, error) {
+	res := s.db.WithContext(ctx).Exec(deleteRunsBeforeSQL, before, limit)
+	if res.Error != nil {
+		return 0, fmt.Errorf("delete workflow runs before %s: %w", before.Format(time.RFC3339), res.Error)
+	}
+	return res.RowsAffected, nil
 }

@@ -149,19 +149,25 @@ func Run(cfg *config.Config) error {
 		slog.Warn("rag recovery: mark interrupted documents failed", "err", err)
 	}
 
-	// workflow：CRUD + 状态动作（执行引擎后续批次）。依赖既有实例零新建：modelSvc /
-	// ragSvc（provider / rag 段产物，条 9 预检用）+ ragCache（Cache 无状态、按
-	// NameWorkflow 命名空间隔离，spec 04 §5）；chat 本期不消费 workflow，执行器
-	// spec 再注入 chat 侧依赖。
+	// workflow：CRUD + 状态动作 + 执行引擎（spec 06）。依赖既有实例零新建：modelSvc /
+	// ragSvc（条 9 预检 + 执行期 ResolveLLMConfig / Retrieve）+ ragCache（Cache 无状态、
+	// 按 NameWorkflow 命名空间隔离，spec 04 §5）+ llmManager / execStore（llm 节点走
+	// platform/llm 非流式调用并自记 executions，O2）+ WORKFLOW_API_BLOCK_PRIVATE（O6）。
+	// chat 本期不消费 workflow，触发接线归后续 chat spec。
+	execStore := logging.NewExecutionStore(gormDB) // executions 表写入（每次 LLM 调用一行）
 	workflowStore := workflowstore.New(gormDB)
-	workflowSvc := workflowsvc.New(workflowStore, modelSvc, ragSvc, ragCache)
+	workflowSvc := workflowsvc.New(workflowStore, modelSvc, ragSvc, ragCache,
+		llmManager, execStore, ragSvc, cfg.Workflow.APIBlockPrivate)
+	// workflow_runs 保留期清理（FR8）：WORKFLOW_RUNS_RETENTION_DAYS（默认 365）按
+	// created_at 批次 DELETE（node_runs 随 FK CASCADE 连带删）；<=0 由 Start 内 WARN
+	// 关闭。同 PartitionMaintainer 形态：启动首轮 + 每 24h 一轮，随 appCtx 退出。
+	go workflowsvc.NewRunsCleaner(workflowStore, cfg.Workflow.RunsRetentionDays).Start(appCtx)
 
 	// chat：对话引擎（依赖图最外层，零被依赖——将来可整体拆成独立服务）。
 	// 依赖方向：chat → agent（agentGetter）→ provider（llmConfigResolver）→ platform/llm（llmClientFactory）
 	//           chat → rag（ragRetriever，KB 检索注入）→ platform/logging（executionWriter）。
 	// v1 范围：会话 CRUD + 上下文组装（含 RAG 检索注入）+ SSE 两模式 + executions 落库；ToolIDs 读到不执行。
 	chatStore := chatstore.New(gormDB)
-	execStore := logging.NewExecutionStore(gormDB) // executions 表写入（每次 LLM 调用一行）
 	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore, ragSvc)
 
 	// mcp 后续批次再接入。

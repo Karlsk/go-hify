@@ -24,6 +24,7 @@ type Config struct {
 	Budget   BudgetCfg
 	Logging  LoggingCfg
 	Rag      RagCfg
+	Workflow WorkflowCfg
 }
 
 // ServerCfg HTTP 服务监听。
@@ -91,6 +92,17 @@ type RagCfg struct {
 	IngestConcurrency int   // 入库管线并发（每文档一个槽）；RAG_INGEST_CONCURRENCY
 }
 
+// WorkflowCfg workflow 模块配置（执行引擎，spec 06）。
+type WorkflowCfg struct {
+	// APIBlockPrivate api 节点 SSRF 一键收紧（WORKFLOW_API_BLOCK_PRIVATE）：true 时
+	// RFC1918 私网一并拒绝。默认 false——私网放行是既定决策（O6：api 节点主场景 =
+	// 内网自签服务；恒禁的 loopback / link-local / ULA 不受此开关影响）。
+	APIBlockPrivate bool
+	// RunsRetentionDays workflow_runs 在线保留天数（WORKFLOW_RUNS_RETENTION_DAYS，
+	// 默认 365；node_runs 级联删）。<=0 关闭清理（启动 WARN）；「永不删除」用超大值表达。
+	RunsRetentionDays int
+}
+
 // MustLoad 从环境变量加载配置；必填项缺失即 panic。
 func MustLoad() *Config {
 	cfg := &Config{
@@ -136,6 +148,10 @@ func MustLoad() *Config {
 			EFSearch:          envInt("RAG_EF_SEARCH", 80),
 			MaxUploadBytes:    envInt64("RAG_MAX_UPLOAD_BYTES", 2<<20),
 			IngestConcurrency: envInt("RAG_INGEST_CONCURRENCY", 2),
+		},
+		Workflow: WorkflowCfg{
+			APIBlockPrivate:   envBool("WORKFLOW_API_BLOCK_PRIVATE", false),
+			RunsRetentionDays: envInt("WORKFLOW_RUNS_RETENTION_DAYS", 365),
 		},
 	}
 	cfg.mustValidate()

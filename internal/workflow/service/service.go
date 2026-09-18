@@ -10,7 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
@@ -43,6 +46,13 @@ type Store interface {
 	ListNodes(ctx context.Context, workflowID uint64) ([]WorkflowNode, error)
 	// ListEdges 按 id 升序稳定还原。
 	ListEdges(ctx context.Context, workflowID uint64) ([]WorkflowEdge, error)
+	// CreateRun 执行收尾一事务两批写：INSERT workflow_runs RETURNING id/created_at →
+	// 回填 run 与 nodeRuns 的 RunID → 批量多 VALUES INSERT workflow_node_runs（spec 06
+	// O7；nodeRuns 空则只写 run 行）。append-only，无 RUNNING 态。
+	CreateRun(ctx context.Context, run *WorkflowRun, nodeRuns []WorkflowNodeRun) error
+	// DeleteRunsBefore 保留期清理（FR8）：批删 created_at < before 的 run 行（单批至多
+	// limit 行，防长事务），node_runs 随 FK CASCADE 连带删；返回实际删除行数。
+	DeleteRunsBefore(ctx context.Context, before time.Time, limit int) (int64, error)
 }
 
 // cacheManager 是 platform/cache 的窄接口：service 只用读 / 写 / 删三个动作
@@ -57,15 +67,26 @@ type cacheManager interface {
 // workflowService 实现 workflowapi.WorkflowService。
 type workflowService struct {
 	store  Store                        // spec 03 接口，store 包实现
-	models providerapi.ModelService    // llm 节点 model_id 存在性预检
-	kbs    ragapi.KnowledgeBaseService // knowledge_retrieval 节点 KB 预检
+	models providerapi.ModelService    // llm 节点 model_id 存在性预检 + 执行期 ResolveLLMConfig
+	kbs    ragapi.KnowledgeBaseService // knowledge_retrieval 节点 KB 预检 + 执行期检索
 	cache  cacheManager
+	exec   *executor // 节点执行器（spec 06；models / kbs / clients / execs / rags 窄面注入）
+	// onNodeDone 进度回调缝（FR9）：nil = 零开销；非 nil 每节点成功后按执行序回调。
+	// 禁止轮询轨迹表；SSE 事件形态归后续 chat spec。
+	onNodeDone func(nodeKey, output string)
 }
 
-// New 返回 api 接口；组合根将返回值注入 handler（及将来执行器 / chat 消费方）。
+// New 返回 api 接口；组合根将返回值注入 handler（及 chat 消费方）。clients /
+// execs / rags 是执行引擎依赖（spec 06）：llm.Manager、logging.ExecutionStore、
+// rag 服务按窄接口注入（结构化类型天然满足）；blockPrivate = O6 的
+// WORKFLOW_API_BLOCK_PRIVATE。
 func New(store Store, models providerapi.ModelService, kbs ragapi.KnowledgeBaseService,
-	cm cacheManager) workflowapi.WorkflowService {
-	return &workflowService{store: store, models: models, kbs: kbs, cache: cm}
+	cm cacheManager, clients llmClientFactory, execs executionWriter, rags ragRetriever,
+	blockPrivate bool) workflowapi.WorkflowService {
+	return &workflowService{
+		store: store, models: models, kbs: kbs, cache: cm,
+		exec: newExecutor(models, clients, execs, rags, blockPrivate),
+	}
 }
 
 // 编译期断言：workflowService 实现了 api 接口（spec 04 §2.1）。
@@ -160,9 +181,12 @@ func isFKViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == pgCodeFKViolation
 }
 
-// Create：条 9 预检 → 组装 model 行 → store.Create（一事务三表）→ 三查组装 detail
-// 返回（round-trip 即校验）。不预热缓存（写路径，spec 04 §3）。
+// Create：R10 模板引用校验（纯内存）→ 条 9 预检 → 组装 model 行 → store.Create
+//（一事务三表）→ 三查组装 detail 返回（round-trip 即校验）。不预热缓存（写路径，spec 04 §3）。
 func (s *workflowService) Create(ctx context.Context, req workflowapi.UpsertReq) (*workflowapi.WorkflowDetailSchema, error) {
+	if err := validateTemplateRefs(req.Nodes, req.Edges); err != nil {
+		return nil, err
+	}
 	if err := s.precheckRefs(ctx, req.Nodes); err != nil {
 		return nil, err
 	}
@@ -219,23 +243,130 @@ func (s *workflowService) precheckRefs(ctx context.Context, nodes []workflowapi.
 	return nil
 }
 
-// assembleDetail 三查组装详情（GetByID + ListNodes + ListEdges，404 在此翻译成哨兵）。
-// Get 未命中缓存的回源与 Create 的组装返回复用同一份；缓存读写由调用方决定。
-func (s *workflowService) assembleDetail(ctx context.Context, id uint64) (*workflowapi.WorkflowDetailSchema, error) {
+// validateTemplateRefs R10 保存期模板引用校验（db_model §7 条 11，2026-09-17 O2 拍板）：
+// llm.prompt / api.url + headers + body / end.output / condition.expression 内 {{var}}
+// 引用名 ∈ {input} ∪ 该节点祖先 node_key 集（R7 无环 ⇒ DAG 祖先可算）。违例 →
+// VALIDATION_FAILED 400，details 带节点 key 与引用名；执行期 strict 渲染兜底不变。
+// 纯内存校验（无 IO），Create / Update 均先于条 9 预检调用——图缺陷不浪费下游查询。
+func validateTemplateRefs(nodes []workflowapi.NodeReq, edges []workflowapi.EdgeReq) error {
+	// 反向邻接表：target → sources；沿其 BFS 即祖先集。
+	inEdges := make(map[string][]string, len(edges))
+	for _, e := range edges {
+		inEdges[e.TargetNodeKey] = append(inEdges[e.TargetNodeKey], e.SourceNodeKey)
+	}
+	for _, n := range nodes {
+		ancestors := ancestorsOf(n.Key, inEdges)
+		refs, err := nodeTemplateRefs(n)
+		if err != nil {
+			return err
+		}
+		for _, ref := range refs {
+			if ref != "input" && !ancestors[ref] {
+				return fmt.Errorf("%w: node %q 引用未定义变量 %q（可用：input 与祖先节点 key）",
+					errs.ErrValidationFailed, n.Key, ref)
+			}
+		}
+	}
+	return nil
+}
+
+// ancestorsOf 沿反向边 BFS 求节点祖先集（R7 保证无环；环 / 未知 key 由访问集兜底
+// 不死循环）。图 ≤50 节点，逐节点重算成本可忽略（precheckRefs 二次解析同款取舍）。
+func ancestorsOf(key string, inEdges map[string][]string) map[string]bool {
+	seen := make(map[string]bool)
+	queue := append([]string(nil), inEdges[key]...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if seen[cur] {
+			continue
+		}
+		seen[cur] = true
+		queue = append(queue, inEdges[cur]...)
+	}
+	return seen
+}
+
+// nodeTemplateRefs 按节点类型提取冻结清单内的模板字段引用（db_model §7 条 11）；
+// tool / knowledge_retrieval 无模板字段。condition 比较式仅取 == 左侧——右侧
+// 'literal' 是字面量非引用、不查（与执行期 evalCondition 同一切分规则）。
+func nodeTemplateRefs(n workflowapi.NodeReq) ([]string, error) {
+	switch n.Type {
+	case workflowapi.NodeTool, workflowapi.NodeKnowledgeRetrieval:
+		return nil, nil
+	}
+	cfg, err := workflowapi.ParseNodeConfig(n.Type, n.Config)
+	if err != nil {
+		return nil, fmt.Errorf("node %q: %w", n.Key, err) // 理论不可达（api Validate 已过）
+	}
+	var refs []string
+	switch v := cfg.(type) {
+	case *workflowapi.LLMConfig:
+		refs = templateRefs(v.Prompt)
+	case *workflowapi.ConditionConfig:
+		expr := strings.TrimSpace(v.Expression)
+		if idx := strings.Index(expr, "=="); idx >= 0 {
+			expr = expr[:idx] // 右侧 'literal' 不查
+		}
+		refs = templateRefs(expr)
+	case *workflowapi.ApiCallConfig:
+		refs = templateRefs(v.URL)
+		refs = append(refs, templateRefs(v.Body)...)
+		hdrKeys := make([]string, 0, len(v.Headers))
+		for k := range v.Headers {
+			hdrKeys = append(hdrKeys, k)
+		}
+		sort.Strings(hdrKeys) // 确定性：多 header 违例时报错可复现
+		for _, k := range hdrKeys {
+			refs = append(refs, templateRefs(v.Headers[k])...)
+		}
+	case *workflowapi.EndConfig:
+		refs = templateRefs(v.Output)
+	default:
+		return nil, fmt.Errorf("node %q: unexpected config type %T", n.Key, cfg)
+	}
+	return refs, nil
+}
+
+// templateRefs 提取模板内全部 {{var}} 引用名——与执行期 render 共用 placeholderRE
+// tokenizer（execcontext.go），含空格的引用名两侧语义一致（不剥离、必不匹配）。
+func templateRefs(tpl string) []string {
+	matches := placeholderRE.FindAllStringSubmatch(tpl, -1)
+	refs := make([]string, 0, len(matches))
+	for _, m := range matches {
+		refs = append(refs, m[1])
+	}
+	return refs
+}
+
+// loadGraph 三查加载整图快照（GetByID + ListNodes + ListEdges），404 在此翻译成
+// 哨兵。assembleDetail（缓存回源路径）与 Execute（实时图直读）共用；缓存读写由
+// 调用方决定——Execute 不经 Get / 缓存，执行读实时图（FR2）由直读本函数钉死。
+func (s *workflowService) loadGraph(ctx context.Context, id uint64) (*Workflow, []WorkflowNode, []WorkflowEdge, error) {
 	wf, err := s.store.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, workflowapi.ErrWorkflowNotFound // 404
+			return nil, nil, nil, workflowapi.ErrWorkflowNotFound // 404
 		}
-		return nil, fmt.Errorf("get workflow %d: %w", id, err)
+		return nil, nil, nil, fmt.Errorf("get workflow %d: %w", id, err)
 	}
 	nodes, err := s.store.ListNodes(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("list workflow %d nodes: %w", id, err)
+		return nil, nil, nil, fmt.Errorf("list workflow %d nodes: %w", id, err)
 	}
 	edges, err := s.store.ListEdges(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("list workflow %d edges: %w", id, err)
+		return nil, nil, nil, fmt.Errorf("list workflow %d edges: %w", id, err)
+	}
+	return wf, nodes, edges, nil
+}
+
+// assembleDetail 整图快照组装详情（loadGraph + model→schema）；Get 未命中缓存的
+// 回源与 Create 的组装返回复用同一份；缓存读写由调用方决定。
+func (s *workflowService) assembleDetail(ctx context.Context, id uint64) (*workflowapi.WorkflowDetailSchema, error) {
+	wf, nodes, edges, err := s.loadGraph(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 	return toDetailSchema(wf, nodes, edges), nil
 }
@@ -301,10 +432,13 @@ func (s *workflowService) List(ctx context.Context, req workflowapi.ListWorkflow
 	return &workflowapi.WorkflowListResult{Items: summaries, Page: page, PageSize: pageSize, Total: total}, nil
 }
 
-// Update：条 9 预检 → store.ReplaceGraph 整图替换单事务（affected=0 → 404 哨兵；
-// 23505 → 409）→ 事务提交后 evict 删 key → 三查组装 detail 返回（status 库里回读，
-// 编辑不降级——ReplaceGraph 不写 status）。
+// Update：R10 模板引用校验（纯内存）→ 条 9 预检 → store.ReplaceGraph 整图替换单事务
+//（affected=0 → 404 哨兵；23505 → 409）→ 事务提交后 evict 删 key → 三查组装 detail
+// 返回（status 库里回读，编辑不降级——ReplaceGraph 不写 status）。
 func (s *workflowService) Update(ctx context.Context, req workflowapi.UpdateWorkflowReq) (*workflowapi.WorkflowDetailSchema, error) {
+	if err := validateTemplateRefs(req.Nodes, req.Edges); err != nil {
+		return nil, err
+	}
 	if err := s.precheckRefs(ctx, req.Nodes); err != nil {
 		return nil, err
 	}

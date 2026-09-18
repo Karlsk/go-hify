@@ -779,6 +779,8 @@ Hify 索引地图（建表时照抄；向量索引细节见《pgvector 索引规
 | `workflows` | `uq_workflows_name (name)` |
 | `workflow_nodes` | `(workflow_id)` |
 | `workflow_edges` | `(workflow_id)` |
+| `workflow_runs` | `(workflow_id, created_at DESC)`（按工作流查运行历史，00019） |
+| `workflow_node_runs` | `(run_id)` + uq `(run_id, seq)`（run 内 seq 回放序，00019） |
 | `providers`/`users`/`mcp_servers` | PK + 业务唯一键（`providers.name`、`users.username`） |
 
 ### SQL 编写规范
@@ -1122,6 +1124,7 @@ HTTP 状态映射：
 | `WORKFLOW_NAME_CONFLICT` | 409 | `workflowapi.ErrWorkflowNameConflict`（workflow 名称唯一约束） |
 | `WORKFLOW_NOT_PUBLISHED` | 503 | `workflowapi.ErrWorkflowNotPublished`（workflow 未发布，执行被拒） |
 | `WORKFLOW_IN_USE` | 409 | `workflowapi.ErrWorkflowInUse`（被 agent 绑定，删除被 FK RESTRICT 挡，spec 05） |
+| `WORKFLOW_EXECUTION_FAILED` | 500 | `workflowapi.ErrWorkflowExecutionFailed`（执行引擎环境限制类：api 节点 SSRF 拦截 / 总时长超 5min，spec 06） |
 | `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound`（KB 不存在）；`agentapi.ErrKnowledgeBaseNotFound`（agent 侧绑定写入同码哨兵，FK 23503 翻译——agent 不依赖 rag，FK 是 KB 存在性的唯一校验） |
 | `MCP_SERVER_NOT_FOUND` | 404 | `mcpapi.ErrMCPServerNotFound` |
 | `INTERNAL_ERROR` | 500 | `errs.ErrInternal`（兜底，不向前端泄露细节） |

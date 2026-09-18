@@ -8,11 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
@@ -23,14 +25,20 @@ import (
 
 // ---- 下游 stub（内嵌接口、只覆写 Get，小接口惯例）----
 
-// stubModels 只覆写 providerapi.ModelService.Get（llm 节点预检用到的方法）。
+// stubModels 覆写 providerapi.ModelService.Get（llm 节点预检）与 ResolveLLMConfig
+//（执行引擎 callLLM 链）；未覆写的方法沿用内嵌接口 nil 实现（测试只触达声明路径）。
 type stubModels struct {
 	providerapi.ModelService
-	getFn func(req providerapi.GetModelReq) (*providerapi.ModelSchema, error)
+	getFn     func(req providerapi.GetModelReq) (*providerapi.ModelSchema, error)
+	resolveFn func(req providerapi.ResolveLLMConfigReq) (*providerapi.LLMConfig, error)
 }
 
 func (s *stubModels) Get(ctx context.Context, req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
 	return s.getFn(req)
+}
+
+func (s *stubModels) ResolveLLMConfig(ctx context.Context, req providerapi.ResolveLLMConfigReq) (*providerapi.LLMConfig, error) {
+	return s.resolveFn(req)
 }
 
 // stubKbs 只覆写 ragapi.KnowledgeBaseService.Get（knowledge_retrieval 节点预检）。
@@ -56,6 +64,8 @@ type stubStore struct {
 	replaceGraphFn func(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) (bool, error)
 	deleteFn       func(id uint64) (bool, error)
 	updateStatusFn func(id uint64, from []string, to string) (bool, error)
+	createRunFn    func(run *WorkflowRun, nodeRuns []WorkflowNodeRun) error
+	deleteRunsFn   func(before time.Time, limit int) (int64, error)
 
 	seq      []string // 调用序列（方法名）
 	lastFrom []string // UpdateStatus 最近一次 from
@@ -103,6 +113,16 @@ func (s *stubStore) UpdateStatus(ctx context.Context, id uint64, from []string, 
 	return s.updateStatusFn(id, from, to)
 }
 
+func (s *stubStore) CreateRun(ctx context.Context, run *WorkflowRun, nodeRuns []WorkflowNodeRun) error {
+	s.seq = append(s.seq, "createRun")
+	return s.createRunFn(run, nodeRuns)
+}
+
+func (s *stubStore) DeleteRunsBefore(ctx context.Context, before time.Time, limit int) (int64, error) {
+	s.seq = append(s.seq, "deleteRunsBefore")
+	return s.deleteRunsFn(before, limit)
+}
+
 // recordCache 记录式 cacheManager stub：Get 返回预设（getVal 经 JSON 往返写入 dst，
 // 模拟 redisx.GetStruct 语义）；Set / Del 记录 key 进 seq。
 type recordCache struct {
@@ -146,7 +166,7 @@ func (c *recordCache) Delete(ctx context.Context, name, key string) error {
 // ---- T1：骨架与接线 ----
 
 func TestNewWiring(t *testing.T) {
-	svc := New(&stubStore{}, nil, nil, &recordCache{})
+	svc := New(&stubStore{}, nil, nil, &recordCache{}, nil, nil, nil, false)
 	assert.NotNil(t, svc)
 	_, ok := svc.(workflowapi.WorkflowService)
 	assert.True(t, ok, "New 返回值实现 api 接口（组合根注入 handler / 未来执行器）")
@@ -276,7 +296,7 @@ func TestCreate(t *testing.T) {
 		assert.Equal(t, uint64(3), req.ID, "llm 节点 model_id 预检")
 		return &providerapi.ModelSchema{}, nil
 	}}
-	svc := New(st, models, nil, cm)
+	svc := New(st, models, nil, cm, nil, nil, nil, false)
 
 	d, err := svc.Create(context.Background(), llmUpsertReq())
 	assert.NoError(t, err)
@@ -294,7 +314,7 @@ func TestCreateModelPrecheckFail(t *testing.T) {
 	models := &stubModels{getFn: func(req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
 		return nil, providerapi.ErrModelNotFound
 	}}
-	svc := New(st, models, nil, &recordCache{})
+	svc := New(st, models, nil, &recordCache{}, nil, nil, nil, false)
 
 	_, err := svc.Create(context.Background(), llmUpsertReq())
 	assert.ErrorIs(t, err, errs.ErrValidationFailed, "预检 404 翻译 VALIDATION_FAILED")
@@ -308,7 +328,7 @@ func TestCreateKBPrecheckFail(t *testing.T) {
 	kbs := &stubKbs{getFn: func(req ragapi.GetKnowledgeBaseReq) (*ragapi.KnowledgeBaseSchema, error) {
 		return nil, ragapi.ErrKnowledgeBaseNotFound
 	}}
-	svc := New(st, nil, kbs, &recordCache{})
+	svc := New(st, nil, kbs, &recordCache{}, nil, nil, nil, false)
 
 	req := workflowapi.UpsertReq{
 		Name:         "知识问答",
@@ -331,7 +351,7 @@ func TestCreateNameConflict(t *testing.T) {
 	}}
 	svc := New(st, &stubModels{getFn: func(providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
 		return &providerapi.ModelSchema{}, nil
-	}}, nil, &recordCache{})
+	}}, nil, &recordCache{}, nil, nil, nil, false)
 
 	_, err := svc.Create(context.Background(), llmUpsertReq())
 	assert.ErrorIs(t, err, workflowapi.ErrWorkflowNameConflict, "23505 → 409 哨兵")
@@ -344,10 +364,193 @@ func TestCreateStoreError(t *testing.T) {
 	}}
 	svc := New(st, &stubModels{getFn: func(providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
 		return &providerapi.ModelSchema{}, nil
-	}}, nil, &recordCache{})
+	}}, nil, &recordCache{}, nil, nil, nil, false)
 
 	_, err := svc.Create(context.Background(), llmUpsertReq())
 	assert.ErrorIs(t, err, boom, "其余错误 %w 包装上抛（handler 500）")
+}
+
+// ---- T026：R10 保存期模板引用校验（spec 06 FR3 / db_model §7 条 11）----
+
+// r10UpsertReq 覆盖全部模板字段位的合法引用图：classify(llm) → router(condition) →
+// order_api(api) → final(end)，各字段只引 input / 祖先。表驱动用例在其上覆写单字段
+// 构造违例变体。
+func r10UpsertReq() workflowapi.UpsertReq {
+	cond := "true"
+	return workflowapi.UpsertReq{
+		Name:         "查单流程",
+		StartNodeKey: "classify",
+		Nodes: []workflowapi.NodeReq{
+			{Key: "classify", Type: workflowapi.NodeLLM, Name: "意图识别",
+				Config: json.RawMessage(`{"model_id":"3","prompt":"判断意图：{{input}}"}`)},
+			{Key: "router", Type: workflowapi.NodeCondition, Name: "意图分流",
+				Config: json.RawMessage(`{"expression":"{{classify}} == 'ORDER_QUERY'"}`)},
+			{Key: "order_api", Type: workflowapi.NodeAPI, Name: "查单接口",
+				Config: json.RawMessage(`{"url":"https://api.example.com/orders?q={{classify}}","method":"GET","headers":{"Authorization":"Bearer {{classify}}","X-Route":"{{router}}"},"body":"{\"q\":\"{{classify}}\",\"raw\":\"{{input}}\"}"}`)},
+			{Key: "final", Type: workflowapi.NodeEnd, Name: "终稿",
+				Config: json.RawMessage(`{"output":"查单结果：{{order_api}}"}`)},
+		},
+		Edges: []workflowapi.EdgeReq{
+			{SourceNodeKey: "classify", TargetNodeKey: "router"},
+			{SourceNodeKey: "router", TargetNodeKey: "order_api", Condition: &cond},
+			{SourceNodeKey: "order_api", TargetNodeKey: "final"},
+		},
+	}
+}
+
+// overrideNodeConfig 覆写指定节点的 config 并返回 req（就地改 Nodes 的共享底层数组，
+// 调用方须传入新建的图——表驱动每例都经 r10UpsertReq() 现建）。
+func overrideNodeConfig(req workflowapi.UpsertReq, key, config string) workflowapi.UpsertReq {
+	for i := range req.Nodes {
+		if req.Nodes[i].Key == key {
+			req.Nodes[i].Config = json.RawMessage(config)
+		}
+	}
+	return req
+}
+
+// createOkStore Create 全链成功的 store stub（R10 缺失的 RED 阶段 Create 会走完
+// store 路径，预填避免 nil fn panic）。
+func createOkStore() *stubStore {
+	return &stubStore{
+		createFn:  func(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) error { wf.ID = 42; return nil },
+		getByIDFn: func(id uint64) (*Workflow, error) {
+			wf := &Workflow{Name: "查单流程", StartNodeKey: "classify", Status: "draft"}
+			wf.ID = id
+			return wf, nil
+		},
+		listNodesFn: func(workflowID uint64) ([]WorkflowNode, error) { return nil, nil },
+		listEdgesFn: func(workflowID uint64) ([]WorkflowEdge, error) { return nil, nil },
+	}
+}
+
+// 全字段位引用 input / 祖先 → 通过（照常落 store）。
+func TestCreateTemplateRefsPass(t *testing.T) {
+	st := createOkStore()
+	svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+	d, err := svc.Create(context.Background(), r10UpsertReq())
+	assert.NoError(t, err)
+	assert.Equal(t, "42", d.ID)
+	assert.Equal(t, []string{"create", "getByID", "listNodes", "listEdges"}, st.seq)
+}
+
+// 引用非祖先 / 未知 key → 400 VALIDATION_FAILED（details 带节点 key 与引用名），
+// 不动 store（R10 纯内存校验先于条 9 IO 预检）。
+func TestCreateTemplateRefsReject(t *testing.T) {
+	tests := []struct {
+		name   string
+		key    string // 覆写节点
+		config string // 覆写 config（含一个非祖先引用）
+		ref    string // 期望报错携带的引用名
+	}{
+		{"llm.prompt 引用下游节点", "classify", `{"model_id":"3","prompt":"分类：{{final}}"}`, "final"},
+		{"api.url 引用下游节点", "order_api", `{"url":"https://api.example.com/{{final}}","method":"GET","headers":{},"body":""}`, "final"},
+		{"api.headers 值引用下游节点", "order_api", `{"url":"https://api.example.com/o","method":"GET","headers":{"Authorization":"{{final}}"},"body":""}`, "final"},
+		{"api.body 引用下游节点", "order_api", `{"url":"https://api.example.com/o","method":"GET","headers":{},"body":"{\"x\":\"{{final}}\"}"}`, "final"},
+		{"end.output 引用错字 key", "final", `{"output":"结果：{{clasify}}"}`, "clasify"},
+		{"condition 左侧引用下游节点", "router", `{"expression":"{{final}} == 'ORDER_QUERY'"}`, "final"},
+		{"引用名含空格不剥离（与执行期 render 同 tokenizer）", "classify", `{"model_id":"3","prompt":"{{ classify }}"}`, " classify "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := createOkStore()
+			svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+			_, err := svc.Create(context.Background(), overrideNodeConfig(r10UpsertReq(), tt.key, tt.config))
+			require.ErrorIs(t, err, errs.ErrValidationFailed, "非祖先/未知引用 → 400 VALIDATION_FAILED")
+			assert.Contains(t, err.Error(), fmt.Sprintf("%q", tt.key), "details 带节点 key")
+			assert.Contains(t, err.Error(), fmt.Sprintf("%q", tt.ref), "details 带引用名")
+			assert.Empty(t, st.seq, "R10 拒绝不动 store")
+		})
+	}
+}
+
+// condition 比较式右侧 'literal' 是字面量非引用、不查：右侧占位符形态（下游 key）
+// 也不当作引用（与执行期 evalCondition 同一切分规则）。
+func TestCreateConditionLiteralNotScanned(t *testing.T) {
+	st := createOkStore()
+	svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+	req := overrideNodeConfig(r10UpsertReq(), "router", `{"expression":"{{classify}} == '{{order_api}}'"}`)
+	_, err := svc.Create(context.Background(), req)
+	assert.NoError(t, err, "右侧 '{{order_api}}' 是字面量的一部分，不查")
+	assert.Equal(t, []string{"create", "getByID", "listNodes", "listEdges"}, st.seq)
+}
+
+// 纯线性图祖先链正确：a(llm) → b(llm) → c(end)——b 可引 a（直接祖先）、c 可引 a
+//（跨两跳祖先）；反向 a 引 b（下游）拒。
+func TestCreateLinearAncestors(t *testing.T) {
+	llmNode := func(key, prompt string) workflowapi.NodeReq {
+		return workflowapi.NodeReq{Key: key, Type: workflowapi.NodeLLM,
+			Config: json.RawMessage(fmt.Sprintf(`{"model_id":"3","prompt":%q}`, prompt))}
+	}
+	endNode := func(output string) workflowapi.NodeReq {
+		return workflowapi.NodeReq{Key: "c", Type: workflowapi.NodeEnd,
+			Config: json.RawMessage(fmt.Sprintf(`{"output":%q}`, output))}
+	}
+	linearReq := func(promptA, promptB, outputC string) workflowapi.UpsertReq {
+		return workflowapi.UpsertReq{
+			Name: "线性链", StartNodeKey: "a",
+			Nodes: []workflowapi.NodeReq{llmNode("a", promptA), llmNode("b", promptB), endNode(outputC)},
+			Edges: []workflowapi.EdgeReq{
+				{SourceNodeKey: "a", TargetNodeKey: "b"},
+				{SourceNodeKey: "b", TargetNodeKey: "c"},
+			},
+		}
+	}
+
+	t.Run("下游引用祖先链（含跨两跳）通过", func(t *testing.T) {
+		st := createOkStore()
+		svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+		_, err := svc.Create(context.Background(), linearReq("首步", "细化：{{a}}", "终稿：{{a}}"))
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"create", "getByID", "listNodes", "listEdges"}, st.seq)
+	})
+	t.Run("上游引用下游拒", func(t *testing.T) {
+		st := createOkStore()
+		svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+		_, err := svc.Create(context.Background(), linearReq("预取结果：{{b}}", "细化", "终稿"))
+		require.ErrorIs(t, err, errs.ErrValidationFailed)
+		assert.Contains(t, err.Error(), `"a"`, "details 带节点 key")
+		assert.Contains(t, err.Error(), `"b"`, "details 带引用名")
+		assert.Empty(t, st.seq)
+	})
+}
+
+// 兄弟分支引用拒：分支 A 节点引用分支 B 节点——既非祖先也非 input（n8n 静默
+// undefined 教训的核心场景：对侧分支未执行时变量必缺失）。
+func TestCreateSiblingBranchRefReject(t *testing.T) {
+	st := createOkStore()
+	svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+	condFalse := "false"
+	req := r10UpsertReq()
+	req.Nodes = append(req.Nodes, workflowapi.NodeReq{Key: "notify", Type: workflowapi.NodeLLM,
+		Config: json.RawMessage(`{"model_id":"3","prompt":"通知：{{classify}}"}`)})
+	req.Edges = append(req.Edges, workflowapi.EdgeReq{SourceNodeKey: "router", TargetNodeKey: "notify", Condition: &condFalse})
+	req.Nodes[3].Config = json.RawMessage(`{"output":"结果：{{notify}}"}`) // final 引用兄弟分支节点
+
+	_, err := svc.Create(context.Background(), req)
+	require.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), `"final"`)
+	assert.Contains(t, err.Error(), `"notify"`)
+	assert.Empty(t, st.seq)
+}
+
+// Update 路径同校验：非祖先引用 → VALIDATION_FAILED，不动 store。
+func TestUpdateTemplateRefsReject(t *testing.T) {
+	st := createOkStore()
+	svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+	req := overrideNodeConfig(r10UpsertReq(), "final", `{"output":"结果：{{clasify}}"}`)
+	_, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{ID: 42, UpsertReq: req})
+	require.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), `"final"`)
+	assert.Contains(t, err.Error(), `"clasify"`)
+	assert.Empty(t, st.seq, "R10 拒绝不动 store（ReplaceGraph 未触达）")
 }
 
 // ---- T4：Get（Cache-Aside：命中 / 回源回填 / 404 / 容错）----
@@ -374,7 +577,7 @@ func TestGetCacheHit(t *testing.T) {
 		StartNodeKey:          "classify",
 	}
 	cm := &recordCache{getFound: true, getVal: cached}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	d, err := svc.Get(context.Background(), workflowapi.GetWorkflowReq{ID: 7})
 	assert.NoError(t, err)
@@ -387,7 +590,7 @@ func TestGetCacheHit(t *testing.T) {
 func TestGetCacheMiss(t *testing.T) {
 	st := detailStore()
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	d, err := svc.Get(context.Background(), workflowapi.GetWorkflowReq{ID: 42})
 	assert.NoError(t, err)
@@ -402,7 +605,7 @@ func TestGetNotFound(t *testing.T) {
 		return nil, gorm.ErrRecordNotFound
 	}}
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	_, err := svc.Get(context.Background(), workflowapi.GetWorkflowReq{ID: 999})
 	assert.ErrorIs(t, err, workflowapi.ErrWorkflowNotFound, "404 翻译")
@@ -412,7 +615,7 @@ func TestGetNotFound(t *testing.T) {
 func TestGetCacheReadErrFallback(t *testing.T) {
 	st := detailStore()
 	cm := &recordCache{getErr: errors.New("redis down")}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	d, err := svc.Get(context.Background(), workflowapi.GetWorkflowReq{ID: 42})
 	assert.NoError(t, err, "缓存读失败视为 miss 回源（agent Get 同款）")
@@ -423,7 +626,7 @@ func TestGetCacheReadErrFallback(t *testing.T) {
 func TestGetCacheSetErrNonFatal(t *testing.T) {
 	st := detailStore()
 	cm := &recordCache{setErr: errors.New("redis down")}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	d, err := svc.Get(context.Background(), workflowapi.GetWorkflowReq{ID: 42})
 	assert.NoError(t, err, "回填失败仅 WARN 不影响业务")
@@ -452,7 +655,7 @@ func TestListNormalize(t *testing.T) {
 				gotOffset, gotLimit = offset, limit
 				return nil, 0, nil
 			}}
-			svc := New(st, nil, nil, &recordCache{})
+			svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
 
 			res, err := svc.List(context.Background(), workflowapi.ListWorkflowsReq{Page: tt.page, PageSize: tt.pageSize})
 			assert.NoError(t, err)
@@ -474,7 +677,7 @@ func TestListAssemble(t *testing.T) {
 		wf2.ID, wf2.CreatedAt, wf2.UpdatedAt = 1, now, now
 		return []Workflow{*wf1, *wf2}, 2, nil
 	}}
-	svc := New(st, nil, nil, &recordCache{})
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
 
 	res, err := svc.List(context.Background(), workflowapi.ListWorkflowsReq{Page: 1, PageSize: 20})
 	assert.NoError(t, err)
@@ -488,7 +691,7 @@ func TestListAssemble(t *testing.T) {
 func TestListError(t *testing.T) {
 	boom := errors.New("count failed")
 	st := &stubStore{listFn: func(offset, limit int) ([]Workflow, int64, error) { return nil, 0, boom }}
-	svc := New(st, nil, nil, &recordCache{})
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
 
 	_, err := svc.List(context.Background(), workflowapi.ListWorkflowsReq{})
 	assert.ErrorIs(t, err, boom)
@@ -519,7 +722,7 @@ func TestUpdate(t *testing.T) {
 		listEdgesFn: func(workflowID uint64) ([]WorkflowEdge, error) { return nil, nil },
 	}
 	cm := &recordCache{}
-	svc := New(st, okModels(), nil, cm)
+	svc := New(st, okModels(), nil, cm, nil, nil, nil, false)
 
 	d, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{ID: 42, UpsertReq: llmUpsertReq()})
 	assert.NoError(t, err)
@@ -535,7 +738,7 @@ func TestUpdatePrecheckFail(t *testing.T) {
 	models := &stubModels{getFn: func(req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
 		return nil, providerapi.ErrModelNotFound
 	}}
-	svc := New(st, models, nil, &recordCache{})
+	svc := New(st, models, nil, &recordCache{}, nil, nil, nil, false)
 
 	_, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{ID: 42, UpsertReq: llmUpsertReq()})
 	assert.ErrorIs(t, err, errs.ErrValidationFailed)
@@ -547,7 +750,7 @@ func TestUpdateNotFound(t *testing.T) {
 		return false, nil
 	}}
 	cm := &recordCache{}
-	svc := New(st, okModels(), nil, cm)
+	svc := New(st, okModels(), nil, cm, nil, nil, nil, false)
 
 	_, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{ID: 999, UpsertReq: llmUpsertReq()})
 	assert.ErrorIs(t, err, workflowapi.ErrWorkflowNotFound, "affected=0 → 404")
@@ -558,7 +761,7 @@ func TestUpdateNameConflict(t *testing.T) {
 	st := &stubStore{replaceGraphFn: func(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) (bool, error) {
 		return false, &pgconn.PgError{Code: "23505", ConstraintName: "uq_workflows_name"}
 	}}
-	svc := New(st, okModels(), nil, &recordCache{})
+	svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
 
 	_, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{ID: 42, UpsertReq: llmUpsertReq()})
 	assert.ErrorIs(t, err, workflowapi.ErrWorkflowNameConflict, "改名撞 uq → 409")
@@ -569,7 +772,7 @@ func TestUpdateStoreError(t *testing.T) {
 	st := &stubStore{replaceGraphFn: func(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) (bool, error) {
 		return false, boom
 	}}
-	svc := New(st, okModels(), nil, &recordCache{})
+	svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
 
 	_, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{ID: 42, UpsertReq: llmUpsertReq()})
 	assert.ErrorIs(t, err, boom)
@@ -580,7 +783,7 @@ func TestUpdateStoreError(t *testing.T) {
 func TestDelete(t *testing.T) {
 	st := &stubStore{deleteFn: func(id uint64) (bool, error) { return true, nil }}
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	err := svc.Delete(context.Background(), workflowapi.DeleteWorkflowReq{ID: 42})
 	assert.NoError(t, err)
@@ -590,7 +793,7 @@ func TestDelete(t *testing.T) {
 func TestDeleteNotFound(t *testing.T) {
 	st := &stubStore{deleteFn: func(id uint64) (bool, error) { return false, nil }}
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	err := svc.Delete(context.Background(), workflowapi.DeleteWorkflowReq{ID: 999})
 	assert.ErrorIs(t, err, workflowapi.ErrWorkflowNotFound)
@@ -600,7 +803,7 @@ func TestDeleteNotFound(t *testing.T) {
 func TestDeleteError(t *testing.T) {
 	boom := errors.New("delete failed")
 	st := &stubStore{deleteFn: func(id uint64) (bool, error) { return false, boom }}
-	svc := New(st, nil, nil, &recordCache{})
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
 
 	err := svc.Delete(context.Background(), workflowapi.DeleteWorkflowReq{ID: 42})
 	assert.ErrorIs(t, err, boom)
@@ -613,7 +816,7 @@ func TestDeleteInUse(t *testing.T) {
 		return false, &pgconn.PgError{Code: "23503", ConstraintName: "fk_agents_workflow"}
 	}}
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	err := svc.Delete(context.Background(), workflowapi.DeleteWorkflowReq{ID: 42})
 	assert.ErrorIs(t, err, workflowapi.ErrWorkflowInUse, "agents FK RESTRICT 23503 → 409 挡删")
@@ -646,7 +849,7 @@ func statusStore(moved bool, statuses ...string) *stubStore {
 func TestPublish(t *testing.T) {
 	st := statusStore(true, "draft", "published") // 首查 draft → 迁移 → 回源读 published
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	sum, err := svc.Publish(context.Background(), workflowapi.PublishWorkflowReq{ID: 7})
 	assert.NoError(t, err)
@@ -660,7 +863,7 @@ func TestPublish(t *testing.T) {
 func TestPublishIdempotent(t *testing.T) {
 	st := statusStore(false, "published", "published") // 已 published：0 行幂等
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	sum, err := svc.Publish(context.Background(), workflowapi.PublishWorkflowReq{ID: 7})
 	assert.NoError(t, err, "已 published 幂等 200")
@@ -673,7 +876,7 @@ func TestPublishNotFound(t *testing.T) {
 		return nil, gorm.ErrRecordNotFound
 	}}
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	_, err := svc.Publish(context.Background(), workflowapi.PublishWorkflowReq{ID: 999})
 	assert.ErrorIs(t, err, workflowapi.ErrWorkflowNotFound)
@@ -684,7 +887,7 @@ func TestPublishNotFound(t *testing.T) {
 func TestDisable(t *testing.T) {
 	st := statusStore(true, "published", "disabled")
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	sum, err := svc.Disable(context.Background(), workflowapi.DisableWorkflowReq{ID: 7})
 	assert.NoError(t, err)
@@ -697,7 +900,7 @@ func TestDisable(t *testing.T) {
 func TestDisableDraftNoop(t *testing.T) {
 	st := statusStore(false, "draft", "draft") // draft 不在 from：0 行且状态保持
 	cm := &recordCache{}
-	svc := New(st, nil, nil, cm)
+	svc := New(st, nil, nil, cm, nil, nil, nil, false)
 
 	sum, err := svc.Disable(context.Background(), workflowapi.DisableWorkflowReq{ID: 7})
 	assert.NoError(t, err, "draft 幂等 no-op")
@@ -714,7 +917,7 @@ func TestStatusActionUpdateError(t *testing.T) {
 		},
 		updateStatusFn: func(id uint64, from []string, to string) (bool, error) { return false, boom },
 	}
-	svc := New(st, nil, nil, &recordCache{})
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
 
 	_, err := svc.Publish(context.Background(), workflowapi.PublishWorkflowReq{ID: 7})
 	assert.ErrorIs(t, err, boom)

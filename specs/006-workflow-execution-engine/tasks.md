@@ -20,16 +20,16 @@
 
 ## Phase 1: Setup
 
-- [ ] T001 开工确认：`make migrate-status` 18 条 applied（下一号 00019）+ `go build ./... && go vet ./... && go test ./... -race -count=1` 基线全绿（spec-dev 第 1 步已执行，实现期复核一次）
+- [x] T001 开工确认：`make migrate-status` 18 条 applied（下一号 00019）+ `go build ./... && go vet ./... && go test ./... -race -count=1` 基线全绿（spec-dev 第 1 步已执行，实现期复核一次）
 
 ---
 
 ## Phase 2: Foundational（阻塞全部故事）
 
-- [ ] T002 [P] 迁移 migrations/00019_workflow_runs.sql——DDL 逐字取 db_model.md §12 冻结稿（workflow_runs + workflow_node_runs、CHECK、idx_workflow_runs_wf_created、idx_workflow_node_runs_run_id、UNIQUE(run_id,seq)、COMMENT、Up/Down 成对）；写后 `make migrate-status` 确认 19 条 applied、Down 可回滚
-- [ ] T003 [P] api 契约扩展 internal/workflow/api/——api.go 增 `Execute(ctx, ExecuteWorkflowReq) (*RunResultSchema, error)` 接口方法；schema.go 增 ExecuteWorkflowReq（Input binding required,max=16384 / ConversationID / MessageID / Trial）+ RunResultSchema（run_id/status/output/duration_ms/node_trace）+ NodeRunSummary（node_key/node_type/status/duration_ms/error_msg，research R11）；errors.go 增哨兵 `ErrWorkflowExecutionFailed`（文案 `WORKFLOW_EXECUTION_FAILED`，逐字）；api 包保持零 gin/gorm import
-- [ ] T004 [P] model 增实体 internal/workflow/service/model.go——WorkflowRun / WorkflowNodeRun（embed db.BaseAppendOnly，字段逐字对齐 db_model §12 Go model：弱引用 + 快照 + is_trial + trace_id + started_at 等；无 json tag）
-- [ ] T005 [P] config 增 env knob internal/platform/config/config.go——WORKFLOW_API_BLOCK_PRIVATE（envBool，先例 :110）/ WORKFLOW_RUNS_RETENTION_DAYS（envInt 默认 365，先例 :129）+ 各自测试
+- [x] T002 [P] 迁移 migrations/00019_workflow_runs.sql——DDL 逐字取 db_model.md §12 冻结稿（workflow_runs + workflow_node_runs、CHECK、idx_workflow_runs_wf_created、idx_workflow_node_runs_run_id、UNIQUE(run_id,seq)、COMMENT、Up/Down 成对）；写后 `make migrate-status` 确认 19 条 applied、Down 可回滚
+- [x] T003 [P] api 契约扩展 internal/workflow/api/——api.go 增 `Execute(ctx, ExecuteWorkflowReq) (*RunResultSchema, error)` 接口方法；schema.go 增 ExecuteWorkflowReq（Input binding required,max=16384 / ConversationID / MessageID / Trial）+ RunResultSchema（run_id/status/output/duration_ms/node_trace）+ NodeRunSummary（node_key/node_type/status/duration_ms/error_msg，research R11）；errors.go 增哨兵 `ErrWorkflowExecutionFailed`（文案 `WORKFLOW_EXECUTION_FAILED`，逐字）；api 包保持零 gin/gorm import
+- [x] T004 [P] model 增实体 internal/workflow/service/model.go——WorkflowRun / WorkflowNodeRun（embed db.BaseAppendOnly，字段逐字对齐 db_model §12 Go model：弱引用 + 快照 + is_trial + trace_id + started_at 等；无 json tag）
+- [x] T005 [P] config 增 env knob internal/platform/config/config.go——WORKFLOW_API_BLOCK_PRIVATE（envBool，先例 :110）/ WORKFLOW_RUNS_RETENTION_DAYS（envInt 默认 365，先例 :129）+ 各自测试
 
 **Checkpoint**: 契约与地基就绪，三个故事可开工。
 
@@ -43,21 +43,21 @@
 
 ### Tests（先写、确认 RED）
 
-- [ ] T006 [P] [US1] RED internal/workflow/service/execcontext_test.go——表驱动：render 混合文本多变量；strict 缺失变量报错（错误文案含缺失名）；condition 迷你表达式（裸 `{{var}}`、`{{var}} == 'literal'`、字面量含单引号/空串）；set 落池（仅成功节点）；steps 累积
-- [ ] T007 [P] [US1] RED internal/workflow/service/httpx_test.go——SSRF 矩阵：127.0.0.1/127.8.8.8/::1 拒、169.254.1.1/fe80::1 拒、fc00::1/fd00::1 拒、10.0.0.1/172.16.0.1/192.168.1.1 放行、BLOCK_PRIVATE=true 时私网全拒、非 http/https scheme 拒、重定向每跳复验（httptest 302 → 禁止目标）；timeout_sec 边界 1-60 与默认 10s；ssl_verify 两种 TLS 行为
-- [ ] T008 [US1] RED internal/workflow/service/executor_test.go——runNode 六类分发；tool 节点 fail-fast（图缺陷类 400、message 带 `node <key>:`）；callLLM 链 stub（ResolveLLMConfig → Manager.Client → Generate 非流式、prompt 经 render、temperature 透传）+ **executions 自记恰好一行且 ConversationID=nil**（窄接口 stub 记调用）；retrieve 结果格式化为编号段落文本；callAPI url/headers/body 全链渲染 + SSRF 拦截归环境限制类；buildOutput 按 output 模板拼终稿
-- [ ] T009 [US1] RED internal/workflow/service/execute_test.go——快照三查加载（stub Store）；线性游走到 end / 无出边终止取末节点输出；route 按声明顺序首条命中、无命中 fail-fast（400 带 node 前缀）、唯一无条件边；把关：draft/disabled → ErrWorkflowNotPublished（503，文案区分两态）；总时长上限：cause=超时 → ErrWorkflowExecutionFailed；ctx 取消立即中止带 node key；收尾 CreateRun 收到 run 行 + 全部 node_runs（seq 递增、失败节点 status=failed）；RunResultSchema 组装（run_id 字符串化、node_trace 顺序）
-- [ ] T010 [P] [US1] RED internal/workflow/store/store_test.go——CreateRun sqlmock：一事务内 run INSERT 1 行 + node_runs 一条多 VALUES INSERT（N 占位符），regexp.QuoteMeta 钉 SQL 形态；任一批失败整体回滚（Begin/Rollback 断言）；错误原样上抛不翻译
-- [ ] T011 [P] [US1] RED internal/workflow/handler/handler_test.go——httptest + fakeSvc：200 信封 RunResultSchema 字段齐；input 缺失/超 16384 → 400；draft → 503 WORKFLOW_NOT_PUBLISHED；引擎环境限制 → 500 WORKFLOW_EXECUTION_FAILED；下游哨兵（如 MODEL_NOT_FOUND）经既有映射透传；信封断言解析
+- [x] T006 [P] [US1] RED internal/workflow/service/execcontext_test.go——表驱动：render 混合文本多变量；strict 缺失变量报错（错误文案含缺失名）；condition 迷你表达式（裸 `{{var}}`、`{{var}} == 'literal'`、字面量含单引号/空串）；set 落池（仅成功节点）；steps 累积
+- [x] T007 [P] [US1] RED internal/workflow/service/httpx_test.go——SSRF 矩阵：127.0.0.1/127.8.8.8/::1 拒、169.254.1.1/fe80::1 拒、fc00::1/fd00::1 拒、10.0.0.1/172.16.0.1/192.168.1.1 放行、BLOCK_PRIVATE=true 时私网全拒、非 http/https scheme 拒、重定向每跳复验（httptest 302 → 禁止目标）；timeout_sec 边界 1-60 与默认 10s；ssl_verify 两种 TLS 行为
+- [x] T008 [US1] RED internal/workflow/service/executor_test.go——runNode 六类分发；tool 节点 fail-fast（图缺陷类 400、message 带 `node <key>:`）；callLLM 链 stub（ResolveLLMConfig → Manager.Client → Generate 非流式、prompt 经 render、temperature 透传）+ **executions 自记恰好一行且 ConversationID=nil**（窄接口 stub 记调用）；retrieve 结果格式化为编号段落文本；callAPI url/headers/body 全链渲染 + SSRF 拦截归环境限制类；buildOutput 按 output 模板拼终稿
+- [x] T009 [US1] RED internal/workflow/service/execute_test.go——快照三查加载（stub Store）；线性游走到 end / 无出边终止取末节点输出；route 按声明顺序首条命中、无命中 fail-fast（400 带 node 前缀）、唯一无条件边；把关：draft/disabled → ErrWorkflowNotPublished（503，文案区分两态）；目标不存在：stub store 返回 gorm.ErrRecordNotFound → ErrWorkflowNotFound 原样透传（404 既有哨兵）；总时长上限：cause=超时 → ErrWorkflowExecutionFailed；ctx 取消立即中止带 node key；收尾 CreateRun 收到 run 行 + 全部 node_runs（seq 递增、失败节点 status=failed）；RunResultSchema 组装（run_id 字符串化、node_trace 顺序）；onNodeDone 注入缝（§4.3 冻结 `func(nodeKey, output string)`）：回调按节点逐个触发、nil 缝路径正常执行零开销
+- [x] T010 [P] [US1] RED internal/workflow/store/store_test.go——CreateRun sqlmock：一事务内 run INSERT 1 行 + node_runs 一条多 VALUES INSERT（N 占位符），regexp.QuoteMeta 钉 SQL 形态；任一批失败整体回滚（Begin/Rollback 断言）；错误原样上抛不翻译
+- [x] T011 [P] [US1] RED internal/workflow/handler/handler_test.go——httptest + fakeSvc：200 信封 RunResultSchema 字段齐；input 缺失/超 16384 → 400；draft → 503 WORKFLOW_NOT_PUBLISHED；引擎环境限制 → 500 WORKFLOW_EXECUTION_FAILED；下游哨兵（如 MODEL_NOT_FOUND）经既有映射透传；信封断言解析
 
 ### Implementation（GREEN，按依赖序）
 
-- [ ] T012 [US1] GREEN internal/workflow/service/execcontext.go——vars map[string]string（"input"+各 node_key）+ render strict（{{}} 扫描，与 condition 求值共用底层）+ 迷你表达式求值 + set + steps（骨架逐字对齐 impl_spec_06 §4.2）
-- [ ] T013 [US1] GREEN internal/workflow/service/httpx.go——出站 client：net.Dialer.Control 建连时 IP 校验（防 rebinding）、CheckRedirect 每跳自然复验、仅 http/https、timeout_sec 1-60 默认 10s 映射、ssl_verify TLS 配置、BLOCK_PRIVATE 全禁私网（research R3）
-- [ ] T014 [US1] GREEN internal/workflow/service/executor.go——runNode type switch 六类 + callLLM（链路 per research R1 + executions 自记窄接口写入缝，R2）/ evaluate / retrieve / callAPI（经 httpx）/ buildOutput；default 臂防御性报错
-- [ ] T015 [US1] GREEN internal/workflow/service/execute.go——把关（published）→ 快照三查（ListNodes/ListEdges + ParseNodeConfig）→ execContext 初始化 vars["input"] → 游走循环（ctx.Err 检查、slog 节点轨迹一条）→ route → finishResult（CreateRun + RunResultSchema；降级重试 US3 补）→ 5min WithTimeoutCause(ctx, ErrWorkflowTimeout)；错误 `fmt.Errorf("node %s: %w")` 包装（骨架逐字 §4.2）
-- [ ] T016 [US1] GREEN internal/workflow/store/store.go——CreateRun：Transaction 内两批多 VALUES INSERT（T010 测试钉住的形态）
-- [ ] T017 [US1] GREEN 接线——internal/workflow/service/service.go 注入扩容（llmManager + executions 写入缝窄接口）+ internal/workflow/handler/handler.go 增 `POST /workflows/:id/execute` 薄绑定（BindUri+BindJSON+Query trial 解析→req.Trial；一个绑定函数只调一个接口方法）+ internal/app/server.go workflowsvc.New 追加 llmManager 与 execStore 注入
+- [x] T012 [US1] GREEN internal/workflow/service/execcontext.go——vars map[string]string（"input"+各 node_key）+ render strict（{{}} 扫描，与 condition 求值共用底层）+ 迷你表达式求值 + set + steps（骨架逐字对齐 impl_spec_06 §4.2）
+- [x] T013 [US1] GREEN internal/workflow/service/httpx.go——出站 client：net.Dialer.Control 建连时 IP 校验（防 rebinding）、CheckRedirect 每跳自然复验、仅 http/https、timeout_sec 1-60 默认 10s 映射、ssl_verify TLS 配置、BLOCK_PRIVATE 全禁私网（research R3）
+- [x] T014 [US1] GREEN internal/workflow/service/executor.go——runNode type switch 六类 + callLLM（链路 per research R1 + executions 自记窄接口写入缝，R2）/ evaluate / retrieve / callAPI（经 httpx）/ buildOutput；default 臂防御性报错
+- [x] T015 [US1] GREEN internal/workflow/service/execute.go——把关（published）→ 快照三查（ListNodes/ListEdges + ParseNodeConfig）→ execContext 初始化 vars["input"] → 游走循环（ctx.Err 检查、slog 节点轨迹一条、每节点完成后调 onNodeDone 注入缝——§4.3 冻结签名 `func(nodeKey, output string)`，nil 安全跳过即控制台路径零开销；缝为 service 内部字段，api Execute 公签冻结无回调参）→ route → finishResult（CreateRun + RunResultSchema；降级重试 US3 补）→ 5min WithTimeoutCause(ctx, ErrWorkflowTimeout)；错误 `fmt.Errorf("node %s: %w")` 包装（骨架逐字 §4.2）
+- [x] T016 [US1] GREEN internal/workflow/store/store.go——CreateRun：Transaction 内两批多 VALUES INSERT（T010 测试钉住的形态）
+- [x] T017 [US1] GREEN 接线——internal/workflow/service/service.go 注入扩容（llmManager + executions 写入缝窄接口）+ internal/workflow/handler/handler.go 增 `POST /workflows/:id/execute` 薄绑定（BindUri+BindJSON+Query trial 解析→req.Trial；一个绑定函数只调一个接口方法）+ internal/app/server.go workflowsvc.New 追加 llmManager 与 execStore 注入
 
 **Checkpoint**: US1 MVP 成立——published 图 stub 端到端可执行、可验收（quickstart §3.1/3.3/3.4 场景就绪）。
 
@@ -69,8 +69,8 @@
 
 **Independent Test**: 同一 draft 图——带 trial 200、不带 trial 503；trial run 行 is_trial=true。
 
-- [ ] T018 [US2] RED 测试增例 internal/workflow/service/execute_test.go + handler/handler_test.go——draft+trial 200、disabled+trial 200、published+trial 200 且 is_trial=true、draft 无 trial 503（文案区分 draft/disabled）、trial run 行 is_trial 落库断言
-- [ ] T019 [US2] GREEN internal/workflow/service/execute.go + handler——把关改 `published || req.Trial`；run 行 IsTrial=req.Trial；（handler trial query 解析已在 T017 就位，此处补服务端语义）
+- [x] T018 [US2] RED 测试增例 internal/workflow/service/execute_test.go + handler/handler_test.go——draft+trial 200、disabled+trial 200、published+trial 200 且 is_trial=true、draft 无 trial 503（文案区分 draft/disabled）、trial run 行 is_trial 落库断言
+- [x] T019 [US2] GREEN internal/workflow/service/execute.go + handler——把关改 `published || req.Trial`；run 行 IsTrial=req.Trial；（handler trial query 解析已在 T017 就位，此处补服务端语义）
 
 **Checkpoint**: US1+US2 各自独立可测（O3 全场景）。
 
@@ -82,12 +82,12 @@
 
 **Independent Test**: 16KB 输出截断带 truncated 标记；CreateRun 持续失败时结果照返、run_id 空；retention 任务行为。
 
-- [ ] T020 [US3] RED internal/workflow/service/execute_test.go（或独立截断测试文件）——16KB 边界（恰 16384 保留 / 16385 截断+`truncated:true` jsonb 标记）、slog 节点轨迹 1KB、input/output 三处落库值均过截断
-- [ ] T021 [US3] GREEN internal/workflow/service/execute.go——truncate helper + finishResult 落库值接截断与标记包装；slog 轨迹 1KB 截断
-- [ ] T022 [US3] RED internal/workflow/service/execute_test.go——写入降级：stub CreateRun 持续失败 → 重试恰好一次、结果照返、RunResultSchema.run_id=""、ERROR 日志带 trace_id
-- [ ] T023 [US3] GREEN internal/workflow/service/execute.go——CreateRun 失败重试一次仍败走降级分支；trace_id 从 ctx 取出落 run 行（platform/traceid 提取）
-- [ ] T024 [US3] RED internal/workflow/service/runscleaner_test.go——首轮立即执行 + ticker 周期、retention<=0 不启动（WARN）、DELETE 按 created_at 批次带 WHERE、appCtx 取消即退出（research R8）
-- [ ] T025 [US3] GREEN internal/workflow/service/runscleaner.go + internal/app/server.go——清理任务实现（PartitionMaintainer 形态）+ 组合根 `go cleaner.Start(appCtx)` 接线
+- [x] T020 [US3] RED internal/workflow/service/execute_test.go（或独立截断测试文件）——16KB 边界（恰 16384 保留 / 16385 截断+`truncated:true` jsonb 标记）、slog 节点轨迹 1KB、input/output 三处落库值均过截断
+- [x] T021 [US3] GREEN internal/workflow/service/execute.go——truncate helper + finishResult 落库值接截断与标记包装；slog 轨迹 1KB 截断
+- [x] T022 [US3] RED internal/workflow/service/execute_test.go——写入降级：stub CreateRun 持续失败 → 重试恰好一次、结果照返、RunResultSchema.run_id=""、ERROR 日志带 trace_id
+- [x] T023 [US3] GREEN internal/workflow/service/execute.go——CreateRun 失败重试一次仍败走降级分支；trace_id 从 ctx 取出落 run 行（platform/traceid 提取）
+- [x] T024 [US3] RED internal/workflow/service/runscleaner_test.go——首轮立即执行 + ticker 周期、retention<=0 不启动（WARN）、DELETE 按 created_at 批次带 WHERE、appCtx 取消即退出（research R8）
+- [x] T025 [US3] GREEN internal/workflow/service/runscleaner.go + internal/app/server.go——清理任务实现（PartitionMaintainer 形态）+ 组合根 `go cleaner.Start(appCtx)` 接线
 
 **Checkpoint**: 全部故事独立可测；排障链完整（slog + executions + runs/node_runs + trace_id）。
 
@@ -95,10 +95,10 @@
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T026 RED internal/workflow/service/service_test.go 增例——R10 保存期校验：llm.prompt/api.url+headers+body/end.output 引用祖先或 input 通过；引用非祖先 key → 400 VALIDATION_FAILED（details 带节点 key 与引用名）；condition `== 'literal'` 右侧字面量不查；纯线性图祖先链正确；与 {{}} 扫描共用 tokenizer
-- [ ] T027 GREEN internal/workflow/service/service.go——validateGraph 增条 11（R10）：祖先集沿 edges 反向 BFS，模板字段提取按 config 类型分发（db_model §7 条 11 逐字语义）
-- [ ] T028 [P] 文档同步——CLAUDE.md 错误码表增 `WORKFLOW_EXECUTION_FAILED | 500` 行 + 索引地图增 workflow_runs / workflow_node_runs 行；docs/design/data-model.md 增两表与弱引用关系；docs/testing/workflow-manual-test.md 增执行测试小节（quickstart §3 五场景）
-- [ ] T029 全量验收门——`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿；`go test ./internal/workflow/... -race -cover` 各包 ≥80%；依赖 grep：`grep -rn "internal/chat" internal/workflow/` 零命中、api 包无 gin/gorm import；`make migrate-status` 19 条 applied 且 00001-00018 未动；对照 impl_spec_06 §7 关键回归点逐项勾验
+- [x] T026 RED internal/workflow/service/service_test.go 增例——R10 保存期校验：llm.prompt/api.url+headers+body/end.output 引用祖先或 input 通过；引用非祖先 key → 400 VALIDATION_FAILED（details 带节点 key 与引用名）；condition `== 'literal'` 右侧字面量不查；纯线性图祖先链正确；与 {{}} 扫描共用 tokenizer
+- [x] T027 GREEN internal/workflow/service/service.go——validateGraph 增条 11（R10）：祖先集沿 edges 反向 BFS，模板字段提取按 config 类型分发（db_model §7 条 11 逐字语义）
+- [x] T028 [P] 文档同步——CLAUDE.md 错误码表增 `WORKFLOW_EXECUTION_FAILED | 500` 行 + 索引地图增 workflow_runs / workflow_node_runs 行；docs/design/data-model.md 增两表与弱引用关系；docs/testing/workflow-manual-test.md 增执行测试小节（quickstart §3 五场景）
+- [x] T029 全量验收门——`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿；`go test ./internal/workflow/... -race -cover` 各包 ≥80%；依赖 grep：`grep -rn "internal/chat" internal/workflow/` 零命中、api 包无 gin/gorm import；`make migrate-status` 19 条 applied 且 00001-00018 未动；对照 impl_spec_06 §7 关键回归点逐项勾验
 
 ---
 

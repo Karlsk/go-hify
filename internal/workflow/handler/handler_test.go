@@ -15,6 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Karlsk/go-hify/internal/platform/errs"
+	"github.com/Karlsk/go-hify/internal/platform/llm"
+	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
+	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
@@ -38,6 +41,10 @@ type fakeSvc struct {
 
 	// 查收两段绑定是否正确落到 req（update 的路径 id）
 	gotUpdateID uint64
+	// execute 查收：路径 id / body input / query trial
+	gotExecuteID    uint64
+	gotExecuteInput string
+	gotExecuteTrial bool
 }
 
 func (f *fakeSvc) Create(_ context.Context, req workflowapi.UpsertReq) (*workflowapi.WorkflowDetailSchema, error) {
@@ -114,6 +121,22 @@ func (f *fakeSvc) Disable(_ context.Context, req workflowapi.DisableWorkflowReq)
 	}
 	s := workflowapi.WorkflowSummarySchema{ID: strconv.FormatUint(req.ID, 10), Status: "disabled"}
 	return &s, nil
+}
+
+func (f *fakeSvc) Execute(_ context.Context, req workflowapi.ExecuteWorkflowReq) (*workflowapi.RunResultSchema, error) {
+	if f.injected != nil {
+		return nil, f.injected
+	}
+	f.gotExecuteID = req.ID
+	f.gotExecuteInput = req.Input
+	f.gotExecuteTrial = req.Trial
+	return &workflowapi.RunResultSchema{
+		RunID: "7", Status: "succeeded", Output: "订单已发货", DurationMs: 120,
+		NodeTrace: []workflowapi.NodeRunSummary{
+			{NodeKey: "classify", NodeType: "llm", Status: "succeeded", DurationMs: 80},
+			{NodeKey: "finish", NodeType: "end", Status: "succeeded", DurationMs: 1},
+		},
+	}, nil
 }
 
 func newTestRouter(svc *fakeSvc) *gin.Engine {
@@ -308,4 +331,102 @@ func TestRouteInternalError(t *testing.T) {
 	r := newTestRouter(&fakeSvc{injected: errBoom{}})
 	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/42", "")
 	assert.Equal(t, http.StatusInternalServerError, w.Code, "未识别错误兜底 500")
+}
+
+// ---- execute 路由（spec 06 api_contract §5）----
+
+func TestExecuteRoute(t *testing.T) {
+	svc := &fakeSvc{}
+	r := newTestRouter(svc)
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows/42/execute", `{"input":"查订单"}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.True(t, e.Success)
+	d := workflowapi.RunResultSchema{}
+	require.NoError(t, json.Unmarshal(e.Data, &d))
+	assert.Equal(t, "7", d.RunID)
+	assert.Equal(t, "succeeded", d.Status)
+	assert.Equal(t, "订单已发货", d.Output)
+	assert.Equal(t, 120, d.DurationMs)
+	require.Len(t, d.NodeTrace, 2)
+	assert.Equal(t, "classify", d.NodeTrace[0].NodeKey)
+	assert.Equal(t, "llm", d.NodeTrace[0].NodeType)
+	// 两段绑定 + trial 缺省 false
+	assert.Equal(t, uint64(42), svc.gotExecuteID)
+	assert.Equal(t, "查订单", svc.gotExecuteInput)
+	assert.False(t, svc.gotExecuteTrial)
+}
+
+// ?trial=true 才算试运行（O3）：trial=1 / 缺省均为 false。
+func TestExecuteRouteTrialQuery(t *testing.T) {
+	svc := &fakeSvc{}
+	r := newTestRouter(svc)
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows/42/execute?trial=true", `{"input":"x"}`)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, svc.gotExecuteTrial, "?trial=true → req.Trial=true")
+
+	svc1 := &fakeSvc{}
+	r1 := newTestRouter(svc1)
+	w1 := doReq(t, r1, http.MethodPost, "/api/v1/workflows/42/execute?trial=1", `{"input":"x"}`)
+	require.Equal(t, http.StatusOK, w1.Code)
+	assert.False(t, svc1.gotExecuteTrial, "仅字面 true 生效（trial=1 不算）")
+}
+
+func TestExecuteRouteInputMissing(t *testing.T) {
+	r := newTestRouter(&fakeSvc{})
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows/42/execute", `{}`)
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "VALIDATION_FAILED", e.Error.Code)
+}
+
+func TestExecuteRouteInputTooLong(t *testing.T) {
+	r := newTestRouter(&fakeSvc{})
+	body := `{"input":"` + strings.Repeat("a", 16385) + `"}`
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows/42/execute", body)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "input 超 16384 上限（O1）")
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "VALIDATION_FAILED", e.Error.Code)
+}
+
+func TestExecuteRouteNotPublished(t *testing.T) {
+	r := newTestRouter(&fakeSvc{injected: workflowapi.ErrWorkflowNotPublished})
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows/42/execute", `{"input":"x"}`)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "WORKFLOW_NOT_PUBLISHED", e.Error.Code)
+}
+
+// 环境限制类 → 500 WORKFLOW_EXECUTION_FAILED（O4 二分法的执行侧出口）。
+func TestExecuteRouteExecutionFailed(t *testing.T) {
+	r := newTestRouter(&fakeSvc{injected: workflowapi.ErrWorkflowExecutionFailed})
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows/42/execute", `{"input":"x"}`)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "WORKFLOW_EXECUTION_FAILED", e.Error.Code)
+}
+
+// 下游哨兵原样透传（errors.Is 链）：模型 / KB 不存在 404，供应商忙 / 不可用 503。
+func TestExecuteRouteDownstreamSentinels(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code int
+		want string
+	}{
+		{"模型不存在（包装链）", fmt.Errorf("node reply: %w", providerapi.ErrModelNotFound), http.StatusNotFound, "MODEL_NOT_FOUND"},
+		{"KB 不存在", fmt.Errorf("node kb: %w", ragapi.ErrKnowledgeBaseNotFound), http.StatusNotFound, "KNOWLEDGE_BASE_NOT_FOUND"},
+		{"供应商忙", llm.ErrProviderBusy, http.StatusServiceUnavailable, "PROVIDER_BUSY"},
+		{"供应商不可用", llm.ErrProviderUnavailable, http.StatusServiceUnavailable, "PROVIDER_UNAVAILABLE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter(&fakeSvc{injected: tc.err})
+			w := doReq(t, r, http.MethodPost, "/api/v1/workflows/42/execute", `{"input":"x"}`)
+			assert.Equal(t, tc.code, w.Code, w.Body.String())
+			e := parseEnvelope(t, w.Body.Bytes())
+			require.NotNil(t, e.Error)
+			assert.Equal(t, tc.want, e.Error.Code)
+		})
+	}
 }

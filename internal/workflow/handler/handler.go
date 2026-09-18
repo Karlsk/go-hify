@@ -1,7 +1,6 @@
-// Package handler 是 workflow 模块的 HTTP 层：薄绑定——RegisterRoutes + 7 绑定函数，
-// 每个函数只调一个 api 接口方法；错误经 errors.Is 映射状态码（spec 04 §2.2 表），
-// respond 信封包装。execute 路由归执行器 spec，本期不挂（ErrWorkflowNotPublished
-// 的 503 映射已登记）。
+// Package handler 是 workflow 模块的 HTTP 层：薄绑定——RegisterRoutes + 8 绑定函数，
+// 每个函数只调一个 api 接口方法；错误经 errors.Is 映射状态码（spec 04 §2.2 表 + 执行
+// 引擎下游哨兵，spec 06），respond 信封包装。
 package handler
 
 import (
@@ -10,7 +9,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/respond"
+	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
+	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
@@ -20,16 +22,17 @@ type Handler struct{ svc workflowapi.WorkflowService }
 // New 创建 Handler。
 func New(svc workflowapi.WorkflowService) *Handler { return &Handler{svc: svc} }
 
-// RegisterRoutes 注册 workflows 一组 7 路由（/api/v1 前缀与 auth 中间件由组合根挂）。
+// RegisterRoutes 注册 workflows 一组 8 路由（/api/v1 前缀与 auth 中间件由组合根挂）。
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	g := rg.Group("/workflows")
-	g.POST("", h.create)              // 201 Created(detail)
-	g.GET("", h.list)                 // 200 OKWithOffset(items, page, page_size, total)
-	g.GET("/:id", h.get)              // 200 OK(detail)
-	g.PUT("/:id", h.update)           // 200 OK(detail)
-	g.DELETE("/:id", h.delete)        // 204 无响应体
-	g.POST("/:id/publish", h.publish) // 200 OK(summary)
-	g.POST("/:id/disable", h.disable) // 200 OK(summary)
+	g.POST("", h.create)                // 201 Created(detail)
+	g.GET("", h.list)                   // 200 OKWithOffset(items, page, page_size, total)
+	g.GET("/:id", h.get)                // 200 OK(detail)
+	g.PUT("/:id", h.update)             // 200 OK(detail)
+	g.DELETE("/:id", h.delete)          // 204 无响应体
+	g.POST("/:id/publish", h.publish)   // 200 OK(summary)
+	g.POST("/:id/disable", h.disable)   // 200 OK(summary)
+	g.POST("/:id/execute", h.execute)   // 200 OK(run result)，?trial=true 试运行（spec 06）
 }
 
 func (h *Handler) create(c *gin.Context) {
@@ -129,9 +132,31 @@ func (h *Handler) disable(c *gin.Context) {
 	respond.OK(c, s)
 }
 
-// failWorkflow 模块哨兵映射（spec 04 §2.2）：显式 errors.Is → 状态码 + code（= 哨兵
-// Error()）；ErrWorkflowNotPublished → 503 本期登记（execute 路由归执行器 spec）；
-// 其余走 FailFromSentinel（通用哨兵自动映射——VALIDATION_FAILED → 400 等——兜底 500）。
+// execute 执行工作流（spec 06 FR1）：两段绑定（:id 路径 + input body，update 同款）
+// → ?trial=true 透传试运行标记（仅字面 true 生效，O3）→ 同步拿结果一次返回。
+func (h *Handler) execute(c *gin.Context) {
+	var idReq workflowapi.GetWorkflowReq
+	if !respond.BindUri(c, &idReq) {
+		return
+	}
+	var req workflowapi.ExecuteWorkflowReq
+	req.ID = idReq.ID
+	if !respond.BindJSON(c, &req) {
+		return
+	}
+	req.Trial = c.Query("trial") == "true"
+	res, err := h.svc.Execute(c.Request.Context(), req)
+	if err != nil {
+		failWorkflow(c, err)
+		return
+	}
+	respond.OK(c, res)
+}
+
+// failWorkflow 模块哨兵映射（spec 04 §2.2 表 + spec 06 执行侧新增）：显式 errors.Is →
+// 状态码 + code（= 哨兵 Error()）。ErrWorkflowExecutionFailed → 500 环境限制类（O4）；
+// 下游哨兵（模型 / KB 不存在、供应商忙 / 熔断）原样透传 errors.Is 链命中；其余走
+// FailFromSentinel（通用哨兵自动映射——VALIDATION_FAILED → 400 等——兜底 500）。
 func failWorkflow(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, workflowapi.ErrWorkflowNotFound):
@@ -142,6 +167,16 @@ func failWorkflow(c *gin.Context, err error) {
 		respond.Fail(c, http.StatusConflict, workflowapi.ErrWorkflowInUse.Error(), err.Error())
 	case errors.Is(err, workflowapi.ErrWorkflowNotPublished):
 		respond.Fail(c, http.StatusServiceUnavailable, workflowapi.ErrWorkflowNotPublished.Error(), err.Error())
+	case errors.Is(err, workflowapi.ErrWorkflowExecutionFailed): // 500：环境限制类（O4 二分法）
+		respond.Fail(c, http.StatusInternalServerError, workflowapi.ErrWorkflowExecutionFailed.Error(), err.Error())
+	case errors.Is(err, providerapi.ErrModelNotFound): // 404：llm 节点 model_id 解析失败（透传）
+		respond.Fail(c, http.StatusNotFound, providerapi.ErrModelNotFound.Error(), err.Error())
+	case errors.Is(err, ragapi.ErrKnowledgeBaseNotFound): // 404：检索节点 KB 不存在（透传）
+		respond.Fail(c, http.StatusNotFound, ragapi.ErrKnowledgeBaseNotFound.Error(), err.Error())
+	case errors.Is(err, llm.ErrProviderBusy): // 503：bulkhead fail-fast（透传）
+		respond.Fail(c, http.StatusServiceUnavailable, llm.ErrProviderBusy.Error(), err.Error())
+	case errors.Is(err, llm.ErrProviderUnavailable): // 503：熔断打开（透传）
+		respond.Fail(c, http.StatusServiceUnavailable, llm.ErrProviderUnavailable.Error(), err.Error())
 	default:
 		respond.FailFromSentinel(c, err)
 	}

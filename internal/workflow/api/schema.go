@@ -379,6 +379,26 @@ type ListWorkflowsReq struct {
 // Validate 跨字段校验；当前无跨字段规则。
 func (r ListWorkflowsReq) Validate() error { return nil }
 
+// ExecuteWorkflowReq 执行请求（api_contract §5 冻结）：控制台与进程内调用方（chat）
+// 共用。ID 由 handler BindUri 后赋值（UpdateWorkflowReq 同款）；Trial 由 handler 从
+// query `?trial=true` 绑定（进程内调用方直传）；ConversationID / MessageID 是 chat
+// 触发时的调用方引用（弱引用落 run 行，HTTP 调用不传）。
+type ExecuteWorkflowReq struct {
+	ID             uint64  // 路径参数（handler 绑定）
+	Input          string  `json:"input" binding:"required,max=16384"` // 工作流入参 → vars["input"]（O1 拍板：单一 input，终形）
+	ConversationID *uint64 // chat 触发时的调用方引用（弱引用落 run 行；HTTP 调用不传）
+	MessageID      *uint64
+	Trial          bool // ?trial=true 试运行（O3）：放开 draft/disabled，状态机唯一例外
+}
+
+// Validate ID 兜底（防绕过 handler 的调用方）；input 格式归 binding tag。
+func (r ExecuteWorkflowReq) Validate() error {
+	if r.ID == 0 {
+		return fmt.Errorf("id 必填")
+	}
+	return nil
+}
+
 // ── 响应 Schema（api_contract §3 冻结）──
 
 // WorkflowSummarySchema 摘要（列表用，不带图）。
@@ -422,4 +442,26 @@ type WorkflowListResult struct {
 	Page     int
 	PageSize int
 	Total    int64
+}
+
+// ── 执行结果（api_contract §5 冻结，spec 06）──
+
+// RunResultSchema 一次执行的结果（非流式）：同步返回，呈现归调用方（控制台 respond
+// 信封一次返回；chat 拿到返回值自行决定推送粒度）。
+type RunResultSchema struct {
+	RunID      string           `json:"run_id"`     // workflow_runs.id（字符串化）；轨迹写入降级时置空（O7 ④：结果照返）
+	Status     string           `json:"status"`     // succeeded / failed
+	Output     string           `json:"output"`     // 终稿（end.output 渲染或末节点输出）
+	DurationMs int              `json:"duration_ms"`
+	NodeTrace  []NodeRunSummary `json:"node_trace"` // 节点轨迹摘要（key/type/status/耗时），明细查轨迹表
+}
+
+// NodeRunSummary 节点轨迹摘要（RunResultSchema.node_trace 元素；数组顺序即执行序，
+// 明细查 workflow_node_runs）。ErrorMsg 成功 = ""（空值约定）。
+type NodeRunSummary struct {
+	NodeKey    string `json:"node_key"`
+	NodeType   string `json:"node_type"`
+	Status     string `json:"status"` // succeeded / failed
+	DurationMs int    `json:"duration_ms"`
+	ErrorMsg   string `json:"error_msg"`
 }

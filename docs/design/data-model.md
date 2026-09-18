@@ -4,7 +4,7 @@
 
 ## 总览
 
-- **PostgreSQL（含 pgvector）**：约 15 张事实表，唯一持久化数据源。
+- **PostgreSQL（含 pgvector）**：约 20 张事实表，唯一持久化数据源。
 - **Redis-only**：预算 / 限流计数、配置缓存、语义缓存答案、登录 session——是状态/缓存，不建表。
 - 向量召回走 `chunks` 表的 pgvector 列（建表即建 HNSW 索引）。
 
@@ -27,6 +27,8 @@ erDiagram
     conversations ||--o{ messages : "多轮上下文"
     conversations ||--o{ executions : "调用日志"
     models ||--o{ executions : "记录模型"
+    workflows ||--o{ workflow_runs : "弱引用，无 FK（spec 06）"
+    workflow_runs ||--o{ workflow_node_runs : "节点轨迹（CASCADE）"
 ```
 
 ## 表清单（按模块）
@@ -63,6 +65,8 @@ erDiagram
 - `workflows` — 工作流主表（name 唯一、status 状态机、config 顶层 JSONB）
 - `workflow_nodes` — 节点（llm/knowledge_retrieval/condition/end，config 按类型密封）
 - `workflow_edges` — 边（source→target，condition 分支表达式）
+- `workflow_runs` — 执行轨迹（每次运行一行，spec 06）：append-only 收尾统一写、无 RUNNING 态；**弱引用 workflows（无 FK）**——workflow 删除后轨迹保留
+- `workflow_node_runs` — 节点执行轨迹（每节点一行，spec 06）：seq 是回放顺序唯一事实源；input/output 为截断摘要非 ctx 全量快照
 
 ### platform/logging
 - `executions` — 运行日志（每次 LLM 调用：输入/输出/工具链/token/耗时/供应商/模型/错误类，排障唯一线索）
@@ -94,6 +98,8 @@ executions N──1 models / providers             # 记录调用的是哪家哪
 workflows 1──N workflow_nodes                  # 一个工作流多个节点（ON DELETE CASCADE）
 workflows 1──N workflow_edges                  # 一个工作流多条边（ON DELETE CASCADE）
 workflows ──(LLM 节点调用)──▶ executions        # 工作流节点的调用也进 executions
+workflows 1──N workflow_runs                   # 运行轨迹（弱引用：无 FK，workflow 删除后轨迹保留，spec 06）
+workflow_runs 1──N workflow_node_runs          # 节点轨迹（ON DELETE CASCADE）
 ```
 
 ## Redis-only（不建 PG 表）
@@ -113,7 +119,7 @@ workflows ──(LLM 节点调用)──▶ executions        # 工作流节点�
 | agents, agent_tools, agent_knowledge_bases | agent | `agent/service/model.go` |
 | knowledge_bases, documents, chunks | rag | `rag/service/model.go` |
 | conversations, messages | chat | `chat/service/model.go` |
-| workflows, workflow_nodes, workflow_edges | workflow | `workflow/service/model.go` |
+| workflows, workflow_nodes, workflow_edges, workflow_runs, workflow_node_runs | workflow | `workflow/service/model.go` |
 | executions | platform/logging | `platform/logging/model.go` |
 
 > 跨模块数据需求一律在 service 层分次查询后组装，禁止 JOIN 他模块的表（见 CLAUDE.md《跨模块调用规则》禁止清单）。
