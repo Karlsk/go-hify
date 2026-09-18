@@ -2,6 +2,7 @@
 
 > 状态：**接口契约定稿，未实现**（2026-09-15）；前置数据模型见 [db_model.md](./db_model.md)（三表结构 / 图校验 / 状态机均已定稿）。实现时同步：CLAUDE.md 错误码表新增 `WORKFLOW_NAME_CONFLICT` / `WORKFLOW_NOT_PUBLISHED`（资源清单已含 `/workflows` 与 `/workflows/{id}/execute` 代表路由，无需改）。
 > 本文锁定 HTTP 契约（路由 / 请求响应 / 错误）与 service-store 分层约定；execute 的引擎细节（上下文、模板求值、路由、超时、executions 记录）另行执行器 spec，本文只锁其路由、前置检查与错误。
+> 〔2026-09-17 追加、**2026-09-18 随 spec 06 冻结**：§5 execute 执行契约（ExecuteWorkflowReq / RunResultSchema / 试运行 / 错误语义 / per-node 进度原则）与 §8 错误码 `WORKFLOW_EXECUTION_FAILED` 均为定稿，执行语义见 [impl_spec_06_execution_engine.md](./impl_spec_06_execution_engine.md)。〕
 
 ## 1. 路由总表
 
@@ -168,10 +169,37 @@ POST /api/v1/workflows
 - 状态迁移是单条 `UPDATE ... WHERE status IN (...)`（`Store.UpdateStatus` 返回是否发生迁移），不做 get-then-set 竞态窗口。
 - 两者均删缓存 key（status 在缓存对象里）。
 
-### POST execute（仅锁边界，引擎另有 spec）
+### POST execute（契约已冻结，2026-09-18 随 spec 06）
 - 前置：存在且 `status = published`；否则 503 `ErrWorkflowNotPublished`（文案区分 draft / disabled）。
-- 加载整图快照（缓存或三查）→ 执行器（后续 spec）；非流式 JSON 一次性返回，总时长受 nginx 读超时（300s）约束。
+- 加载整图快照（缓存或三查）→ 执行器（spec 06）；非流式 JSON 一次性返回，总时长受 nginx 读超时（300s）约束。
 - chat 模块触发工作流执行复用本接口语义（跨模块走 workflow api，不重复建设）。
+
+〔2026-09-17 增补、2026-09-18 随 spec 06 冻结；执行语义见 impl_spec_06〕
+
+**定稿形状**（`workflow/api/schema.go` 增补；命名沿 `GetWorkflowReq` 惯例）：
+
+```go
+// ExecuteWorkflowReq 控制台与进程内调用方（chat）共用。
+type ExecuteWorkflowReq struct {
+    ID             uint64  // 路径参数（handler 绑定）
+    Input          string  `json:"input" binding:"required,max=16384"` // 工作流入参 → vars["input"]（O1 拍板：单一 input，终形）
+    ConversationID *uint64 // chat 触发时的调用方引用（弱引用落 run 行；HTTP 调用不传）
+    MessageID      *uint64
+}
+
+// RunResultSchema 一次执行的结果（非流式）。
+type RunResultSchema struct {
+    RunID      string           `json:"run_id"`      // workflow_runs.id（字符串化）；轨迹写入降级时置空（O7 ④ 拍板：结果照返）
+    Status     string           `json:"status"`      // succeeded / failed
+    Output     string           `json:"output"`      // 终稿（end.output 渲染或末节点输出）
+    DurationMs int              `json:"duration_ms"`
+    NodeTrace  []NodeRunSummary `json:"node_trace"`  // 节点轨迹摘要（key/type/status/耗时），明细查轨迹表
+}
+```
+
+- **试运行（O3 拍板）**：`?trial=true` 放开 draft/disabled 执行（状态机唯一例外，正式路径 503 语义不变）；试运行照常落 runs（`is_trial = true`）与 executions（成本真实发生）。`ExecuteWorkflowReq` 增 `Trial bool`（HTTP 侧 query 绑定，进程内调用方直传）。
+- **错误语义（O4 已拍板二分法）**：下游哨兵（`MODEL_NOT_FOUND` / `PROVIDER_BUSY` / `PROVIDER_UNAVAILABLE` / `RATE_LIMITED` …）原样透传，handler 按既有错误表映射；引擎自身错误二分——**图缺陷类**（condition 无命中出边、模板缺失变量兜底、tool 节点未支持）→ `VALIDATION_FAILED` 400；**环境限制类**（api 节点 SSRF 拦截、总时长超限）→ 新哨兵 `workflowapi.ErrWorkflowExecutionFailed`（`WORKFLOW_EXECUTION_FAILED`，500，已进 §8 表）；哨兵本体随实现落 `workflow/api/errors.go` 并同步 CLAUDE.md 错误码表。失败节点定位统一靠错误 message 的 `node <key>:` 前缀。
+- **per-node 进度原则（讨论结论）**：未来 chat 侧 per-node 流式走**同步回调推送**——引擎留回调注入点，chat 在 execute 调用栈内收到回调即推 SSE；**禁止轮询轨迹表状态**——chat 本就阻塞在调用上，轮询等于拿 DB 当消息队列，还得为它造 RUNNING 可变态（db_model 决策 #14 已否决）。回调接缝的具体形态（SSE 事件类型、节流）归 chat 触发 spec（spec 05 E1）。
 
 ## 6. service / store 分层约定
 
@@ -206,7 +234,10 @@ type Store interface {
 | `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound` | 详情 / 更新 / 删除 / 状态动作 / 执行的目标不存在 |
 | `WORKFLOW_NAME_CONFLICT` | 409 | `workflowapi.ErrWorkflowNameConflict` | POST / PUT 撞 `uq_workflows_name`（23505 翻译） |
 | `WORKFLOW_NOT_PUBLISHED` | 503 | `workflowapi.ErrWorkflowNotPublished` | execute 时 draft / disabled |
+| `WORKFLOW_EXECUTION_FAILED` | 500 | `workflowapi.ErrWorkflowExecutionFailed` | execute 引擎环境限制类错误：api 节点 SSRF 拦截 / 工作流总时长超限（O4 二分法，spec 06 冻结新增；图缺陷类走 `VALIDATION_FAILED` 既有行） |
 | `VALIDATION_FAILED` | 400 | `errs.ErrValidationFailed` | 绑定 / 图校验失败，`details` 带节点 key 定位 |
+
+> execute 错误语义（O4 二分法，随 spec 06 冻结）：下游哨兵（`MODEL_NOT_FOUND` / `PROVIDER_BUSY` / `PROVIDER_UNAVAILABLE` / `RATE_LIMITED` …）透传，映射上表现有行；图缺陷类走 `VALIDATION_FAILED` 既有行。
 
 ## 9. 前端对接要点
 
@@ -214,3 +245,4 @@ type Store interface {
 - execute 按钮仅 published 可用；draft/disabled 点执行收到 503 后提示发布。
 - config 对象原样回显，前端一期用 JSON 文本编辑节点配置，不需理解各类型内部结构。
 - 分页用 `page / page_size / total`（Element Plus 原生适配）；创建 / 更新成功返回的 detail 直接刷新页面数据。
+- execute 响应（已冻结，随 spec 06）：`RunResultSchema`（run_id / status / output / duration_ms / node_trace）——`node_trace` 供执行测试页展示各节点耗时与失败定位；run_id 在轨迹写入降级时为空串（O7 ④）。

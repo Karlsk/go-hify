@@ -1,6 +1,6 @@
 # Workflow 模块数据模型与设计（db_model）
 
-> 状态：**设计定稿，未落库**（2026-09-15，四轮讨论收敛）：三表结构（workflows / workflow_nodes / workflow_edges）、分支语义（condition 节点求值 + 出边存匹配值）、status 三态（draft/published/disabled）均经用户拍板。迁移 `00016_workflow_schema.sql` 与 service model 已随 impl_spec_01 落地（2026-09-15，含 00006 旧单表替换修订，见 §3 注记）；2026-09-16 追加节点类型 `api` / `end`（迁移 `00017_workflow_node_type_widen.sql` 加宽 CHECK，见 §3/§4 注记与决策 #12）。api / store / handler 待 spec 02-04；全部落地后同步 [docs/design/data-model.md](../../design/data-model.md)、CLAUDE.md 索引地图与错误码表（新增 `WORKFLOW_NOT_PUBLISHED` / `WORKFLOW_NAME_CONFLICT`）。
+> 状态：**设计定稿，未落库**（2026-09-15，四轮讨论收敛）：三表结构（workflows / workflow_nodes / workflow_edges）、分支语义（condition 节点求值 + 出边存匹配值）、status 三态（draft/published/disabled）均经用户拍板。迁移 `00016_workflow_schema.sql` 与 service model 已随 impl_spec_01 落地（2026-09-15，含 00006 旧单表替换修订，见 §3 注记）；2026-09-16 追加节点类型 `api` / `end`（迁移 `00017_workflow_node_type_widen.sql` 加宽 CHECK，见 §3/§4 注记与决策 #12）。api / store / handler 待 spec 02-04；全部落地后同步 [docs/design/data-model.md](../../design/data-model.md)、CLAUDE.md 索引地图与错误码表（新增 `WORKFLOW_NOT_PUBLISHED` / `WORKFLOW_NAME_CONFLICT`）。2026-09-17 追加 §12 执行轨迹表与决策 #14，**2026-09-18 随 spec 06 冻结**（[impl_spec_06_execution_engine.md](./impl_spec_06_execution_engine.md)）——§12 与决策 #14/#15 与主线同等效力；同日 §7 图校验清单增条 11（R10 模板引用校验，O2 拍板）。
 > 本文记录 workflow 模块数据模型与核心设计的最终结论与决策理由；表归属总览见 data-model.md，建表通用规范见 CLAUDE.md《数据库规范》。
 
 ## 1. 概念模型：一份 DSL 拆三张表
@@ -154,6 +154,8 @@ DROP TABLE IF EXISTS workflows;
 | 11 | **节点 ≤ 50、连线 ≤ 100**（binding 封顶） | 防巨图拖垮校验与执行；一期线性+分支用不到更多 |
 | 12 | **节点类型加宽 `api` / `end`**（2026-09-16 拍板） | `api`：一次性出站调用不值得注册 MCP——url/method/headers/body/timeout_sec/ssl_verify 完整版字段，SSRF 防护与 TLS 配置归执行器；`ssl_verify` 默认 **false**（跳过证书校验）——内网自签端点是主要场景，显式默认值换配置省心，风险已知悉。`end`：显式终止 + `output` 模板（`buildOutput`），**可选不强求**——无出边 = 隐式结束的既有语义保留（向后兼容，既有图零改动），但 end 节点本身禁出边（§7 条 10）。拒绝「强制每图必有 end」：破坏既有图与示例，收益仅是显式性 |
 | 13 | **agent → workflow 绑定：`agents.workflow_id` 可空真列 + `fk_agents_workflow` ON DELETE RESTRICT**（2026-09-17 拍板，spec 05） | 五项拍板：A=RESTRICT（被绑定时挡删 workflow → 409 `WORKFLOW_IN_USE`，nodes/edges 随删除 CASCADE）；B=绑定期不校验发布态、B2=执行读实时版本（无发布快照，编辑立即生效）——均由消费方（chat/执行器）经 workflowapi 在执行期把关；C=既有 Create/PUT 字段化 `workflow_id`（PUT 全量语义：缺省/null = 解绑）；C2=不与任何现有字段互斥（叠加语义）。双向哨兵：agent 侧 23503 按约束名分发（`fk_agents_workflow` → `agentapi.ErrWorkflowNotFound` 404，与 workflowapi 同码各持一份、KB 先例；model 侧约束名/无约束名兜底 → `ErrModelNotFound`）——依赖清单只允许 workflow → agent，FK 是绑定期 workflow 存在性的唯一校验。拒绝 service 预检存在性——依赖方向不容 agent import workflowapi，且 FK 已是原子兜底 |
+| 14 | **执行轨迹两层表 `workflow_runs` + `workflow_node_runs`**（2026-09-17 拍板要建，可追溯优先级最高；schema 已随 spec 06 冻结，§12） | ① **append-only 收尾统一写**——执行结束（成功/失败）一次性落库，无 `RUNNING` 可变态、无逐节点写库事务（同步执行内存即真相，落库只为追溯；拒绝"每节点前后 UPDATE status"的写放大与僵尸 RUNNING 清理问题）；② **弱引用零跨模块 FK**——`workflow_id` 与 chat 触发的 `conversation_id` / `message_id` 都不建 FK（executions 先例：保留期日志表不能反过来阻碍业务删除）；run 行冗余 `workflow_name` 快照，workflow 删除后轨迹仍可读；唯一 FK 是 `node_runs.run_id`（同模块真子表 CASCADE）；③ **seq 排序键** `UNIQUE (run_id, seq)`——执行顺序的唯一事实源，不靠 id 插入序近似；④ **`started_at` 记执行起点**（`created_at` = 收尾写入时刻，差值即耗时）；⑤ 命名 `workflow_node_runs`（弃 `workflow_steps`，与 run 成名词链）；⑥ **PG 方言**（IDENTITY / timestamptz / text+CHECK / jsonb），拒绝 MySQL `AUTO_INCREMENT` / `DATETIME` 移植稿 |
+| 15 | **R10 保存期模板引用校验**（2026-09-17 O2 拍板、随 spec 06 冻结） | 模板 `{{var}}` 引用 ∈ {input} ∪ 该节点祖先 node_key——错字在保存时即 400（执行期 strict 兜底不变）。拒绝只靠运行时报错（n8n 静默 undefined 教训：错字被吞、输出莫名变差难排查）。规则落 §7 条 11 |
 
 ## 6. 状态机与生命周期
 
@@ -191,6 +193,7 @@ POST/PUT /workflows  {name, start_node_key, nodes[], edges[]}
 8. 节点 1..50、边 0..100（binding 封顶）；
 9. jsonb 内引用存在性经下游 api 校验：model_id→provider、knowledge_base_id→rag；tool_id 推迟到执行器（决策 #9 修订，mcp api 未建）。
 10. end 节点不得有出边（显式终止；不强制每图必有 end——无出边 = 隐式结束仍合法，决策 #12）。
+11. 模板引用校验（R10，2026-09-17 O2 拍板、随 spec 06 冻结同步进本清单）：llm.prompt / api.url + headers + body / end.output / condition.expression 内 `{{var}}` 引用名 ∈ {input} ∪ 该节点祖先 node_key 集（R7 无环 ⇒ DAG 祖先可算；整图提交不存在先引用后建节点的窗口）；condition 比较式右侧 `'literal'` 是字面量非引用、不查。违例 → VALIDATION_FAILED 400，details 带节点 key 与引用名（执行期 strict 兜底不变）。
 
 ## 8. Go 类型安全解析
 
@@ -349,4 +352,116 @@ default:
 - 可视化拖拽编排（JSON 配置替代，CLAUDE.md 产品定位）；表结构本身不阻碍将来上画布（节点/连线两概念天然映射）；
 - 工作流级定时触发、事件触发——execute 只被控制台或 chat 调用。
 
-落库时的同步项：`docs/design/data-model.md`（workflow 段单表改三表 + ER 图加两条 CASCADE）、CLAUDE.md 索引地图与错误码表。
+## 12. 执行轨迹表：workflow_runs / workflow_node_runs（已冻结，spec 06）
+
+> 状态：**已冻结**（2026-09-18，随 spec 06 [impl_spec_06_execution_engine.md](./impl_spec_06_execution_engine.md)；拍板要点见决策 #14）——DDL 为定稿，与本文主线同等效力。迁移号预排 **00019**（00018 已被 spec 05 agent 绑定占用；动手前 `make migrate-status` 确认 18 条 applied）。
+
+两层结构，对齐 Dify `workflow_runs` / `workflow_node_executions` 的分层——run 回答"这次执行"，node_run 回答"走到第几步、错在哪一步"：
+
+```
+workflow_runs         每次运行一行：跑的哪个图、谁触发、进出什么、成没成、多久
+workflow_node_runs    每个节点一行：执行序号 seq、节点 key/type、入出参摘要、错误、耗时
+```
+
+```sql
+-- +goose Up
+-- 执行轨迹两层表（spec 06）：append-only 收尾统一写——执行结束一次性落库，
+-- 无 RUNNING 可变态（决策 #14）。
+CREATE TABLE workflow_runs (
+    id              bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    workflow_id     bigint      NOT NULL,               -- 弱引用 workflows(id)，不建 FK（见设计注记）
+    workflow_name   text        NOT NULL DEFAULT '',    -- 名称快照：workflow 删除后轨迹仍可读
+    trigger_source  text        NOT NULL CHECK (trigger_source IN ('console','chat')),
+    is_trial        boolean     NOT NULL DEFAULT false,  -- 试运行标记（?trial=true，O3）：区分测试与真实流量
+    conversation_id bigint,                              -- chat 触发时的弱引用（可空；console 为 NULL）
+    message_id      bigint,                              -- 同上
+    trace_id        text        NOT NULL DEFAULT '',    -- 对齐 platform/traceid 日志链
+    status          text        NOT NULL CHECK (status IN ('succeeded','failed')),
+    input           jsonb       NOT NULL DEFAULT '{}',  -- 执行入参（截断后）
+    output          text        NOT NULL DEFAULT '',    -- 终稿（截断后）
+    error_node      text        NOT NULL DEFAULT '',    -- 失败节点 key（成功 = ''）
+    error_msg       text        NOT NULL DEFAULT '',
+    duration_ms     int         NOT NULL DEFAULT 0,
+    started_at      timestamptz NOT NULL,               -- 执行起点；created_at = 收尾写入时刻
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+-- 真实查询路径：按 workflow 列运行历史（最新优先）
+CREATE INDEX idx_workflow_runs_wf_created ON workflow_runs (workflow_id, created_at DESC);
+
+CREATE TABLE workflow_node_runs (
+    id          bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    run_id      bigint      NOT NULL REFERENCES workflow_runs (id) ON DELETE CASCADE,
+    seq         int         NOT NULL,                   -- 执行序号：回放顺序唯一事实源（UNIQUE 兜底）
+    node_key    text        NOT NULL,
+    node_type   text        NOT NULL,
+    status      text        NOT NULL CHECK (status IN ('succeeded','failed')),
+    input       jsonb       NOT NULL DEFAULT '{}',      -- 本节点入参摘要（截断），非 ctx 全量快照
+    output      jsonb       NOT NULL DEFAULT '{}',      -- 本节点自己的输出（截断）
+    error_msg   text        NOT NULL DEFAULT '',
+    duration_ms int         NOT NULL DEFAULT 0,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (run_id, seq)
+);
+
+-- 真实查询路径：按 run 取全部节点轨迹（seq 升序回放）
+CREATE INDEX idx_workflow_node_runs_run_id ON workflow_node_runs (run_id);
+
+COMMENT ON TABLE  workflow_runs IS '工作流执行轨迹（每次运行一行）：append-only 收尾统一写，无 RUNNING 态；弱引用 workflows（无 FK，workflow 删除后轨迹保留）';
+COMMENT ON COLUMN workflow_runs.workflow_id IS '弱引用 workflows.id（不建 FK——executions 先例：保留期日志表不阻碍业务删除；配 workflow_name 快照保可读）';
+COMMENT ON COLUMN workflow_runs.conversation_id IS 'chat 触发时弱引用 conversations.id（可空，无 FK——workflow 不得依赖 chat）；console 触发为 NULL';
+COMMENT ON COLUMN workflow_runs.is_trial IS '试运行（execute ?trial=true，draft/disabled 也可执行）：运行历史过滤测试与真实流量';
+COMMENT ON COLUMN workflow_runs.started_at IS '执行起点；created_at 是收尾写入时刻，差值即 duration_ms';
+COMMENT ON TABLE  workflow_node_runs IS '工作流节点执行轨迹（每节点一行）：seq 是执行顺序唯一事实源；input/output 为截断摘要，非 ctx 全量快照';
+
+-- +goose Down
+DROP TABLE IF EXISTS workflow_node_runs;
+DROP TABLE IF EXISTS workflow_runs;
+```
+
+设计注记：
+
+- **run → workflow 不建 FK**：executions 先例（`conversation_id` / `model_id` 无 FK——"保留期日志表不能反过来阻碍会话/模型删除"）。workflow 硬删是既有语义（nodes/edges CASCADE），轨迹表若 RESTRICT 会挡删、若 CASCADE 会连历史一起消失——弱引用 + `workflow_name` 快照两头都不牺牲：workflow 删除后 run 行保留且仍可读。
+- **node_runs → run 建 FK CASCADE**：同模块真子表（轨迹行离开 run 无意义），真子表 CASCADE 是仓内约定；这是两张表之间唯一的 FK。
+- **无 `RUNNING` / 无 `finished_at`**：同步执行下进程内存即真相，收尾一次写完；加 RUNNING 就得处理"进程崩了永远 RUNNING"的僵尸态清理，而一期没有任何消费方（进度推送走同步回调，spec 06 §4.3）。
+- **seq 而非按 id 排序**：批量 INSERT 的 id 顺序与执行序一致只是实现巧合不是语义；显式 seq 把"执行顺序"写进数据，回放不依赖隐式约定，`UNIQUE (run_id, seq)` 兜底防重。
+- **截断与保留（2026-09-18 拍板，O7）**：`runs.output` / `node_runs.input` / `node_runs.output` 单值截断 **16KB**，超出截断并在 jsonb 内标 `truncated: true`（回放时分清"本来就这么短"）；slog 节点轨迹截 1KB。保留期 = knob `WORKFLOW_RUNS_RETENTION_DAYS` **默认 365 天**——新增后台批量 DELETE 任务（workflow 模块内 goroutine，组合根启动、随优雅关停，对齐 platform/logging PartitionMaintainer 先例；非分区表按 `created_at` 批量删，规模上来后加 `BRIN (created_at)`）。增长远慢于 executions（只有工作流执行写、chat 直连 LLM 不写），一期不分区。
+
+Go model（`service/model.go` 追加，append-only 形态 embed `db.BaseAppendOnly`；model 无 json tag，序列化归 api/schema）：
+
+```go
+type WorkflowRun struct {
+    db.BaseAppendOnly
+    WorkflowID     uint64 // 弱引用 workflows.id（无 FK）
+    WorkflowName   string // 快照
+    TriggerSource  string // console / chat
+    IsTrial        bool   // 试运行标记（O3）：区分测试与真实流量
+    ConversationID *uint64 // chat 触发时填；console 为 nil（弱引用，无 FK）
+    MessageID      *uint64
+    TraceID        string
+    Status         string // succeeded / failed
+    Input          string // jsonb 文本（截断后）
+    Output         string
+    ErrorNode      string // 失败节点 key，成功 = ""
+    ErrorMsg       string
+    DurationMs     int
+    StartedAt      time.Time // 执行起点（created_at = 收尾写入时刻）
+}
+
+type WorkflowNodeRun struct {
+    db.BaseAppendOnly
+    RunID      uint64 // FK CASCADE（同模块真子表）
+    Seq        int    // 执行序号
+    NodeKey    string
+    NodeType   string
+    Status     string // succeeded / failed
+    Input      string // jsonb 文本（截断摘要，非 ctx 快照）
+    Output     string
+    ErrorMsg   string
+    DurationMs int
+}
+```
+
+store 侧按 api_contract §6 的整图式方法模式增一个：`CreateRun(ctx, run *WorkflowRun, nodeRuns []WorkflowNodeRun) error`——一事务两批多 VALUES INSERT（run 1 行 + node_runs N 行），由执行器收尾统一调用。
+
+落库时的同步项：`docs/design/data-model.md`（workflow 段单表改三表 + ER 图加两条 CASCADE）、CLAUDE.md 索引地图与错误码表；迁移 00019 合入时另加：data-model.md 增两表与弱引用关系、CLAUDE.md 索引地图（`workflow_runs` / `workflow_node_runs` 行）。
