@@ -312,4 +312,6 @@ CREATE TABLE executions (
 
 **后续批次：** budget → mcp 模块 → chat 工具循环 → rag 模块 → RAG 注入 → workflow。
 
+**接线进展（2026-09-20）：** RAG 注入（spec 05）与 workflow 管道（spec 07 E1 形态——绑定 agent 的消息确定性先过工作流，终稿即本轮 assistant 回复，usage 全零 / finish_reason="workflow" / 引用恒空）已接线；chat 依赖方向现为 chat → agent(api) + provider(api) + rag(api) + workflow(api) + platform，上方「不 import rag / workflow」与后续批次清单为 v1 时点快照。管道行为契约见 [workflow/impl_spec_07_chat_pipeline.md](../workflow/impl_spec_07_chat_pipeline.md)；剩余批次收敛为 budget → mcp 模块 → chat 工具循环。
+
 **验收形态：** LLM + system prompt 的 Agent 端到端可聊（建 provider → 启用模型 → 建 Agent → 建会话 → 流式对话），executions 可查 token / 耗时；手测需真实上游（真实 key 或本地 Ollama——`openai_compatible` 因 eino BaseURL 限制无法指向 mock 桩，见 §4）。

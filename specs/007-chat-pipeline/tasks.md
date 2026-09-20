@@ -22,7 +22,7 @@
 
 **Purpose**: 开工基线确认——本篇零新文件、零新依赖、零迁移，无结构可建
 
-- [ ] T001 基线门禁确认：`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿；`ls migrations/` 确认 19 条在场（PG 未起时 `make migrate-status` 条数核对记入人工项——本篇零迁移，00020 留给 spec 08 不占）
+- [x] T001 基线门禁确认：`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿；`ls migrations/` 确认 19 条在场（PG 未起时 `make migrate-status` 条数核对记入人工项——本篇零迁移，00020 留给 spec 08 不占）
 
 **Checkpoint**: 基线干净，可开工
 
@@ -32,8 +32,8 @@
 
 **Purpose**: 全部故事的共用前置——service 接口缝 + 装配拆半（先于任何管道行为）
 
-- [ ] T002 internal/chat/service/service.go 增 `workflowExecutor` 小接口（单方法 `Execute(ctx context.Context, req workflowapi.ExecuteWorkflowReq) (*workflowapi.RunResultSchema, error)`，放既有小接口 type block，agentGetter 等同款形态，research.md D2）+ `chatService` 增 `workflows` 字段 + `New` 尾参增 `workflows workflowExecutor`（既有六参位次不动，research.md D6）；**同任务**改 internal/app/server.go：`chatsvc.New(...)` 注入 `workflowSvc`（既有变量直传）、删除「chat 本期不消费 workflow，触发接线归后续 chat spec」TODO 注释、chat 依赖方向注释补 `chat → workflow`——两文件必须同任务（New 签名变更不同步 server.go 会破编译，任务收口门禁必须绿）
-- [ ] T003 internal/chat/service/turn.go `setupTurn` 拆半（research.md D1，O8 拍板的最小实现）：拆为 `setupConvAgent`（getOwnedConversation → agents.Get → Enabled 检查，产出 conv + agent 前半）与 `setupLLMClient`（ModelID parse 脏数据防御 → ResolveLLMConfig → clients.Client，补全后半）；`llmSetup` struct 保留；原路径 runTurn 依次调两段——行为等价重构，既有 turn_test.go 全绿即证（REFACTOR 于既有测试保护下，零行为变更）
+- [x] T002 internal/chat/service/service.go 增 `workflowExecutor` 小接口（单方法 `Execute(ctx context.Context, req workflowapi.ExecuteWorkflowReq) (*workflowapi.RunResultSchema, error)`，放既有小接口 type block，agentGetter 等同款形态，research.md D2）+ `chatService` 增 `workflows` 字段 + `New` 尾参增 `workflows workflowExecutor`（既有六参位次不动，research.md D6）；**同任务**改 internal/app/server.go：`chatsvc.New(...)` 注入 `workflowSvc`（既有变量直传）、删除「chat 本期不消费 workflow，触发接线归后续 chat spec」TODO 注释、chat 依赖方向注释补 `chat → workflow`——两文件必须同任务（New 签名变更不同步 server.go 会破编译，任务收口门禁必须绿）
+- [x] T003 internal/chat/service/turn.go `setupTurn` 拆半（research.md D1，O8 拍板的最小实现）：拆为 `setupConvAgent`（getOwnedConversation → agents.Get → Enabled 检查，产出 conv + agent 前半）与 `setupLLMClient`（ModelID parse 脏数据防御 → ResolveLLMConfig → clients.Client，补全后半）；`llmSetup` struct 保留；原路径 runTurn 依次调两段——行为等价重构，既有 turn_test.go 全绿即证（REFACTOR 于既有测试保护下，零行为变更）
 
 **Checkpoint**: 接口缝与拆半就位、编译绿、既有测试零回归；三个故事可开工
 
@@ -47,12 +47,12 @@
 
 ### Tests for User Story 1（先写、先跑红）
 
-- [ ] T004 [US1] internal/chat/service/doubles_test.go 增 `workflowExecutor` stub（内嵌接口、记录 Execute 入参与收到时的 ctx，doubles 既有风格）+ internal/chat/service/turn_test.go 增管道契约用例：绑定 agent（WorkflowID="42"）发消息——Execute 入参断言（ID=42 / Input=req.Content / ConversationID=&conv.ID / MessageID=触发 user 消息 id / Trial=false）；user 消息在 Execute 调用前已落库；首条消息标题回填（conv.Title=="" 时按 user 内容回填，位置语义同原路径）；流式模式事件序列恰为 delta(终稿整段) → done（usage 全零、finish_reason="workflow"、done 不带 content、无 citations 事件）；一次输出模式 reply 全字段（Content=终稿 / Usage 全零 / FinishReason="workflow" / Citations=[] / MessageID=assistant 行 id 字符串化）
-- [ ] T005 [US1] internal/chat/service/turn_test.go 增守护用例：未绑 agent（WorkflowID=nil）→ stub Execute 不被调（原路径零改动守点，模型循环照常）；agent 模型配置失效（ModelID 脏数据 / ResolveLLMConfig 返回哨兵）→ 管道照常执行到终稿（模型解析不发生，O8）；agent.WorkflowID 为非数字字符串 → errs.ErrInternal 包装返回（errors.Is 可判，同 ModelID 既有处理形态）
+- [x] T004 [US1] internal/chat/service/doubles_test.go 增 `workflowExecutor` stub（内嵌接口、记录 Execute 入参与收到时的 ctx，doubles 既有风格）+ internal/chat/service/turn_test.go 增管道契约用例：绑定 agent（WorkflowID="42"）发消息——Execute 入参断言（ID=42 / Input=req.Content / ConversationID=&conv.ID / MessageID=触发 user 消息 id / Trial=false）；user 消息在 Execute 调用前已落库；首条消息标题回填（conv.Title=="" 时按 user 内容回填，位置语义同原路径）；流式模式事件序列恰为 delta(终稿整段) → done（usage 全零、finish_reason="workflow"、done 不带 content、无 citations 事件）；一次输出模式 reply 全字段（Content=终稿 / Usage 全零 / FinishReason="workflow" / Citations=[] / MessageID=assistant 行 id 字符串化）
+- [x] T005 [US1] internal/chat/service/turn_test.go 增守护用例：未绑 agent（WorkflowID=nil）→ stub Execute 不被调（原路径零改动守点，模型循环照常）；agent 模型配置失效（ModelID 脏数据 / ResolveLLMConfig 返回哨兵）→ 管道照常执行到终稿（模型解析不发生，O8）；agent.WorkflowID 为非数字字符串 → errs.ErrInternal 包装返回（errors.Is 可判，同 ModelID 既有处理形态）
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] internal/chat/service/turn.go runTurn 管道分支（impl_spec_07 §4.1 伪代码直译，冻结契约逐字保真）：`setupConvAgent` 后判 `agent.WorkflowID != nil` → parseUint（脏数据 → errs.ErrInternal 包装）→ user 消息落库 → 首条消息标题回填 → `s.workflows.Execute(ctx, ExecuteWorkflowReq{ID, Input: req.Content, ConversationID: &conv.ID, MessageID: &userMsg.ID, Trial: false})`（错误先 `return nil, err`——translateWorkflowError 于 T009 落位后替换出口）→ `persistAssistant(res.Output, citations=[])`（失败仅 WARN 不阻断）→ TouchConversation（失败仅 WARN）→ 流式 `emit(DeltaEvent(res.Output))` + `emit(DoneEvent(assistant.ID, Usage{}, "workflow"))`（emit 失败静默收尾）/ 一次输出返回 reply（Content=终稿 / Usage{0,0} / FinishReason="workflow" / Citations=[]）；替代语义——buildSystemPrompt / RAG 检索 / 模型循环不进入管道路径；未绑定走原路径两段装配零改动
+- [x] T006 [US1] internal/chat/service/turn.go runTurn 管道分支（impl_spec_07 §4.1 伪代码直译，冻结契约逐字保真）：`setupConvAgent` 后判 `agent.WorkflowID != nil` → parseUint（脏数据 → errs.ErrInternal 包装）→ user 消息落库 → 首条消息标题回填 → `s.workflows.Execute(ctx, ExecuteWorkflowReq{ID, Input: req.Content, ConversationID: &conv.ID, MessageID: &userMsg.ID, Trial: false})`（错误先 `return nil, err`——translateWorkflowError 于 T009 落位后替换出口）→ `persistAssistant(res.Output, citations=[])`（失败仅 WARN 不阻断）→ TouchConversation（失败仅 WARN）→ 流式 `emit(DeltaEvent(res.Output))` + `emit(DoneEvent(assistant.ID, Usage{}, "workflow"))`（emit 失败静默收尾）/ 一次输出返回 reply（Content=终稿 / Usage{0,0} / FinishReason="workflow" / Citations=[]）；替代语义——buildSystemPrompt / RAG 检索 / 模型循环不进入管道路径；未绑定走原路径两段装配零改动
 
 **Checkpoint**: US1 独立可测——管道契约用例全绿、未绑零回归、全量门禁绿
 
@@ -66,13 +66,13 @@
 
 ### Tests for User Story 2（先写、先跑红）
 
-- [ ] T007 [P] [US2] internal/chat/service/turn_test.go 增 translateWorkflowError 用例（research.md D3 形态）：workflowapi.ErrWorkflowNotPublished / errs.ErrValidationFailed（message 带 `node <key>:` 前缀）/ workflowapi.ErrWorkflowExecutionFailed / workflowapi.ErrWorkflowNotFound / providerapi.ErrModelNotFound 各一例——哨兵本体原样返回（errors.Is 全程可判、node 前缀 message 与错误链保真）；非哨兵错误（如 store 层 DB 错误）→ `%w` 上下文包装（"workflow execute: ..." 语义，内层错误仍可 unwrapped）
-- [ ] T008 [P] [US2] internal/chat/handler/handler_test.go 增 failChat 用例（httptest，stub svc 返回各哨兵）：ErrWorkflowNotPublished → 503 `WORKFLOW_NOT_PUBLISHED`；errs.ErrValidationFailed → 400 `VALIDATION_FAILED` 且 message 透传 `node <key>:` 前缀（经 FailFromSentinel 既有分支，零新码）；ErrWorkflowExecutionFailed → 500 `WORKFLOW_EXECUTION_FAILED`；ErrWorkflowNotFound → 404 `WORKFLOW_NOT_FOUND`；providerapi.ErrModelNotFound → 404 `MODEL_NOT_FOUND`（clarify 拍板补齐——原路径与管道路径同分支修复）；每例断言 respond 信封（success=false、error.code=哨兵 Error()）；流式路径错误发生于首 emit 前 → 标准 JSON 信封返回、SSE 头未写（零 SSE error 事件，O4）
+- [x] T007 [P] [US2] internal/chat/service/turn_test.go 增 translateWorkflowError 用例（research.md D3 形态）：workflowapi.ErrWorkflowNotPublished / errs.ErrValidationFailed（message 带 `node <key>:` 前缀）/ workflowapi.ErrWorkflowExecutionFailed / workflowapi.ErrWorkflowNotFound / providerapi.ErrModelNotFound 各一例——哨兵本体原样返回（errors.Is 全程可判、node 前缀 message 与错误链保真）；非哨兵错误（如 store 层 DB 错误）→ `%w` 上下文包装（"workflow execute: ..." 语义，内层错误仍可 unwrapped）
+- [x] T008 [P] [US2] internal/chat/handler/handler_test.go 增 failChat 用例（httptest，stub svc 返回各哨兵）：ErrWorkflowNotPublished → 503 `WORKFLOW_NOT_PUBLISHED`；errs.ErrValidationFailed → 400 `VALIDATION_FAILED` 且 message 透传 `node <key>:` 前缀（经 FailFromSentinel 既有分支，零新码）；ErrWorkflowExecutionFailed → 500 `WORKFLOW_EXECUTION_FAILED`；ErrWorkflowNotFound → 404 `WORKFLOW_NOT_FOUND`；providerapi.ErrModelNotFound → 404 `MODEL_NOT_FOUND`（clarify 拍板补齐——原路径与管道路径同分支修复）；每例断言 respond 信封（success=false、error.code=哨兵 Error()）；流式路径错误发生于首 emit 前 → 标准 JSON 信封返回、SSE 头未写（零 SSE error 事件，O4）
 
 ### Implementation for User Story 2
 
-- [ ] T009 [US2] internal/chat/service/turn.go 增 `translateWorkflowError`（形态对齐既有 translateLLMError，research.md D3：哨兵原样透传 / 非哨兵 `%w` 补上下文），并替换 T006 管道分支的 Execute 错误出口（两模式单一事实源）
-- [ ] T010 [P] [US2] internal/chat/handler/handler.go failChat 增四哨兵分支：workflowapi.ErrWorkflowNotPublished → 503 / workflowapi.ErrWorkflowExecutionFailed → 500 / workflowapi.ErrWorkflowNotFound → 404 / providerapi.ErrModelNotFound → 404（均 `respond.Fail(c, 状态码, 哨兵.Error(), err.Error())`，error.code=哨兵文案）；default `FailFromSentinel` 兜底不变（未识别 → 500 INTERNAL_ERROR，与 workflow execute 端点同形）
+- [x] T009 [US2] internal/chat/service/turn.go 增 `translateWorkflowError`（形态对齐既有 translateLLMError，research.md D3：哨兵原样透传 / 非哨兵 `%w` 补上下文），并替换 T006 管道分支的 Execute 错误出口（两模式单一事实源）
+- [x] T010 [P] [US2] internal/chat/handler/handler.go failChat 增四哨兵分支：workflowapi.ErrWorkflowNotPublished → 503 / workflowapi.ErrWorkflowExecutionFailed → 500 / workflowapi.ErrWorkflowNotFound → 404 / providerapi.ErrModelNotFound → 404（均 `respond.Fail(c, 状态码, 哨兵.Error(), err.Error())`，error.code=哨兵文案）；default `FailFromSentinel` 兜底不变（未识别 → 500 INTERNAL_ERROR，与 workflow execute 端点同形）
 
 **Checkpoint**: US1+US2 独立可测——错误四类映射 + 哨兵透传全绿、MODEL_NOT_FOUND 两前门同码
 
@@ -86,11 +86,11 @@
 
 ### Tests for User Story 3（先写、先跑红）
 
-- [ ] T011 [US3] internal/chat/service/turn_test.go 增断连与状态用例：请求 ctx 已取消 → stub 断言 Execute 收到的 ctx 感知取消（透传不吞）；emit 返回错误（前端已断连）→ Stream 正常收尾不返回错误、assistant 已落库（静默收尾）；Execute 返回错误 → user 消息已落、assistant 行无（messages 恰一行 user，两链状态与原路径 LLM 失败同款）
+- [x] T011 [US3] internal/chat/service/turn_test.go 增断连与状态用例：请求 ctx 已取消 → stub 断言 Execute 收到的 ctx 感知取消（透传不吞）；emit 返回错误（前端已断连）→ Stream 正常收尾不返回错误、assistant 已落库（静默收尾）；Execute 返回错误 → user 消息已落、assistant 行无（messages 恰一行 user，两链状态与原路径 LLM 失败同款）
 
 ### Implementation for User Story 3
 
-- [ ] T012 [US3] 依 T011 红绿判定：红 → 修 internal/chat/service/turn.go 管道分支至绿（预期零改动或极小——ctx 透传、落库序、静默收尾已在 T006 契约实现内）；绿 → 直接标记完成（约束已满足即证，不为绿测试改实现）
+- [x] T012 [US3] 依 T011 红绿判定：红 → 修 internal/chat/service/turn.go 管道分支至绿（预期零改动或极小——ctx 透传、落库序、静默收尾已在 T006 契约实现内）；绿 → 直接标记完成（约束已满足即证，不为绿测试改实现）
 
 **Checkpoint**: 三故事全部独立可测；trace_id 串两链与 run 行落库为 workflow 侧既有语义（零行为改动），psql 互溯验证归人工项（quickstart §2③）
 
@@ -100,8 +100,8 @@
 
 **Purpose**: 文档同步 + 终局门禁
 
-- [ ] T013 [P] 文档同步四处：docs/changelog/chat/data_flow_and_model.md 路线图更新（E1 管道形态已接线）；docs/testing/chat-manual-test.md 增「管道冒烟」小节（对应 quickstart §2 ①②：不绑冒烟零变化 + 绑定冒烟 delta+done / 一次输出信封 / draft 负向 503）；docs/testing/workflow-manual-test.md 增 `trigger_source='chat'` 验证项（对应 quickstart §2③：run 行引用回填两链互溯）；CLAUDE.md 错误码表**仅核对零新行**（MODEL_NOT_FOUND 行既有、补实现即准确——不编辑该表）
-- [ ] T014 终局验收门禁（quickstart §1 命令块全量执行）：`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿；`go test ./internal/chat/... -race -cover` ≥80%；依赖方向 grep——`grep -rn "go-hify/internal/workflow" internal/chat/` 仅 internal/chat/service 的 workflowapi import（白名单内）、`grep -rn "go-hify/internal/chat" internal/workflow/` 零输出；`git diff --stat` 确认 internal/workflow/ 零触碰（workflow 模块零行为改动）
+- [x] T013 [P] 文档同步四处：docs/changelog/chat/data_flow_and_model.md 路线图更新（E1 管道形态已接线）；docs/testing/chat-manual-test.md 增「管道冒烟」小节（对应 quickstart §2 ①②：不绑冒烟零变化 + 绑定冒烟 delta+done / 一次输出信封 / draft 负向 503）；docs/testing/workflow-manual-test.md 增 `trigger_source='chat'` 验证项（对应 quickstart §2③：run 行引用回填两链互溯）；CLAUDE.md 错误码表**仅核对零新行**（MODEL_NOT_FOUND 行既有、补实现即准确——不编辑该表）
+- [x] T014 终局验收门禁（quickstart §1 命令块全量执行）：`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿；`go test ./internal/chat/... -race -cover` ≥80%；依赖方向 grep——`grep -rn "go-hify/internal/workflow" internal/chat/` 仅 internal/chat/service 的 workflowapi import（白名单内）、`grep -rn "go-hify/internal/chat" internal/workflow/` 零输出；`git diff --stat` 确认 internal/workflow/ 零触碰（workflow 模块零行为改动）
 
 ---
 
