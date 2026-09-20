@@ -393,6 +393,12 @@ curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$WF_SSRF/execu
 # → "WORKFLOW_EXECUTION_FAILED"（500），message 以 "node probe:" 开头（loopback 恒禁）
 ```
 
+### 12.6 chat 触发（trigger_source='chat'，spec 07 管道接线）
+
+绑定该 workflow 的 agent 会话里发消息即触发（管道冒烟），run 行引用回填（对话链 ↔ 执行链
+互溯）的完整触发与验证步骤已统一至
+[workflow-engine-manual-test.md](workflow-engine-manual-test.md) §5.3，本文档不再重复维护。
+
 ## 13. 删除（DELETE /workflows/{id}）
 
 ```bash

@@ -184,7 +184,16 @@ curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/conversations/1/messages
 
 **预期** 200 信封：`data.content` 非空、`data.message_id` 非空、`data.usage` 有值。
 
-## 8. 历史消息（GET /conversations/:id/messages）
+## 8. 管道冒烟——绑定 workflow 的 Agent（spec 07 E1 形态）
+
+绑定 workflow 的 agent，消息**确定性先过工作流**，终稿整段即本轮 assistant 回复
+（agent 的 system prompt / RAG / 模型循环不参与本轮）。
+
+完整步骤（环境启动 → workflow 前置 → 冒烟三步走 → psql 两链互溯）已统一至
+[workflow-engine-manual-test.md](workflow-engine-manual-test.md)——该文档是 spec 07
+人工验收的唯一入口，本文档不再重复维护管道冒烟细节。
+
+## 9. 历史消息（GET /conversations/:id/messages）
 
 ```bash
 # 首页（after_id=0 或不传）
@@ -208,7 +217,7 @@ curl -s -b /tmp/hify-jar "localhost:8081/api/v1/conversations/999/messages" | jq
 # → "CONVERSATION_NOT_FOUND"
 ```
 
-## 9. 删除会话（DELETE /conversations/:id）
+## 10. 删除会话（DELETE /conversations/:id）
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -b /tmp/hify-jar -X DELETE "localhost:8081/api/v1/conversations/1"
@@ -227,7 +236,7 @@ docker exec hify-pg-test psql -U hify -d hify -tc \
 # → 0
 ```
 
-## 10. Executions 表校验
+## 11. Executions 表校验
 
 每次 LLM 调用（含失败）应有一行 execution 记录：
 
@@ -243,7 +252,7 @@ docker exec hify-pg-test psql -U hify -d hify -c \
 - `error_class` 为 NULL（成功）或七类之一（Timeout/RateLimited/Overloaded/Network/InvalidRequest/Auth/ProviderDown）
 - `finish_reason` = `stop`（正常结束）
 
-## 11. 边界与错误矩阵
+## 12. 边界与错误矩阵
 
 | 场景 | HTTP | error.code | 触发方式 |
 |---|---|---|---|
@@ -258,7 +267,7 @@ docker exec hify-pg-test psql -U hify -d hify -c \
 | content 缺失 | 400 | `VALIDATION_FAILED` | body 不含 content |
 | agent_id 缺失 | 400 | `VALIDATION_FAILED` | body 不含 agent_id |
 
-## 12. 日志观测点
+## 13. 日志观测点
 
 | 观测点 | 位置 | 预期 |
 |---|---|---|
@@ -267,6 +276,6 @@ docker exec hify-pg-test psql -U hify -d hify -c \
 | 标题回填 | `logs/hify.log` | `"chat: backfill title failed"`（WARN，仅当 store 写失败时） |
 | 客户端断连 | `logs/hify.log` | 部分内容落库、execution error_class=Network |
 
-## 13. 走查结论
+## 14. 走查结论
 
 （待手测后填写）
