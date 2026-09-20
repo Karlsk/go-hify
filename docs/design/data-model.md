@@ -63,7 +63,7 @@ erDiagram
 
 ### workflow
 - `workflows` — 工作流主表（name 唯一、status 状态机、config 顶层 JSONB）
-- `workflow_nodes` — 节点（llm/knowledge_retrieval/condition/end，config 按类型密封）
+- `workflow_nodes` — 节点（llm/knowledge_retrieval/condition/api/tool/end，config 按类型密封）
 - `workflow_edges` — 边（source→target，condition 分支表达式）
 - `workflow_runs` — 执行轨迹（每次运行一行，spec 06）：append-only 收尾统一写、无 RUNNING 态；**弱引用 workflows（无 FK）**——workflow 删除后轨迹保留
 - `workflow_node_runs` — 节点执行轨迹（每节点一行，spec 06）：seq 是回放顺序唯一事实源；input/output 为截断摘要非 ctx 全量快照
