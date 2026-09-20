@@ -1193,7 +1193,7 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/006-workflow-execution-engine/plan.md](specs/006-workflow-execution-engine/plan.md)
-(feature: workflow 执行引擎；冻结契约见
-docs/changelog/workflow/impl_spec_06_execution_engine.md §4 + api_contract §5 + db_model §12)
+[specs/007-chat-pipeline/plan.md](specs/007-chat-pipeline/plan.md)
+(feature: chat 管道接线；冻结契约见
+docs/changelog/workflow/impl_spec_07_chat_pipeline.md §4 + api_contract §5/§8；零迁移)
 <!-- SPECKIT END -->
