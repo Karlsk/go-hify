@@ -17,6 +17,8 @@ import (
 	chatapi "github.com/Karlsk/go-hify/internal/chat/api"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/respond"
+	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
+	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
 const (
@@ -248,6 +250,15 @@ func failChat(c *gin.Context, err error) {
 		respond.Fail(c, http.StatusServiceUnavailable, llm.ErrProviderBusy.Error(), "供应商并发已满，请稍后重试")
 	case errors.Is(err, llm.ErrProviderUnavailable):
 		respond.Fail(c, http.StatusServiceUnavailable, llm.ErrProviderUnavailable.Error(), "供应商暂不可用，请稍后重试")
+	case errors.Is(err, workflowapi.ErrWorkflowNotPublished):
+		// 管道路径（spec 07 §4.2）：未发布 / 已停用硬错误，形态与 workflow execute 端点一致
+		respond.Fail(c, http.StatusServiceUnavailable, workflowapi.ErrWorkflowNotPublished.Error(), err.Error())
+	case errors.Is(err, workflowapi.ErrWorkflowExecutionFailed):
+		respond.Fail(c, http.StatusInternalServerError, workflowapi.ErrWorkflowExecutionFailed.Error(), err.Error())
+	case errors.Is(err, workflowapi.ErrWorkflowNotFound):
+		respond.Fail(c, http.StatusNotFound, workflowapi.ErrWorkflowNotFound.Error(), err.Error())
+	case errors.Is(err, providerapi.ErrModelNotFound):
+		respond.Fail(c, http.StatusNotFound, providerapi.ErrModelNotFound.Error(), err.Error())
 	default:
 		respond.FailFromSentinel(c, err) // 通用哨兵（限流 / 预算 / 验证 / 服务不可用）兜底
 	}

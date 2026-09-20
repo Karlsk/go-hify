@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,6 +19,8 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	platformschema "github.com/Karlsk/go-hify/internal/platform/schema"
+	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
+	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
 // ---- test double: stub ChatService ----
@@ -290,6 +293,61 @@ func TestFailChatProviderUnavailable(t *testing.T) {
 	w := doJSON(t, setupRouter(svc), http.MethodPost, "/api/v1/conversations/101/messages",
 		gin.H{"content": "x", "stream": &f})
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+// ---- failChat workflow 哨兵（管道错误呈现，spec 07 §4.2 / O4）----
+
+func TestFailChatWorkflowSentinels(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		wantCode int
+	}{
+		{"未发布或已停用", workflowapi.ErrWorkflowNotPublished, http.StatusServiceUnavailable},
+		{"环境限制", workflowapi.ErrWorkflowExecutionFailed, http.StatusInternalServerError},
+		{"workflow 不存在(防御)", workflowapi.ErrWorkflowNotFound, http.StatusNotFound},
+		{"模型不存在(下游透传)", providerapi.ErrModelNotFound, http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := false
+			svc := &stubChatService{err: tc.err}
+			w := doJSON(t, setupRouter(svc), http.MethodPost, "/api/v1/conversations/101/messages",
+				gin.H{"content": "x", "stream": &f})
+			assert.Equal(t, tc.wantCode, w.Code)
+			assert.Contains(t, w.Body.String(), `"success":false`)
+			assert.Contains(t, w.Body.String(), tc.err.Error()) // error.code = 哨兵 Error()
+		})
+	}
+}
+
+func TestFailChatWorkflowValidationNodePrefix(t *testing.T) {
+	// 图缺陷：errs.ErrValidationFailed 经 FailFromSentinel 既有 400 分支，node 前缀透传（零新码）
+	f := false
+	svc := &stubChatService{err: fmt.Errorf("node llm_1: %w", errs.ErrValidationFailed)}
+	w := doJSON(t, setupRouter(svc), http.MethodPost, "/api/v1/conversations/101/messages",
+		gin.H{"content": "x", "stream": &f})
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, errs.ErrValidationFailed.Error())
+	assert.Contains(t, body, "node llm_1:") // message 透传失败节点 key 前缀，作者可行动
+}
+
+func TestStreamWorkflowPreEmitErrorEnvelope(t *testing.T) {
+	// O4：管道失败全部发生在首 emit 前（惰性提交窗口内）→ 标准 JSON 信封返回，
+	// SSE 头未写、零 SSE error 事件（错误码 / retryable 走信封而非事件）。
+	svc := &stubChatService{err: workflowapi.ErrWorkflowNotPublished}
+	r := setupRouter(svc)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/101/messages",
+		bytes.NewReader(jsonBody(gin.H{"content": "hi", "stream": true})))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.NotContains(t, w.Header().Get("Content-Type"), "text/event-stream")
+	assert.NotContains(t, w.Body.String(), `"type":"error"`) // 零 SSE error 事件
+	assert.Contains(t, w.Body.String(), workflowapi.ErrWorkflowNotPublished.Error())
 }
 
 // ---- binding 验证 ----
