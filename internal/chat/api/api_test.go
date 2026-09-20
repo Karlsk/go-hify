@@ -67,3 +67,23 @@ func TestSendMessageReqWantStream(t *testing.T) {
 	assert.False(t, (&SendMessageReq{Stream: &f}).WantStream()) // 显式 false
 	assert.True(t, (&SendMessageReq{Stream: &f2}).WantStream()) // 显式 true
 }
+
+func TestReqValidate(t *testing.T) {
+	// 各 Req 的 Validate 当前均无跨字段规则（字段格式归 binding tag、游标解码归 service）。
+	// 钉住「返回 nil」契约：日后任一 Req 增加跨字段校验，此处失败强制显式更新预期。
+	cases := []struct {
+		name string
+		req  interface{ Validate() error }
+	}{
+		{"create_conversation", CreateConversationReq{AgentID: 1}},
+		{"list_conversations", ListConversationsReq{Limit: 20, Cursor: "abc"}},
+		{"delete_conversation", DeleteConversationReq{ID: 1}},
+		{"list_messages", ListMessagesReq{ConversationID: 1, AfterID: 5, Limit: 20}},
+		{"send_message", SendMessageReq{ConversationID: 1, Content: "hi"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.NoError(t, tc.req.Validate())
+		})
+	}
+}
