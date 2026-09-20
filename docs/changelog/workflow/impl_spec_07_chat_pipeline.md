@@ -27,7 +27,7 @@ spec 05 递延的 E1 触发形态在本篇闭环：**管道形态**——消息�
 1. **chat service 持 workflow 小接口**：`workflowExecutor`（单方法 `Execute`），组合根把 workflowSvc 注入 `chatsvc.New`。
 2. **runTurn 管道分支**（turn.go）：conv/agent 装配后判 `agent.WorkflowID != nil` → 管道路径（§4.1）；为 nil → 原路径**零改动**。
 3. **setupTurn 拆半**（O8 候选）：`setupConvAgent`（会话属主 + agent 存在且启用）与 `setupLLMClient`（模型解析 + client 构造）两段；管道路径只走前段。
-4. **错误翻译与映射**：`translateWorkflowError`（chat service，两模式单一事实源，对齐 `llmErrorSpec` 形态）+ handler `failChat` 补三个 workflow 哨兵映射（§4.2）。
+4. **错误翻译与映射**：`translateWorkflowError`（chat service，两模式单一事实源，对齐 `llmErrorSpec` 形态）+ handler `failChat` 补 workflow 三哨兵映射与 `MODEL_NOT_FOUND`→404（§4.2；MODEL_NOT_FOUND 分支为实现期 clarify 拍板补齐，见 §4.2 更正注记）。
 5. **文档同步**：data_flow_and_model.md 路线图更新、manual-test chat 冒烟小节 + workflow 冒烟小节增 `trigger_source='chat'` 项；CLAUDE.md 错误码表零新行（哨兵全部复用，仅新增消费点）；遗留事项清单 [deferred_items.md](./deferred_items.md)（memory 开关 / 进度事件等递延项与已锁方向）。
 
 ## 3. 不做什么（边界）
@@ -87,6 +87,8 @@ runTurn(ctx, req, emit):
 | `workflowapi.ErrWorkflowNotFound` | 404 | false | 防御（被绑 workflow RESTRICT 挡删除，理论不可达） |
 | 下游哨兵（`MODEL_NOT_FOUND` / `PROVIDER_BUSY` / `RATE_LIMITED` / `PROVIDER_UNAVAILABLE` …） | 沿用既有映射 | | Execute 原样透传（spec 06 O4），failChat 既有分支覆盖 |
 
+> **实现期更正（2026-09-20，用户 clarify 拍板）**：末行「failChat 既有分支覆盖」对 `MODEL_NOT_FOUND` 不成立——failChat 原无此分支，原路径同样走不到 404。已补 `providerapi.ErrModelNotFound`→404 显式分支（`respond.Fail(c, 404, 哨兵.Error(), err.Error())`），原路径与管道路径同码修复；其余下游哨兵（PROVIDER_BUSY / RATE_LIMITED / PROVIDER_UNAVAILABLE）确为既有分支覆盖，不变。
+
 ### 4.3 SSE 事件序列
 
 流式模式管道路径完整序列：`delta(终稿整段)` → `done`。无 citations 事件（空引用不发，既有规则）；等待期无 ping（惰性提交期间 headerWritten=false，心跳跳过——与 LLM 首 token 等待同形态）。
@@ -110,7 +112,7 @@ runTurn(ctx, req, emit):
 |---|---|
 | chat api | 零改动（复用 `SendMessage` / `Stream`；`AssistantReplySchema` 字段现成） |
 | chat service | `turn.go` 管道分支 + setupTurn 拆半 + `workflowExecutor` 小接口 + `translateWorkflowError`；收尾复用 `persistAssistant` / `TouchConversation` |
-| chat handler | `failChat` 补 workflow 三哨兵映射（503 / 500 / 404） |
+| chat handler | `failChat` 补 workflow 三哨兵映射（503 / 500 / 404）+ `MODEL_NOT_FOUND`→404（clarify 拍板补齐，§4.2 更正注记） |
 | 组合根 | `chatsvc.New` 增注入 workflowSvc（api 实现满足小接口，结构化类型天然满足） |
 | 文档 | data_flow_and_model.md 路线图更新；manual-test chat 冒烟小节 + workflow 小节 `trigger_source='chat'` 项；CLAUDE.md 错误码表零新行；遗留事项清单 deferred_items.md |
 

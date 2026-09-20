@@ -264,6 +264,11 @@ docker exec hify-pg-test psql -U hify -d hify -c \
 | 供应商并发满 | 503 | `PROVIDER_BUSY` | bulkhead 16 槽占满 |
 | 供应商限流 | 429 | `RATE_LIMITED` | 429 透传 |
 | 供应商不可用 | 503 | `PROVIDER_UNAVAILABLE` | 熔断打开 / 连接拒绝 |
+| 工作流未发布/停用 | 503 | `WORKFLOW_NOT_PUBLISHED` | 绑定 agent 的 workflow 撤回 draft（步骤见 [workflow-engine-manual-test.md](workflow-engine-manual-test.md) §5.2c）|
+| 工作流图缺陷 | 400 | `VALIDATION_FAILED` | message 带 `node <key>:` 前缀透传（作者可行动）|
+| 工作流执行失败 | 500 | `WORKFLOW_EXECUTION_FAILED` | api 节点 SSRF 拦截 / 总时长超 5min |
+| 工作流不存在 | 404 | `WORKFLOW_NOT_FOUND` | 防御（被绑 workflow RESTRICT 挡删，理论不可达）|
+| 模型不存在 | 404 | `MODEL_NOT_FOUND` | 防御（被 agents 引用的模型删除被 `MODEL_IN_USE` 挡，理论不可达）|
 | content 缺失 | 400 | `VALIDATION_FAILED` | body 不含 content |
 | agent_id 缺失 | 400 | `VALIDATION_FAILED` | body 不含 agent_id |
 
