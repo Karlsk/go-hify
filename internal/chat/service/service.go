@@ -23,6 +23,7 @@ import (
 	platformschema "github.com/Karlsk/go-hify/internal/platform/schema"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
+	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
 // Store 数据层接口：定义在消费方（本包），store 包实现，组合根注入——依赖倒置。
@@ -93,6 +94,12 @@ type (
 	ragRetriever interface {
 		Retrieve(ctx context.Context, req ragapi.RetrieveReq) ([]ragapi.RetrievedChunk, error)
 	}
+
+	// workflowExecutor chat 用到的 workflow 能力（管道触发——绑定 agent 的消息确定性
+	// 先过工作流，workflowapi.WorkflowService 的单方法收窄）。
+	workflowExecutor interface {
+		Execute(ctx context.Context, req workflowapi.ExecuteWorkflowReq) (*workflowapi.RunResultSchema, error)
+	}
 )
 
 // chatService 实现 chatapi.ChatService。
@@ -103,11 +110,12 @@ type chatService struct {
 	clients   llmClientFactory
 	execs     executionWriter
 	rags      ragRetriever
+	workflows workflowExecutor
 }
 
 // New 组装 chatService，返回 api 接口；由组合根注入 handler 与上游模块。
-func New(store Store, agents agentGetter, providers llmConfigResolver, clients llmClientFactory, execs executionWriter, rags ragRetriever) chatapi.ChatService {
-	return &chatService{store: store, agents: agents, providers: providers, clients: clients, execs: execs, rags: rags}
+func New(store Store, agents agentGetter, providers llmConfigResolver, clients llmClientFactory, execs executionWriter, rags ragRetriever, workflows workflowExecutor) chatapi.ChatService {
+	return &chatService{store: store, agents: agents, providers: providers, clients: clients, execs: execs, rags: rags, workflows: workflows}
 }
 
 // convCursorKey 会话列表 keyset 复合排序键（updated_at DESC, id DESC），经 page 编码为不透明 cursor。

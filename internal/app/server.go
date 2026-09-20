@@ -153,7 +153,6 @@ func Run(cfg *config.Config) error {
 	// ragSvc（条 9 预检 + 执行期 ResolveLLMConfig / Retrieve）+ ragCache（Cache 无状态、
 	// 按 NameWorkflow 命名空间隔离，spec 04 §5）+ llmManager / execStore（llm 节点走
 	// platform/llm 非流式调用并自记 executions，O2）+ WORKFLOW_API_BLOCK_PRIVATE（O6）。
-	// chat 本期不消费 workflow，触发接线归后续 chat spec。
 	execStore := logging.NewExecutionStore(gormDB) // executions 表写入（每次 LLM 调用一行）
 	workflowStore := workflowstore.New(gormDB)
 	workflowSvc := workflowsvc.New(workflowStore, modelSvc, ragSvc, ragCache,
@@ -165,10 +164,11 @@ func Run(cfg *config.Config) error {
 
 	// chat：对话引擎（依赖图最外层，零被依赖——将来可整体拆成独立服务）。
 	// 依赖方向：chat → agent（agentGetter）→ provider（llmConfigResolver）→ platform/llm（llmClientFactory）
-	//           chat → rag（ragRetriever，KB 检索注入）→ platform/logging（executionWriter）。
+	//           chat → rag（ragRetriever，KB 检索注入）→ platform/logging（executionWriter）
+	//           chat → workflow（workflowExecutor，管道触发——绑定 agent 的消息先过工作流，spec 07）。
 	// v1 范围：会话 CRUD + 上下文组装（含 RAG 检索注入）+ SSE 两模式 + executions 落库；ToolIDs 读到不执行。
 	chatStore := chatstore.New(gormDB)
-	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore, ragSvc)
+	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore, ragSvc, workflowSvc)
 
 	// mcp 后续批次再接入。
 

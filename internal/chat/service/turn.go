@@ -9,7 +9,7 @@ package service
 //     一次输出模式直接返回翻译后的哨兵错误；
 //   - 客户端断连（emit 失败 / ctx 取消）：取消上游（省 token）、已生成部分照常落库、静默收尾。
 //
-// budget 护栏（每用户限流 + 每日预算）后置批次接线：届时在 setupTurn 之前检查、
+// budget 护栏（每用户限流 + 每日预算）后置批次接线：届时在 setupConvAgent 之前检查、
 // 熔断时透传 errs.ErrRateLimited / errs.ErrBudgetExhausted。
 
 import (
@@ -33,6 +33,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/logging"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
+	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
 const (
@@ -45,9 +46,12 @@ const (
 	ragInjectionTopK = 3
 	// ragMinSimilarity 注入阈值（需求给定）：RetrievedChunk.Similarity = 1 - 余弦距离，低于该值过滤。
 	ragMinSimilarity = 0.75
+	// finishReasonWorkflow 管道路径 done 事件与 reply 的 finish_reason（spec 07 O5 冻结值：
+	// 终稿经工作流产出，非模型 stop）。
+	finishReasonWorkflow = "workflow"
 )
 
-// llmSetup setupTurn 装配出的一轮调用配置快照。
+// llmSetup runTurn 装配出的一轮调用配置快照（setupConvAgent 产前半、setupLLMClient 补后半）。
 type llmSetup struct {
 	conv     *Conversation
 	agent    *agentapi.AgentDetailSchema
@@ -71,8 +75,16 @@ func (s *chatService) Stream(ctx context.Context, req chatapi.SendMessageReq, em
 // runTurn 两模式共用的发消息编排；emit 为 nil 即一次输出模式。
 // 返回的 error 只可能产生在任何 emit 之前（流式模式 handler 尚可回标准错误信封）。
 func (s *chatService) runTurn(ctx context.Context, req chatapi.SendMessageReq, emit func(chatapi.StreamEvent) error) (*chatapi.AssistantReplySchema, error) {
-	setup, err := s.setupTurn(ctx, req.ConversationID)
+	setup, err := s.setupConvAgent(ctx, req.ConversationID)
 	if err != nil {
+		return nil, err
+	}
+	// 管道分支（spec 07 §4.1）：绑定 workflow 的 agent 消息确定性先过工作流，终稿即本轮
+	// assistant 回复；未绑定走原路径两段装配，零改动。
+	if setup.agent.WorkflowID != nil {
+		return s.runWorkflowTurn(ctx, req, setup, emit)
+	}
+	if err := s.setupLLMClient(ctx, setup); err != nil {
 		return nil, err
 	}
 
@@ -193,9 +205,10 @@ func (s *chatService) runTurn(ctx context.Context, req chatapi.SendMessageReq, e
 	return reply, nil
 }
 
-// setupTurn 校验与装配：会话属主 → agent（存在且启用）→ 模型调用配置 → 受保护 client。
-// 全部通过后才落 user 消息；任何失败原样 / 翻译后返回。
-func (s *chatService) setupTurn(ctx context.Context, conversationID uint64) (*llmSetup, error) {
+// setupConvAgent 装配前半：会话属主校验 → agent（存在且启用）。全部通过后才落 user 消息；
+// 失败原样 / 翻译后返回。管道路径只走本段——agent 模型配置不参与（绑定 agent 的消息
+// 先过工作流，模型配坏不挡管道，spec 07 O8）。
+func (s *chatService) setupConvAgent(ctx context.Context, conversationID uint64) (*llmSetup, error) {
 	conv, err := s.getOwnedConversation(ctx, conversationID)
 	if err != nil {
 		return nil, err
@@ -207,13 +220,19 @@ func (s *chatService) setupTurn(ctx context.Context, conversationID uint64) (*ll
 	if !a.Enabled {
 		return nil, agentapi.ErrAgentDisabled
 	}
-	modelNum, err := strconv.ParseUint(a.ModelID, 10, 64)
+	return &llmSetup{conv: conv, agent: a}, nil
+}
+
+// setupLLMClient 装配后半：agent 模型（id 解析脏数据防御 → 调用配置）→ 受保护 client，
+// 补全 setup 的 cfg / modelNum / client。原路径专用——管道路径不调用本段。
+func (s *chatService) setupLLMClient(ctx context.Context, setup *llmSetup) error {
+	modelNum, err := strconv.ParseUint(setup.agent.ModelID, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("%w: agent %d model_id %q not numeric", errs.ErrInternal, conv.AgentID, a.ModelID)
+		return fmt.Errorf("%w: agent %d model_id %q not numeric", errs.ErrInternal, setup.conv.AgentID, setup.agent.ModelID)
 	}
 	cfg, err := s.providers.ResolveLLMConfig(ctx, providerapi.ResolveLLMConfigReq{ModelID: modelNum})
 	if err != nil {
-		return nil, fmt.Errorf("resolve llm config (model %d): %w", modelNum, err) // 哨兵透传
+		return fmt.Errorf("resolve llm config (model %d): %w", modelNum, err) // 哨兵透传
 	}
 	client, err := s.clients.Client(cfg.ProviderName, llm.UpstreamOptions{
 		Kind:    llm.ProviderKind(cfg.Kind),
@@ -222,9 +241,58 @@ func (s *chatService) setupTurn(ctx context.Context, conversationID uint64) (*ll
 		Model:   cfg.ModelID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("llm client for provider %q: %w", cfg.ProviderName, err)
+		return fmt.Errorf("llm client for provider %q: %w", cfg.ProviderName, err)
 	}
-	return &llmSetup{conv: conv, agent: a, cfg: cfg, modelNum: modelNum, client: client}, nil
+	setup.cfg = cfg
+	setup.modelNum = modelNum
+	setup.client = client
+	return nil
+}
+
+// runWorkflowTurn 管道路径（spec 07 §4.1 伪代码直译）：绑定 agent 的消息确定性先过
+// 工作流，终稿整段即本轮 assistant 回复。替代语义（O2）——buildSystemPrompt / RAG 检索 /
+// 模型循环不进入；全部失败发生在首次 emit 之前（O4），两模式统一标准错误信封。
+func (s *chatService) runWorkflowTurn(ctx context.Context, req chatapi.SendMessageReq, setup *llmSetup, emit func(chatapi.StreamEvent) error) (*chatapi.AssistantReplySchema, error) {
+	wfID, err := strconv.ParseUint(*setup.agent.WorkflowID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("%w: agent %d workflow_id %q not numeric", errs.ErrInternal, setup.conv.AgentID, *setup.agent.WorkflowID)
+	}
+	// 落 user 消息：位置语义同原路径——全部校验通过后落库（校验失败不留孤儿消息）
+	userMsg := &Message{ConversationID: setup.conv.ID, Role: chatapi.RoleUser, Content: req.Content}
+	if err := s.store.CreateMessage(ctx, userMsg); err != nil {
+		return nil, fmt.Errorf("persist user message: %w", err)
+	}
+	if setup.conv.Title == "" {
+		if terr := s.store.UpdateConversationTitle(ctx, setup.conv.ID, makeTitle(req.Content)); terr != nil {
+			slog.WarnContext(ctx, "chat: backfill title failed", "conversation_id", setup.conv.ID, "err", terr)
+		}
+	}
+	// input 每轮独立（O3）：历史不喂 workflow；引用回填触发来源（O6）、非试运行
+	res, err := s.workflows.Execute(ctx, workflowapi.ExecuteWorkflowReq{
+		ID:             wfID,
+		Input:          req.Content,
+		ConversationID: &setup.conv.ID,
+		MessageID:      &userMsg.ID,
+		Trial:          false,
+	})
+	if err != nil {
+		return nil, translateWorkflowError(err) // O4：首 emit 前失败，两模式统一标准错误信封
+	}
+	// 终稿即回复（O5）：usage 全零（用量在节点 executions）、引用恒空 []
+	citations := []chatapi.Citation{}
+	reply := &chatapi.AssistantReplySchema{Content: res.Output, Usage: chatapi.Usage{}, FinishReason: finishReasonWorkflow, Citations: citations}
+	if assistant := s.persistAssistant(ctx, setup.conv.ID, res.Output, citations); assistant != nil {
+		reply.MessageID = strconv.FormatUint(assistant.ID, 10)
+	}
+	if terr := s.store.TouchConversation(ctx, setup.conv.ID); terr != nil {
+		slog.WarnContext(ctx, "chat: touch conversation failed", "conversation_id", setup.conv.ID, "err", terr)
+	}
+	if emit != nil {
+		// 单条整段 delta + done（delta 是唯一内容通道）；emit 失败（前端已断连）静默收尾
+		_ = emit(chatapi.DeltaEvent(res.Output))
+		_ = emit(chatapi.DoneEvent(reply.MessageID, reply.Usage, reply.FinishReason))
+	}
+	return reply, nil
 }
 
 // loadHistory 取多轮上下文：倒序拉最近窗口、按 user 锚点整轮截断、反转为时序。
@@ -554,6 +622,22 @@ func translateLLMError(err error) error {
 		return err // 哨兵本体（busy / unavailable 等已是对外形态），保留调用链上下文
 	}
 	return fmt.Errorf("%w (%v)", sentinel, err)
+}
+
+// translateWorkflowError 管道路径 Execute 错误 → 对外哨兵（两模式单一事实源，spec 07 §4.2）：
+// 已是对外形态的哨兵原样透传——errors.Is 全程可判、node 前缀 message 保真（handler 映射
+// 状态码用）；其余（如 workflow store 层 DB 错误）%w 补调用上下文，链不断。
+func translateWorkflowError(err error) error {
+	switch {
+	case errors.Is(err, workflowapi.ErrWorkflowNotPublished),
+		errors.Is(err, errs.ErrValidationFailed),
+		errors.Is(err, workflowapi.ErrWorkflowExecutionFailed),
+		errors.Is(err, workflowapi.ErrWorkflowNotFound),
+		errors.Is(err, providerapi.ErrModelNotFound):
+		return err
+	default:
+		return fmt.Errorf("workflow execute: %w", err)
+	}
 }
 
 // errorEventOf 流中失败 → SSE error 事件（code = 哨兵 Error()，机器可读）。

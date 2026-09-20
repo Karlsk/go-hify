@@ -7,6 +7,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
+	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
 // happyScript 两个文本 delta + 尾帧 usage/finish；只允许被调一次。
@@ -270,7 +272,7 @@ func TestStreamProviderBusyNoExecution(t *testing.T) {
 	st := newMemStore()
 	factory := &stubClientFactory{err: llm.ErrProviderBusy}
 	execs := &execRecorder{}
-	svc := New(st, &stubAgents{agent: testAgent(true)}, &stubProviders{cfg: testLLMConfig()}, factory, execs, &stubRags{}).(*chatService)
+	svc := New(st, &stubAgents{agent: testAgent(true)}, &stubProviders{cfg: testLLMConfig()}, factory, execs, &stubRags{}, nil).(*chatService)
 	convID := createConv(t, svc)
 
 	err := svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "x"}, func(chatapi.StreamEvent) error { return nil })
@@ -322,7 +324,7 @@ func parseUint(s string) (uint64, error) {
 	return n, nil
 }
 
-// ---- setupTurn 失败分支补测 ----
+// ---- 装配失败分支补测（setupConvAgent / setupLLMClient）----
 
 func TestStreamAgentDeleted(t *testing.T) {
 	h := newTestService(t, happyScript)
@@ -689,5 +691,278 @@ func TestStreamRAGNoCitationsEvent(t *testing.T) {
 	ms := h.store.messagesOf(convID)
 	if assert.Len(t, ms, 2) {
 		assert.Equal(t, []chatapi.Citation{}, ms[1].Citations, "空引用落库为 []（store 归一）")
+	}
+}
+
+// ---- workflow 管道（spec 07：绑定 agent 的消息确定性先过工作流）----
+
+// boundAgent 启用 + 绑定 workflow 的 agent（模型配置照常可解析；模型配坏不挡管道
+// 由 TestStreamWorkflowBadModelStillPipelines 单独证）。
+func boundAgent(workflowID string) *agentapi.AgentDetailSchema {
+	a := testAgent(true)
+	a.WorkflowID = &workflowID
+	return a
+}
+
+// wfResult 工作流终稿成功返回（chat 只消费 Output；RunID / 轨迹摘要不进对话链）。
+func wfResult(output string) *workflowapi.RunResultSchema {
+	return &workflowapi.RunResultSchema{RunID: "901", Status: "succeeded", Output: output, DurationMs: 123}
+}
+
+func TestStreamWorkflowPipeline(t *testing.T) {
+	h := newServiceWithAgent(t, boundAgent("42"), happyScript)
+	h.workflows.resp = wfResult("终稿：订单已查到")
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "查一下订单"}, collectEvents(&events, ""))
+	assert.NoError(t, err)
+
+	// 事件序列恰为 delta(终稿整段) → done（§4.3 / O5：单条整段、无 citations、无 error）
+	assert.Len(t, events, 2)
+	assert.Equal(t, chatapi.EventDelta, events[0].Type)
+	assert.Equal(t, "终稿：订单已查到", events[0].Content)
+	done := events[1]
+	assert.Equal(t, chatapi.EventDone, done.Type)
+	if assert.NotNil(t, done.Usage, "done 必带 usage 字段") {
+		assert.Equal(t, chatapi.Usage{Input: 0, Output: 0}, *done.Usage) // usage 全零（用量在节点 executions）
+	}
+	assert.Equal(t, "workflow", done.FinishReason)
+	assert.Empty(t, done.Content) // done 不带 content：delta 是唯一内容通道
+
+	// Execute 入参契约（§4.1 / O3 / O6）：绑定 id、input=当前消息、引用回填、非试运行
+	wf := h.workflows
+	assert.Equal(t, 1, wf.calls)
+	assert.Equal(t, uint64(42), wf.lastReq.ID)
+	assert.Equal(t, "查一下订单", wf.lastReq.Input)
+	if assert.NotNil(t, wf.lastReq.ConversationID) {
+		assert.Equal(t, convID, *wf.lastReq.ConversationID)
+	}
+	assert.False(t, wf.lastReq.Trial)
+
+	// 落库：user + assistant（终稿、引用 []）；标题回填；touch——位置语义同原路径
+	ms := h.store.messagesOf(convID)
+	if assert.Len(t, ms, 2) {
+		assert.Equal(t, chatapi.RoleUser, ms[0].Role)
+		assert.Equal(t, chatapi.RoleAssistant, ms[1].Role)
+		assert.Equal(t, "终稿：订单已查到", ms[1].Content)
+		assert.Equal(t, []chatapi.Citation{}, ms[1].Citations)
+		// user 消息在 Execute 前已落库：引用锚定真实行 id（非 0 兜底）
+		if assert.NotNil(t, wf.lastReq.MessageID) {
+			assert.Equal(t, ms[0].ID, *wf.lastReq.MessageID)
+		}
+		// done 带 assistant 行 id（字符串化）
+		id, perr := parseUint(done.MessageID)
+		assert.NoError(t, perr)
+		assert.Equal(t, ms[1].ID, id)
+	}
+	assert.Equal(t, "查一下订单", h.store.conversation(convID).Title)                                  // 首条消息回填标题
+	assert.True(t, h.store.conversation(convID).UpdatedAt.After(h.store.conversation(convID).CreatedAt)) // touch
+
+	// 替代语义（O2）：模型循环 / LLM 上游 / executions 全不进入
+	assert.Zero(t, h.streamer.calls)
+	assert.Nil(t, h.execs.last())
+}
+
+func TestSendMessageWorkflowPipeline(t *testing.T) {
+	h := newServiceWithAgent(t, boundAgent("7"), happyScript)
+	h.workflows.resp = wfResult("一次输出的终稿")
+	convID := createConv(t, h.svc)
+
+	reply, err := h.svc.SendMessage(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "hi"})
+	assert.NoError(t, err)
+	if assert.NotNil(t, reply) {
+		assert.Equal(t, "一次输出的终稿", reply.Content)
+		assert.Equal(t, chatapi.Usage{Input: 0, Output: 0}, reply.Usage) // 全零
+		assert.Equal(t, "workflow", reply.FinishReason)
+		assert.Equal(t, []chatapi.Citation{}, reply.Citations) // 空 [] 非 null（接口规范空值约定）
+	}
+
+	// 两模式同一编排：Execute 入参同流式形态
+	wf := h.workflows
+	assert.Equal(t, 1, wf.calls)
+	assert.Equal(t, uint64(7), wf.lastReq.ID)
+	assert.Equal(t, "hi", wf.lastReq.Input)
+	if assert.NotNil(t, wf.lastReq.ConversationID) {
+		assert.Equal(t, convID, *wf.lastReq.ConversationID)
+	}
+
+	// MessageID = assistant 行 id 字符串化；user 行在 Execute 前已落
+	ms := h.store.messagesOf(convID)
+	if assert.Len(t, ms, 2) {
+		id, perr := parseUint(reply.MessageID)
+		assert.NoError(t, perr)
+		assert.Equal(t, ms[1].ID, id)
+		if assert.NotNil(t, wf.lastReq.MessageID) {
+			assert.Equal(t, ms[0].ID, *wf.lastReq.MessageID)
+		}
+	}
+	assert.Zero(t, h.streamer.calls) // 替代语义：LLM 上游零调用
+}
+
+func TestStreamWorkflowUserPersistFail(t *testing.T) {
+	h := newServiceWithAgent(t, boundAgent("42"), happyScript)
+	h.store.createMsgErr = errors.New("memStore: create message fail")
+	convID := createConv(t, h.svc)
+
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "x"}, func(chatapi.StreamEvent) error { return nil })
+	assert.Error(t, err)
+	assert.Zero(t, h.workflows.calls) // user 落库失败 → 整轮失败，工作流不被调
+	assert.Empty(t, h.store.messagesOf(convID))
+}
+
+func TestStreamWorkflowAssistantPersistWarn(t *testing.T) {
+	h := newServiceWithAgent(t, boundAgent("42"), happyScript)
+	h.workflows.resp = wfResult("终稿照发")
+	h.store.createMsgFailAfter = 1 // 第 1 条（user）成功、第 2 条（assistant）失败
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "x"}, collectEvents(&events, ""))
+	assert.NoError(t, err) // assistant 落库失败只 WARN 不阻断（原路径同款）
+	assert.Len(t, events, 2)
+	assert.Equal(t, "终稿照发", events[0].Content)
+	assert.Equal(t, chatapi.EventDone, events[1].Type)
+	assert.Empty(t, events[1].MessageID) // done 降级空 message_id
+	assert.Len(t, h.store.messagesOf(convID), 1)
+}
+
+func TestStreamWorkflowTitleBackfillWarn(t *testing.T) {
+	h := newServiceWithAgent(t, boundAgent("42"), happyScript)
+	h.workflows.resp = wfResult("终稿")
+	h.store.titleErr = errors.New("memStore: title write fail")
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "打个招呼"}, collectEvents(&events, ""))
+	assert.NoError(t, err) // 标题回填失败只 WARN：管道照常到终稿
+	assert.Equal(t, chatapi.EventDone, events[len(events)-1].Type)
+	assert.Equal(t, 1, h.workflows.calls)
+}
+
+func TestStreamUnboundAgentSkipsWorkflow(t *testing.T) {
+	// 未绑 agent（WorkflowID=nil）→ 原路径零改动守点：模型循环照常、Execute 不被调。
+	h := newTestService(t, happyScript) // testAgent 的 WorkflowID 为 nil
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "q"}, collectEvents(&events, ""))
+	assert.NoError(t, err)
+	assert.Equal(t, []string{chatapi.EventDelta, chatapi.EventDelta, chatapi.EventDone},
+		[]string{events[0].Type, events[1].Type, events[2].Type}) // happyScript 原路径两 delta 一 done
+	assert.Equal(t, 1, h.streamer.calls)
+	assert.Zero(t, h.workflows.calls)
+}
+
+func TestStreamWorkflowBadModelStillPipelines(t *testing.T) {
+	// O8：agent 模型配坏不挡管道——ModelID 脏数据若走了装配后半段会 parse 失败报错；
+	// 管道路径跳过 setupLLMClient，照常执行到终稿，client 工厂零调用。
+	agent := boundAgent("42")
+	agent.ModelID = "abc"
+	h := newServiceWithAgent(t, agent, happyScript)
+	h.workflows.resp = wfResult("模型配坏，终稿照发")
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "q"}, collectEvents(&events, ""))
+	assert.NoError(t, err)
+	if assert.Len(t, events, 2) {
+		assert.Equal(t, "模型配坏，终稿照发", events[0].Content)
+	}
+	assert.Equal(t, 1, h.workflows.calls)
+	assert.Empty(t, h.factory.gotKey) // LLM client 从未构造
+	assert.Zero(t, h.streamer.calls)
+}
+
+func TestStreamWorkflowBadWorkflowIDRejected(t *testing.T) {
+	// WorkflowID 非数字（脏数据）→ errs.ErrInternal 包装返回；解析先于 user 落库
+	//（§4.1 调用序），Execute 不被调。
+	h := newServiceWithAgent(t, boundAgent("wf-x"), happyScript)
+	convID := createConv(t, h.svc)
+
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "q"}, func(chatapi.StreamEvent) error { return nil })
+	assert.ErrorIs(t, err, errs.ErrInternal) // 同 ModelID 既有处理形态
+	assert.Zero(t, h.workflows.calls)
+	assert.Empty(t, h.store.messagesOf(convID)) // 校验失败 user 不落库
+}
+
+// ---- translateWorkflowError（管道路径错误翻译单一事实源，spec 07 §4.2）----
+
+func TestTranslateWorkflowErrorSentinels(t *testing.T) {
+	// 已是对外形态的哨兵原样透传：errors.Is 全程可判、message（含 node 前缀）与错误链保真
+	nodeErr := fmt.Errorf("node llm_1: %w", errs.ErrValidationFailed)
+	cases := []struct {
+		name string
+		in   error
+		sent error
+	}{
+		{"未发布", workflowapi.ErrWorkflowNotPublished, workflowapi.ErrWorkflowNotPublished},
+		{"图缺陷(node 前缀)", nodeErr, errs.ErrValidationFailed},
+		{"环境限制", workflowapi.ErrWorkflowExecutionFailed, workflowapi.ErrWorkflowExecutionFailed},
+		{"workflow 不存在(防御)", workflowapi.ErrWorkflowNotFound, workflowapi.ErrWorkflowNotFound},
+		{"模型不存在(下游透传)", providerapi.ErrModelNotFound, providerapi.ErrModelNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := translateWorkflowError(tc.in)
+			assert.ErrorIs(t, got, tc.sent)
+			assert.Equal(t, tc.in.Error(), got.Error(), "哨兵本体原样返回，message 不增上下文")
+		})
+	}
+}
+
+func TestTranslateWorkflowErrorUnknownWrapped(t *testing.T) {
+	// 非哨兵（如 store 层 DB 错误）→ %w 补调用上下文：内层错误仍可 unwrapped（排障链不断）
+	dbErr := errors.New("pq: connection refused")
+	got := translateWorkflowError(dbErr)
+	assert.ErrorIs(t, got, dbErr)
+	assert.ErrorContains(t, got, "workflow execute")
+}
+
+// ---- 管道断连与状态（spec 07 §4.1 要点：取消透传 / emit 失败静默收尾 / 两链状态）----
+
+func TestStreamWorkflowCtxCancelPropagates(t *testing.T) {
+	// 取消透传：请求 ctx 已取消 → Execute 收到的 ctx 感知取消（透传不吞）。游走中断、
+	// run 行照写是 workflow 侧既有语义（轨迹写入 WithoutCancel 脱钩请求 ctx），chat 侧
+	// 只保证 ctx 原样传下去。
+	h := newServiceWithAgent(t, boundAgent("42"), happyScript)
+	h.workflows.resp = wfResult("终稿")
+	convID := createConv(t, h.svc)
+
+	ctx, cancel := context.WithCancel(userCtx())
+	cancel()
+	err := h.svc.Stream(ctx, chatapi.SendMessageReq{ConversationID: convID, Content: "q"}, func(chatapi.StreamEvent) error { return nil })
+	assert.NoError(t, err)
+	assert.ErrorIs(t, h.workflows.lastCtx.Err(), context.Canceled)
+}
+
+func TestStreamWorkflowEmitFailSilentFinalize(t *testing.T) {
+	// 前端断连（emit 失败）：静默收尾——不返回错误、assistant 照常落库（§4.1 要点）
+	h := newServiceWithAgent(t, boundAgent("42"), happyScript)
+	h.workflows.resp = wfResult("断连前已生成的终稿")
+	convID := createConv(t, h.svc)
+
+	var events []chatapi.StreamEvent
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "q"}, collectEvents(&events, chatapi.EventDelta))
+	assert.NoError(t, err) // 断连不是错误
+	ms := h.store.messagesOf(convID)
+	if assert.Len(t, ms, 2) {
+		assert.Equal(t, "断连前已生成的终稿", ms[1].Content) // assistant 已落库无碍
+	}
+}
+
+func TestStreamWorkflowExecuteFailState(t *testing.T) {
+	// Execute 失败：user 已落、assistant 无——两链状态与原路径 LLM 流中失败同款，
+	// 不新设规则（§4.1 要点）；哨兵经 translateWorkflowError 原样透传
+	h := newServiceWithAgent(t, boundAgent("42"), happyScript)
+	h.workflows.err = workflowapi.ErrWorkflowNotPublished
+	convID := createConv(t, h.svc)
+
+	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "发消息"}, func(chatapi.StreamEvent) error { return nil })
+	assert.ErrorIs(t, err, workflowapi.ErrWorkflowNotPublished)
+	ms := h.store.messagesOf(convID)
+	if assert.Len(t, ms, 1) {
+		assert.Equal(t, chatapi.RoleUser, ms[0].Role)
+		assert.Equal(t, "发消息", ms[0].Content)
 	}
 }

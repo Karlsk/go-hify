@@ -25,7 +25,7 @@ import (
 func newCRUDService(agents agentGetter, providers llmConfigResolver) (*chatService, *memStore) {
 	st := newMemStore()
 	svc := New(st, agents, providers,
-		&stubClientFactory{client: nil}, &execRecorder{}, &stubRags{}).(*chatService)
+		&stubClientFactory{client: nil}, &execRecorder{}, &stubRags{}, nil).(*chatService)
 	return svc, st
 }
 

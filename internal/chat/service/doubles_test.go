@@ -22,6 +22,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/logging"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
+	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 	"gorm.io/gorm"
 )
 
@@ -296,6 +297,27 @@ func (s *stubRags) Retrieve(_ context.Context, req ragapi.RetrieveReq) ([]ragapi
 	return s.resp, nil
 }
 
+// stubWorkflows workflow 执行 stub（管道触发，spec 07）：按需注入 resp / err；记录调用
+// 次数、最近一次请求与收到时的 ctx（管道契约测试断言入参 / ctx 透传 / 未绑不被调）。
+type stubWorkflows struct {
+	resp *workflowapi.RunResultSchema
+	err  error
+
+	calls   int
+	lastReq workflowapi.ExecuteWorkflowReq
+	lastCtx context.Context
+}
+
+func (s *stubWorkflows) Execute(ctx context.Context, req workflowapi.ExecuteWorkflowReq) (*workflowapi.RunResultSchema, error) {
+	s.calls++
+	s.lastReq = req
+	s.lastCtx = ctx
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.resp, nil
+}
+
 func testLLMConfig() *providerapi.LLMConfig {
 	return &providerapi.LLMConfig{ProviderName: "openai主力", Kind: "openai", ModelID: "gpt-4o"}
 }
@@ -451,24 +473,27 @@ func newServiceWithAgent(t *testing.T, agent *agentapi.AgentDetailSchema, script
 	factory := &stubClientFactory{client: llm.NewClient("test", fastProfile(), fs)}
 	execs := &execRecorder{}
 	rags := &stubRags{}
+	workflows := &stubWorkflows{}
 	svc := New(st,
 		&stubAgents{agent: agent},
 		&stubProviders{cfg: testLLMConfig()},
 		factory,
 		execs,
 		rags,
+		workflows,
 	)
-	return &chatServiceForTest{svc: svc.(*chatService), store: st, streamer: fs, factory: factory, execs: execs, rags: rags}
+	return &chatServiceForTest{svc: svc.(*chatService), store: st, streamer: fs, factory: factory, execs: execs, rags: rags, workflows: workflows}
 }
 
 // chatServiceForTest 聚合句柄，方便断言内部替身状态。
 type chatServiceForTest struct {
-	svc      *chatService
-	store    *memStore
-	streamer *captureStreamer
-	factory  *stubClientFactory
-	execs    *execRecorder
-	rags     *stubRags
+	svc       *chatService
+	store     *memStore
+	streamer  *captureStreamer
+	factory   *stubClientFactory
+	execs     *execRecorder
+	rags      *stubRags
+	workflows *stubWorkflows
 }
 
 // roles 把消息序列压成 "role:content" 串，断言上下文组装最直观。
