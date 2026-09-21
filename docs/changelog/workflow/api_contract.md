@@ -33,15 +33,18 @@
 
 ```go
 type UpsertReq struct {
-    Name         string    `json:"name" binding:"required,max=128"`
-    Description  string    `json:"description"`
-    StartNodeKey string    `json:"start_node_key" binding:"required"`
-    Nodes        []NodeReq `json:"nodes" binding:"required,min=1,max=50"`
-    Edges        []EdgeReq `json:"edges" binding:"required,max=100"` // 纯线性可传 []
+    Name         string        `json:"name" binding:"required,max=128"`
+    Description  string        `json:"description"`
+    Type         WorkflowType  `json:"type"`          // chat / task（spec 08）；Create 必填（Validate oneof），Update 不携带
+    InputSchema  []SchemaField `json:"input_schema"`  // 仅 task 型；chat 型携带非空由 service 拒
+    OutputSchema []SchemaField `json:"output_schema"` // 仅 task 型
+    StartNodeKey string        `json:"start_node_key" binding:"required"`
+    Nodes        []NodeReq     `json:"nodes" binding:"required,min=1,max=50"`
+    Edges        []EdgeReq     `json:"edges" binding:"required,max=100"` // 纯线性可传 []
 }
 type NodeReq struct {
     Key    string          `json:"key" binding:"required,max=64"`
-    Type   NodeType        `json:"type" binding:"required"`
+    Type   NodeType        `json:"type" binding:"required"` // llm/tool/condition/knowledge_retrieval/api/end/workflow（spec 08 加第七类）
     Name   string          `json:"name" binding:"omitempty,max=128"`
     Config json.RawMessage `json:"config" binding:"required"`
 }
@@ -50,6 +53,24 @@ type EdgeReq struct {
     TargetNodeKey string  `json:"target_node_key" binding:"required,max=64"`
     Condition     *string `json:"condition" binding:"omitempty,max=128"` // nil = 无条件；指针区分"没传"与"空串"
 }
+// task 型结构化 I/O 契约字段（spec 08 §4.5 简化形态）
+type SchemaField struct {
+    Name        string `json:"name"`
+    Type        string `json:"type"` // string / number / boolean
+    Required    bool   `json:"required"`
+    Description string `json:"description"`
+}
+// sub-workflow 节点密封 config（spec 08；键集 / 存在性 / 分型 / 环 / 链深校验归 service R11）
+type WorkflowNodeConfig struct {
+    WorkflowID uint64            `json:"workflow_id,string"` // 字符串化弱引用 workflows.id
+    Inputs     map[string]string `json:"inputs,omitempty"`   // 子 schema 字段 → 父图 {{var}} 模板映射
+}
+// Update 专用请求：Type *string 遮蔽嵌入 UpsertReq.Type（浅字段优先）——携带即拒
+type UpdateWorkflowReq struct {
+    ID   uint64  `json:"-"`
+    Type *string `json:"type"` // 携带即拒（spec 08 §4.1：分型不可变，同值 / 异值均拒；换型 = 删了重建）
+    UpsertReq
+}
 ```
 
 > 〔2026-09-16 修订（实施 spec 02 时用户拍板）：① NodeReq.Name 与 EdgeReq.Condition 原写 `json:"name,max=128"` / `json:"condition,max=128"` 系笔误——`max=128` 落在 json tag 里会被 encoding/json 当未知选项静默忽略，长度上限不生效，已改为 binding tag（`omitempty,max=128`）。② 下方 WorkflowSummarySchema.ID 原写 `json:"id,string"` 同系笔误——`,string` 选项只用于数字字段，挂在 string 字段上会双重编码（`"id":"\"42\""`），已改为 `json:"id"`，与 platform/schema.BaseSchema 一致。〕
@@ -57,19 +78,23 @@ type EdgeReq struct {
 > 〔2026-09-16 追加（用户拍板）：节点类型加宽 `api` / `end`——密封 config 新增 `ApiCallConfig{url, method, headers?, body?, timeout_sec?, ssl_verify?}`（直接 HTTP 调用；ssl_verify 默认 false = 跳过证书校验，内网自签场景）与 `EndConfig{output?}`（显式终止，可选）；图校验新增 R9（end 节点不得有出边）；DB CHECK 由迁移 00017 加宽为六值。end **不强制每图必有**——既有图（无出边 = 隐式结束）不受影响。〕
 
 - 请求体**不含 `status`**——状态只能经 publish / disable 动作改变（编辑不降级，db_model 决策 #6）。
-- `binding` tag 管字段格式，`UpsertReq.Validate()` 管跨字段图规则（引用 db_model.md §7 九条，不在此重复）。
+- `binding` tag 管字段格式，`UpsertReq.Validate()` 管跨字段图规则（引用 db_model.md §7 十二条，不在此重复）。
+- 〔spec 08：`Type` 必填 oneof 只在 `Validate` 管（Create 路径）——Update 走 `UpdateWorkflowReq`，body 携带 `type` 即 400 `VALIDATION_FAILED`（分型不可变，同值 / 异值均拒）；`UpdateWorkflowReq.Type *string` 遮蔽嵌入 `UpsertReq.Type`（encoding/json 浅字段优先），nil = 未携带。`InputSchema` / `OutputSchema` 形态校验（name 非空不重名、type ∈ string/number/boolean）由 `api.ValidateSchemaFields` 管，chat 型携带非空 schema 由 service 拒。〕
 
 响应：
 
 ```go
 // 摘要（列表用，不带图）
 type WorkflowSummarySchema struct {
-    ID          string `json:"id"`
-    Name        string `json:"name"`
-    Description string `json:"description"`
-    Status      string `json:"status"`
-    CreatedAt   time.Time `json:"created_at"`
-    UpdatedAt   time.Time `json:"updated_at"`
+    ID           string        `json:"id"`
+    Name         string        `json:"name"`
+    Description  string        `json:"description"`
+    Type         string        `json:"type"`          // chat / task（spec 08）
+    Status       string        `json:"status"`
+    InputSchema  []SchemaField `json:"input_schema"`  // task 型入参契约；null = 未声明
+    OutputSchema []SchemaField `json:"output_schema"` // task 型出参契约；null = 未声明
+    CreatedAt    time.Time     `json:"created_at"`
+    UpdatedAt    time.Time     `json:"updated_at"`
 }
 // 详情（创建/更新/详情接口返回）
 type WorkflowDetailSchema struct {
@@ -154,6 +179,7 @@ POST /api/v1/workflows
 
 ### PUT 整图替换
 - 入参与创建同构；图校验同创建。
+- 〔spec 08：body 携带 `type` 即 400 `VALIDATION_FAILED`（分型不可变，同值 / 异值均拒、不比对当前值——换型 = 删了重建）；`input_schema` / `output_schema` 可改（仍受形态校验与 chat 型置空强不变量约束）。〕
 - `Store.ReplaceGraph` 一事务：`UPDATE workflows` + `DELETE nodes WHERE workflow_id` + `DELETE edges WHERE workflow_id` + 批量 INSERT（**先删后插、硬删、不做 diff**——软删会让每次保存积累垃圾行且撞 `uq(workflow_id, node_key)`，且表里没有 deleted_at 列，00013 已全面退役）。
 - `status` 不受影响；事务提交后删缓存 key。
 
@@ -200,6 +226,15 @@ type RunResultSchema struct {
 - **试运行（O3 拍板）**：`?trial=true` 放开 draft/disabled 执行（状态机唯一例外，正式路径 503 语义不变）；试运行照常落 runs（`is_trial = true`）与 executions（成本真实发生）。`ExecuteWorkflowReq` 增 `Trial bool`（HTTP 侧 query 绑定，进程内调用方直传）。
 - **错误语义（O4 已拍板二分法）**：下游哨兵（`MODEL_NOT_FOUND` / `PROVIDER_BUSY` / `PROVIDER_UNAVAILABLE` / `RATE_LIMITED` …）原样透传，handler 按既有错误表映射；引擎自身错误二分——**图缺陷类**（condition 无命中出边、模板缺失变量兜底、tool 节点未支持）→ `VALIDATION_FAILED` 400；**环境限制类**（api 节点 SSRF 拦截、总时长超限）→ 新哨兵 `workflowapi.ErrWorkflowExecutionFailed`（`WORKFLOW_EXECUTION_FAILED`，500，已进 §8 表）；哨兵本体随实现落 `workflow/api/errors.go` 并同步 CLAUDE.md 错误码表。失败节点定位统一靠错误 message 的 `node <key>:` 前缀。
 - **per-node 进度原则（讨论结论）**：未来 chat 侧 per-node 流式走**同步回调推送**——引擎留回调注入点，chat 在 execute 调用栈内收到回调即推 SSE；**禁止轮询轨迹表状态**——chat 本就阻塞在调用上，轮询等于拿 DB 当消息队列，还得为它造 RUNNING 可变态（db_model 决策 #14 已否决）。回调接缝的具体形态（SSE 事件类型、节流）归 chat 触发 spec（spec 05 E1）。
+
+### sub-workflow 嵌套执行语义（spec 08，2026-09-20 落地）
+
+- **执行链**：父图走到 `workflow` 节点 → 逐值渲染 `inputs` 映射（strict，缺失即图缺陷 400）→ 按子 `input_schema` 组装 JSON 文本入参 → `executeChild` 进程内递归执行子图（同 goroutine、共享父请求 ctx——**断连整链取消**；每层自包 5min 超时；深度计数随执行传递，超上限图缺陷 400 带父 node 前缀）→ 子终稿过 output schema 校验后落父变量池（`node_key` 可引、JSON 值可一级下钻）。
+- **子 vars 池全新起步**（只含自身 input）：父子仅经 input/output 通信，子图引用父 vars 报缺失（图缺陷 400）。
+- **子执行把关**：trial 跟随父（父试运行 → 子放开 draft / disabled）；正式运行子必须 published，否则 `WORKFLOW_NOT_PUBLISHED` 带父 node 前缀。
+- **子 run 轨迹**：独立 run 行 + `trigger_source='workflow'` + `parent_run_id`（父收尾成功后批量回填一次窄 UPDATE，失败跳过 trace_id 兜底）；`conversation_id` / `message_id` 与父相同。一次查询按 `parent_run_id` 关联即还原整棵执行树。
+- **错误上抛**：二分法原样延伸、带父 node 前缀链（`node a: node b: …` 可读定位）——子图缺陷 → `VALIDATION_FAILED` 400；子环境限制 → `WORKFLOW_EXECUTION_FAILED` 500；下游哨兵透传。父记失败 step、父 run 行 `error_node` 定位到父节点。子终稿 output schema 校验失败 → 图缺陷 400（子作者契约）。
+- **Execute 签名不动**（入参仍单一 string）：task 型入参 = 按 input_schema 组装的 JSON 文本；引擎侧检测入参为合法 JSON 对象且声明了 input_schema 时按对象解析入池，否则整串落 input（原行为）。
 
 ## 6. service / store 分层约定
 

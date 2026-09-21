@@ -42,7 +42,7 @@ REDIS_ADDR=localhost:6379
 ```
 
 ```bash
-make migrate-up && make migrate-status   # 预期 19 条全部 applied
+make migrate-up && make migrate-status   # 预期 20 条全部 applied（00020 = spec 08 分型与嵌套）
 make start                               # 日志落 logs/hify.log
 curl -s localhost:8081/health | jq .     # → {"success":true,...}
 ```
@@ -89,10 +89,11 @@ WF=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -d '{
     "name": "客服分流",
     "description": "根据用户消息分类后终止",
+    "type": "chat",
     "start_node_key": "classify",
     "nodes": [
       {"key":"classify","type":"llm","name":"分类节点",
-       "config":{"model_id":"134","prompt":"将消息分类为 ORDER_QUERY 或 OTHER: {{input}}"}},
+       "config":{"model_id":"1","prompt":"将消息分类为 ORDER_QUERY 或 OTHER: {{input}}"}},
       {"key":"end","type":"end","name":"结束","config":{}}
     ],
     "edges": [
@@ -104,7 +105,7 @@ echo "$WF" | jq .
 
 **预期**：
 - HTTP 201
-- `data.status` = `"draft"`
+- `data.status` = `"draft"`，`data.type` = `"chat"`（spec 08 起响应带分型）
 - `data.id` 为非空字符串
 - `data.nodes` 长度 2，`data.edges` 长度 1
 - `data.start_node_key` = `"classify"`
@@ -121,6 +122,7 @@ curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "客服分流",
+    "type": "chat",
     "start_node_key": "a",
     "nodes": [{"key":"a","type":"end","config":{}}],
     "edges": []
@@ -134,6 +136,7 @@ curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "bad-graph",
+    "type": "chat",
     "start_node_key": "nonexistent",
     "nodes": [{"key":"a","type":"end","config":{}}],
     "edges": []
@@ -147,6 +150,7 @@ curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "bad-model",
+    "type": "chat",
     "start_node_key": "n",
     "nodes": [{"key":"n","type":"llm","config":{"model_id":"9999","prompt":"hi"}}],
     "edges": []
@@ -225,6 +229,7 @@ curl -s -b /tmp/hify-jar -X PUT "localhost:8081/api/v1/workflows/$WF_ID" \
 - name 更新为 `"客服分流 v2"`
 - status 仍为 `"published"`（编辑不降级）
 - nodes 长度 2
+- PUT body 不携带 `type`（合法——spec 08 分型不可变，携带即 400，负向验证见 workflow-engine-manual-test.md §7.1③）
 
 ## 9. 停用（POST /workflows/{id}/disable）
 
@@ -299,6 +304,7 @@ WF_TRIAL=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "客服分流-trial",
+    "type": "chat",
     "start_node_key": "classify",
     "nodes": [
       {"key":"classify","type":"llm","name":"分类",
@@ -327,6 +333,7 @@ curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "bad-ref",
+    "type": "chat",
     "start_node_key": "classify",
     "nodes": [
       {"key":"classify","type":"llm","name":"分类",
@@ -342,6 +349,7 @@ WF_NOMATCH=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "no-match",
+    "type": "chat",
     "start_node_key": "r",
     "nodes": [
       {"key":"r","type":"condition","name":"路由","config":{"expression":"{{input}}"}},
@@ -380,6 +388,7 @@ WF_SSRF=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "ssrf-probe",
+    "type": "chat",
     "start_node_key": "probe",
     "nodes": [
       {"key":"probe","type":"api","name":"探测",
@@ -461,7 +470,7 @@ curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/providers -H 'Content-Typ
 curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/models -H 'Content-Type: application/json' -d '{"provider_id":1,"name":"GPT-4o-mini","model_id":"gpt-4o-mini","capability":"chat"}'
 
 # === CRUD ===
-curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' -d '{"name":"客服分流","description":"根据用户消息分类后终止","start_node_key":"classify","nodes":[{"key":"classify","type":"llm","name":"分类节点","config":{"model_id":"1","prompt":"将消息分类为 ORDER_QUERY 或 OTHER: {{input}}"}},{"key":"end","type":"end","name":"结束","config":{}}],"edges":[{"source_node_key":"classify","target_node_key":"end"}]}'
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' -d '{"name":"客服分流","description":"根据用户消息分类后终止","type":"chat","start_node_key":"classify","nodes":[{"key":"classify","type":"llm","name":"分类节点","config":{"model_id":"1","prompt":"将消息分类为 ORDER_QUERY 或 OTHER: {{input}}"}},{"key":"end","type":"end","name":"结束","config":{}}],"edges":[{"source_node_key":"classify","target_node_key":"end"}]}'
 # 提取 id 后 GET / PUT / DELETE / publish / disable 见上文各步骤
 # 执行（12.1/12.2 需真实 LLM）：POST /workflows/{id}/execute，body {"input":"..."}，试运行加 ?trial=true，详见 §12
 ```

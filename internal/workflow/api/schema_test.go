@@ -28,13 +28,19 @@ func TestConstantsPinned(t *testing.T) {
 	assert.Equal(t, "published", string(StatusPublished))
 	assert.Equal(t, "disabled", string(StatusDisabled))
 
-	// 节点类型与 CHECK 对齐（00016 建四类，00017 加宽补 api/end，2026-09-16 拍板）。
+	// 节点类型与 CHECK 对齐（00016 建四类，00017 加宽补 api/end，2026-09-16 拍板；
+	// 00020 补 workflow——sub-workflow 嵌套节点，spec 08）。
 	assert.Equal(t, "llm", string(NodeLLM))
 	assert.Equal(t, "tool", string(NodeTool))
 	assert.Equal(t, "condition", string(NodeCondition))
 	assert.Equal(t, "knowledge_retrieval", string(NodeKnowledgeRetrieval))
 	assert.Equal(t, "api", string(NodeAPI))
 	assert.Equal(t, "end", string(NodeEnd))
+	assert.Equal(t, "workflow", string(NodeWorkflow))
+
+	// 分型枚举与迁移 00020 CHECK (type IN ('chat','task')) 对齐（spec 08 §4.1）。
+	assert.Equal(t, "chat", string(WorkflowTypeChat))
+	assert.Equal(t, "task", string(WorkflowTypeTask))
 }
 
 func TestConfigValidate(t *testing.T) {
@@ -195,12 +201,25 @@ func TestValidateReqs(t *testing.T) {
 		r.StartNodeKey = "ghost"
 		assert.ErrorContains(t, r.Validate(), "start_node_key")
 	})
+	t.Run("UpdateWorkflowReq 携带 type 即拒（同值）", func(t *testing.T) {
+		r := UpdateWorkflowReq{ID: 1, UpsertReq: validLinearReq()}
+		same := "chat"
+		r.Type = &same
+		assert.ErrorContains(t, r.Validate(), "type 不可变")
+	})
+	t.Run("UpdateWorkflowReq 携带 type 即拒（异值）", func(t *testing.T) {
+		r := UpdateWorkflowReq{ID: 1, UpsertReq: validLinearReq()}
+		other := "task"
+		r.Type = &other
+		assert.ErrorContains(t, r.Validate(), "type 不可变")
+	})
 }
 
-// validLinearReq 最小合法线性图（单 llm 节点、无边）。
+// validLinearReq 最小合法线性图（单 llm 节点、无边）；Type=chat（spec 08 起必填）。
 func validLinearReq() UpsertReq {
 	return UpsertReq{
 		Name:         "线性",
+		Type:         WorkflowTypeChat,
 		StartNodeKey: "only",
 		Nodes:        []NodeReq{{Key: "only", Type: NodeLLM, Config: json.RawMessage(`{"model_id":"3","prompt":"p"}`)}},
 		Edges:        []EdgeReq{},
@@ -249,6 +268,7 @@ func smartSupportReq() UpsertReq {
 	return UpsertReq{
 		Name:         "智能客服分流",
 		Description:  "意图识别 → 分支 → 查单 / 通用回复",
+		Type:         WorkflowTypeChat,
 		StartNodeKey: "classify",
 		Nodes: []NodeReq{
 			{Key: "classify", Type: NodeLLM, Name: "意图识别",
@@ -329,7 +349,7 @@ func TestUpsertValidate(t *testing.T) {
 	})
 	t.Run("R7 环 a→b→a", func(t *testing.T) {
 		r := UpsertReq{
-			Name: "环", StartNodeKey: "a",
+			Name: "环", Type: WorkflowTypeChat, StartNodeKey: "a",
 			Nodes: []NodeReq{
 				{Key: "a", Type: NodeLLM, Config: llmCfg},
 				{Key: "b", Type: NodeLLM, Config: llmCfg},
@@ -358,7 +378,7 @@ func TestUpsertValidate(t *testing.T) {
 		assert.NoError(t, validLinearReq().Validate())
 		// 显式 end 收尾：a(llm) → b(end)。
 		r := UpsertReq{
-			Name: "end 收尾", StartNodeKey: "a",
+			Name: "end 收尾", Type: WorkflowTypeChat, StartNodeKey: "a",
 			Nodes: []NodeReq{
 				{Key: "a", Type: NodeLLM, Config: llmCfg},
 				{Key: "b", Type: NodeEnd, Config: json.RawMessage(`{"output":"{{a}}"}`)},
@@ -370,7 +390,7 @@ func TestUpsertValidate(t *testing.T) {
 	t.Run("R9 end 节点带出边被拒", func(t *testing.T) {
 		// a→b(end)→c 无环且全可达，唯一违规点是 end 出边——钉住 R9 独立于 R7/R8。
 		r := UpsertReq{
-			Name: "end 出边", StartNodeKey: "a",
+			Name: "end 出边", Type: WorkflowTypeChat, StartNodeKey: "a",
 			Nodes: []NodeReq{
 				{Key: "a", Type: NodeLLM, Config: llmCfg},
 				{Key: "b", Type: NodeEnd, Config: json.RawMessage(`{}`)},
@@ -385,4 +405,75 @@ func TestUpsertValidate(t *testing.T) {
 		assert.ErrorContains(t, err, "b")
 		assert.ErrorContains(t, err, "出边")
 	})
+}
+
+// ---- spec 08 T004：WorkflowNodeConfig 解析 + UpsertReq.Type + SchemaField 形态 ----
+
+func TestParseWorkflowNodeConfig(t *testing.T) {
+	t.Run("合法 config（workflow_id 字符串化 + inputs 模板映射）", func(t *testing.T) {
+		cfg, err := ParseNodeConfig(NodeWorkflow, json.RawMessage(`{"workflow_id":"7","inputs":{"query":"{{input}}","top":"3"}}`))
+		assert.NoError(t, err)
+		c, ok := cfg.(*WorkflowNodeConfig)
+		assert.True(t, ok)
+		assert.Equal(t, uint64(7), c.WorkflowID)
+		assert.Equal(t, map[string]string{"query": "{{input}}", "top": "3"}, c.Inputs)
+	})
+	t.Run("workflow_id 缺失（零值）拒", func(t *testing.T) {
+		_, err := ParseNodeConfig(NodeWorkflow, json.RawMessage(`{"inputs":{"input":"{{input}}"}}`))
+		assert.ErrorIs(t, err, errInvalidNodeConfig)
+		assert.ErrorContains(t, err, "workflow_id")
+	})
+	t.Run("inputs 非映射拒", func(t *testing.T) {
+		_, err := ParseNodeConfig(NodeWorkflow, json.RawMessage(`{"workflow_id":"7","inputs":"notamap"}`))
+		assert.ErrorIs(t, err, errInvalidNodeConfig)
+	})
+	t.Run("inputs 值非字符串拒（密封 map[string]string）", func(t *testing.T) {
+		_, err := ParseNodeConfig(NodeWorkflow, json.RawMessage(`{"workflow_id":"7","inputs":{"query":3}}`))
+		assert.ErrorIs(t, err, errInvalidNodeConfig)
+	})
+	t.Run("inputs 缺省合法（键集语义归 service R11，api 只管形状）", func(t *testing.T) {
+		cfg, err := ParseNodeConfig(NodeWorkflow, json.RawMessage(`{"workflow_id":"7"}`))
+		assert.NoError(t, err)
+		c, ok := cfg.(*WorkflowNodeConfig)
+		assert.True(t, ok)
+		assert.Nil(t, c.Inputs)
+	})
+}
+
+func TestUpsertReqType(t *testing.T) {
+	typed := func(typ WorkflowType) UpsertReq {
+		r := validLinearReq()
+		r.Type = typ
+		return r
+	}
+	t.Run("type 必填", func(t *testing.T) {
+		r := validLinearReq()
+		r.Type = ""
+		assert.ErrorContains(t, r.Validate(), "type")
+	})
+	t.Run("oneof chat/task 过、非法值拒", func(t *testing.T) {
+		assert.NoError(t, typed(WorkflowTypeChat).Validate())
+		assert.NoError(t, typed(WorkflowTypeTask).Validate())
+		assert.ErrorContains(t, typed(WorkflowType("bogus")).Validate(), "type")
+	})
+	t.Run("Update 不携带 type 不受必填牵连（validateGraph 委托）", func(t *testing.T) {
+		// Update body 不带 type：UpdateWorkflowReq.Validate 走图规则而非 UpsertReq.Validate，
+		// 必填只 gate Create（携带即拒归 US3）。
+		r := UpdateWorkflowReq{ID: 1, UpsertReq: validLinearReq()}
+		assert.NoError(t, r.Validate())
+	})
+}
+
+func TestValidateSchemaFields(t *testing.T) {
+	assert.NoError(t, ValidateSchemaFields(nil), "nil schema = 未声明，合法")
+	assert.NoError(t, ValidateSchemaFields([]SchemaField{
+		{Name: "query", Type: "string", Required: true, Description: "查询词"},
+		{Name: "top", Type: "number"},
+		{Name: "verbose", Type: "boolean"},
+	}))
+	assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{
+		{Name: "query", Type: "string"}, {Name: "query", Type: "number"},
+	}), "重名")
+	assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{{Name: "q", Type: "integer"}}), "type")
+	assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{{Name: "", Type: "string"}}), "name")
 }

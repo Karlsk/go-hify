@@ -9,11 +9,13 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,13 +50,19 @@ type ragRetriever interface {
 	Retrieve(ctx context.Context, req ragapi.RetrieveReq) ([]ragapi.RetrievedChunk, error)
 }
 
+// childExecFunc workflow 节点的子执行缝（spec 08 §4.3）：签名与
+// workflowService.executeChild 对齐（同包函数类型——executor 不持有 service 类型，
+// 避免执行器与编排层互相持有）；生产由 New 接线 executeChild，测试注入 stub。
+type childExecFunc func(ctx context.Context, workflowID uint64, fields map[string]string, parent *execContext) (childResult, error)
+
 // executor 节点执行器（无状态，execContext 承载单次执行的可变状态）。
 type executor struct {
 	resolveLLM   llmConfigResolver
 	clients      llmClientFactory
 	execs        executionWriter
 	rags         ragRetriever
-	blockPrivate bool // O6：WORKFLOW_API_BLOCK_PRIVATE（RFC1918 一并拒绝）
+	blockPrivate bool          // O6：WORKFLOW_API_BLOCK_PRIVATE（RFC1918 一并拒绝）
+	execChild    childExecFunc // workflow 节点执行缝（spec 08）：New 接线，测试注入 stub
 }
 
 // newExecutor 组装执行器（依赖由组合根注入；测试注入 stub）。
@@ -79,6 +87,8 @@ func (e *executor) runNode(ctx context.Context, key string, cfg workflowapi.Node
 		out, err = e.callAPI(ctx, v, c)
 	case *workflowapi.EndConfig:
 		out, err = e.buildOutput(v, c)
+	case *workflowapi.WorkflowNodeConfig:
+		out, err = e.callWorkflow(ctx, key, v, c)
 	case *workflowapi.ToolConfig:
 		err = fmt.Errorf("%w: tool node %q not supported (mcp 未建，图缺陷)", errs.ErrValidationFailed, key)
 	default:
@@ -203,6 +213,32 @@ func (e *executor) retrieve(ctx context.Context, cfg *workflowapi.KnowledgeRetri
 		parts = append(parts, fmt.Sprintf("[%d] %s（来源：%s）", i+1, ch.Content, ch.DocumentName))
 	}
 	return strings.Join(parts, "\n"), nil
+}
+
+// callWorkflow workflow 节点（spec 08 §4.3 / FR5）：inputs 逐值 strict 渲染（缺失即
+// 图缺陷 400 带 inputs.<字段> 定位，先于子调用——不浪费子图 IO）→ 透传 execChild
+// 递归执行子图 → 子终稿原样返回（runNode 统一落父池 + `node %s:` 前缀包装）；失败
+// 子 run 只要 run 已落也链接进 childRunIDs（轨迹完整优先）；节点入参摘要记
+// workflow_id（字符串化）与渲染后 inputs 映射。
+func (e *executor) callWorkflow(ctx context.Context, key string, cfg *workflowapi.WorkflowNodeConfig, c *execContext) (string, error) {
+	rendered := make(map[string]string, len(cfg.Inputs))
+	for k, tpl := range cfg.Inputs {
+		v, err := c.render(tpl)
+		if err != nil {
+			return "", fmt.Errorf("%w: inputs.%s: %v", errs.ErrValidationFailed, k, err)
+		}
+		rendered[k] = v
+	}
+	inJSON, err := json.Marshal(rendered)
+	if err != nil {
+		inJSON = []byte("{}") // 防御兜底：map[string]string 序列化不会失败
+	}
+	c.setNodeIn(map[string]string{"workflow_id": strconv.FormatUint(cfg.WorkflowID, 10), "inputs": string(inJSON)})
+	res, err := e.execChild(ctx, cfg.WorkflowID, rendered, c)
+	if res.runID != 0 {
+		c.childRunIDs = append(c.childRunIDs, res.runID) // 失败子 run 也参与链接
+	}
+	return res.output, err
 }
 
 // buildAPIRequest api 节点纯渲染（无网络）：url / method / headers 值 / body 全链

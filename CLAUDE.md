@@ -779,7 +779,7 @@ Hify 索引地图（建表时照抄；向量索引细节见《pgvector 索引规
 | `workflows` | `uq_workflows_name (name)` |
 | `workflow_nodes` | `(workflow_id)` |
 | `workflow_edges` | `(workflow_id)` |
-| `workflow_runs` | `(workflow_id, created_at DESC)`（按工作流查运行历史，00019） |
+| `workflow_runs` | `(workflow_id, created_at DESC)`（按工作流查运行历史，00019）；`parent_run_id` 无索引（spec 08：子 run 按父关联是低频排障路径、每父行数个，00020 只加列） |
 | `workflow_node_runs` | `(run_id)` + uq `(run_id, seq)`（run 内 seq 回放序，00019） |
 | `providers`/`users`/`mcp_servers` | PK + 业务唯一键（`providers.name`、`users.username`） |
 
@@ -1120,9 +1120,9 @@ HTTP 状态映射：
 | `AGENT_IN_USE` | 409 | `agentapi.ErrAgentInUse`（Agent 有历史会话，删除被 FK RESTRICT 挡） |
 | `CONVERSATION_NOT_FOUND` | 404 | `chatapi.ErrConversationNotFound` |
 | `MODEL_CONTEXT_TOO_LONG` | 400 | `chatapi.ErrModelContextTooLong`（chat service 翻译自 llm `InvalidRequest`） |
-| `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound`；`agentapi.ErrWorkflowNotFound`（agent 侧绑定写入同码哨兵，FK 23503 约束名分发翻译——agent 不依赖 workflow，FK 是其存在性的唯一校验） |
+| `WORKFLOW_NOT_FOUND` | 404 | `workflowapi.ErrWorkflowNotFound`；`agentapi.ErrWorkflowNotFound`（agent 侧绑定写入同码哨兵，FK 23503 约束名分发翻译——agent 不依赖 workflow，FK 是其存在性的唯一校验）；spec 08 另触发于执行期被引 workflow 已删（fail-fast，带父 node 前缀） |
 | `WORKFLOW_NAME_CONFLICT` | 409 | `workflowapi.ErrWorkflowNameConflict`（workflow 名称唯一约束） |
-| `WORKFLOW_NOT_PUBLISHED` | 503 | `workflowapi.ErrWorkflowNotPublished`（workflow 未发布，执行被拒） |
+| `WORKFLOW_NOT_PUBLISHED` | 503 | `workflowapi.ErrWorkflowNotPublished`（workflow 未发布，执行被拒；spec 08 起嵌套执行时子图非 published 同拒，带父 node 前缀） |
 | `WORKFLOW_IN_USE` | 409 | `workflowapi.ErrWorkflowInUse`（被 agent 绑定，删除被 FK RESTRICT 挡，spec 05） |
 | `WORKFLOW_EXECUTION_FAILED` | 500 | `workflowapi.ErrWorkflowExecutionFailed`（执行引擎环境限制类：api 节点 SSRF 拦截 / 总时长超 5min，spec 06） |
 | `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound`（KB 不存在）；`agentapi.ErrKnowledgeBaseNotFound`（agent 侧绑定写入同码哨兵，FK 23503 翻译——agent 不依赖 rag，FK 是 KB 存在性的唯一校验） |
@@ -1131,7 +1131,7 @@ HTTP 状态映射：
 
 规则：
 
-- 码命名 `MODULE_REASON`，全大写下划线；**新增码必须先有 `api/` 包哨兵错误**，再在 handler 加 `errors.Is` → 状态映射——不存在只改前端、后端无对应哨兵的码。
+- 码命名 `MODULE_REASON`，全大写下划线；**新增码必须先有 `api/` 包哨兵错误**，再在 handler 加 `errors.Is` → 状态映射——不存在只改前端、后端无对应哨兵的码。（spec 08 workflow 分型与嵌套**哨兵零新增**——四类复用既有行：NOT_FOUND / NOT_PUBLISHED / VALIDATION_FAILED / EXECUTION_FAILED，嵌套错误经 message 的父 node 前缀链定位。）
 - `error.details`：字段级校验错误放这里（`{"fields":[{"field":"name","msg":"required"}]}`）。
 - 500 类不回原始堆栈给前端，只回 `INTERNAL_ERROR` + trace_id，细节进结构化日志（见《部署架构》logging）。
 - 流式模式的错误见《对话接口》：流已 200 开始，后续错误用 `error` 事件（`type` 判别）携带 `code` + `retryable`，不改 HTTP 状态。

@@ -8,8 +8,11 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"testing"
 
 	"github.com/cloudwego/eino/schema"
@@ -332,4 +335,305 @@ func TestRouteNoMatchFailFast(t *testing.T) {
 	_, _, err := route(edges, "true")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+}
+
+// ---- spec 08 T014：runNode workflow 分支（inputs 渲染 / JSON 组装 / 子终稿落池 /
+// 前缀链 / 子池隔离）+ 结构化 I/O 契约（assembleInputJSON / validateOutputSchema）----
+
+// childCall 一次 executeChild 调用的入参快照。
+type childCall struct {
+	ctx        context.Context
+	workflowID uint64
+	fields     map[string]string
+	parent     *execContext
+}
+
+// childExecStub executeChild 的可编程 stub：按序弹 results / errs（末位驻留），
+// 记录全部调用供断言。
+type childExecStub struct {
+	calls   []childCall
+	results []childResult
+	errs    []error
+}
+
+func (s *childExecStub) call(ctx context.Context, workflowID uint64, fields map[string]string,
+	parent *execContext) (childResult, error) {
+	s.calls = append(s.calls, childCall{ctx: ctx, workflowID: workflowID, fields: fields, parent: parent})
+	i := len(s.calls) - 1
+	var res childResult
+	if i < len(s.results) {
+		res = s.results[i]
+	}
+	var err error
+	if i < len(s.errs) {
+		err = s.errs[i]
+	}
+	return res, err
+}
+
+// inputs 逐值渲染 strict → 透传 executeChild → 子终稿落父池 node_key（下游模板可引）
+// + runID 累积 + 节点入参轨迹（workflow_id 字符串化）。
+func TestRunNodeWorkflow(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	stub := &childExecStub{results: []childResult{{output: "子答案", runID: 9}}}
+	e.execChild = stub.call
+	c := newExecContext("查订单")
+
+	out, err := e.runNode(context.Background(), "sub",
+		&workflowapi.WorkflowNodeConfig{WorkflowID: 5, Inputs: map[string]string{"query": "{{input}}"}}, c)
+	require.NoError(t, err)
+	assert.Equal(t, "子答案", out, "子终稿原样落父变量池")
+
+	require.Len(t, stub.calls, 1)
+	assert.Equal(t, uint64(5), stub.calls[0].workflowID)
+	assert.Equal(t, map[string]string{"query": "查订单"}, stub.calls[0].fields, "inputs 逐值渲染后透传")
+	assert.Same(t, c, stub.calls[0].parent, "父 execContext 直传（深度 / 引用沿此递归）")
+	assert.Equal(t, []uint64{9}, c.childRunIDs, "子 run id 累积供父收尾回填")
+	inTrace := c.takeNodeIn()
+	assert.Equal(t, "5", inTrace["workflow_id"], "轨迹 workflow_id 字符串化")
+	assert.Contains(t, inTrace["inputs"], `"query":"查订单"`, "轨迹 inputs 为渲染后映射")
+}
+
+// inputs 值渲染缺失变量 → 图缺陷 400 带 inputs.<字段> 定位，零下游调用。
+func TestRunNodeWorkflowStrictMissing(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	stub := &childExecStub{}
+	e.execChild = stub.call
+	c := newExecContext("查订单")
+
+	_, err := e.runNode(context.Background(), "sub",
+		&workflowapi.WorkflowNodeConfig{WorkflowID: 5, Inputs: map[string]string{"query": "{{typo}}"}}, c)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed, "缺失变量 → 图缺陷 400")
+	assert.Contains(t, err.Error(), "inputs.query", "定位到 inputs 字段位")
+	assert.Contains(t, err.Error(), "node sub:", "统一 node 前缀包装")
+	assert.Empty(t, stub.calls, "渲染先于子调用")
+}
+
+// 子图错误经父 runNode 包装点叠加前缀：node outer: node inner:（FR6 可读定位链）。
+func TestRunNodeWorkflowErrorPrefixChain(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	stub := &childExecStub{errs: []error{fmt.Errorf("node inner: %w", errs.ErrValidationFailed)}}
+	e.execChild = stub.call
+	c := newExecContext("in")
+
+	_, err := e.runNode(context.Background(), "outer",
+		&workflowapi.WorkflowNodeConfig{WorkflowID: 5, Inputs: map[string]string{"input": "v"}}, c)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "node outer: node inner:", "前缀链逐层叠加")
+}
+
+// 子执行失败但 run 已落（降级语义保证 runID 照返）→ 仍链接进 childRunIDs（轨迹完整优先）。
+func TestRunNodeWorkflowFailedChildRunStillLinked(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	stub := &childExecStub{results: []childResult{{runID: 5}}, errs: []error{errors.New("child boom")}}
+	e.execChild = stub.call
+	c := newExecContext("in")
+
+	_, err := e.runNode(context.Background(), "sub",
+		&workflowapi.WorkflowNodeConfig{WorkflowID: 5, Inputs: map[string]string{"input": "v"}}, c)
+	require.Error(t, err)
+	assert.Equal(t, []uint64{5}, c.childRunIDs, "失败子 run 也参与链接")
+}
+
+// assembleInputJSON 按子 input_schema 组装 JSON 文本入参（纯函数表驱动）：
+// string 直存 / number / boolean 类型转换 / required 缺失 / 未声明字段 / optional 省略 /
+// 无 schema 单一入参回退（原样返回非 JSON 包装）。
+func TestAssembleInputJSON(t *testing.T) {
+	querySchema := strPtr(`[{"name":"query","type":"string","required":true}]`)
+	mixedSchema := strPtr(`[{"name":"query","type":"string","required":true},{"name":"top","type":"number"}]`)
+	optionalSchema := strPtr(`[{"name":"query","type":"string","required":true},{"name":"top","type":"number"}]`)
+	boolSchema := strPtr(`[{"name":"flag","type":"boolean"}]`)
+	twoOptSchema := strPtr(`[{"name":"a","type":"string"},{"name":"b","type":"string"}]`)
+
+	tests := []struct {
+		name      string
+		fields    map[string]string
+		schema    *string
+		want      string
+		wantErr   bool
+		contains  string
+	}{
+		{"无 schema 恰 {input}：原样返回（非 JSON 包装）", map[string]string{"input": "查订单"}, nil, "查订单", false, ""},
+		{"无 schema 键集非 {input} 拒", map[string]string{"query": "x"}, nil, "", true, "input"},
+		{"string 字段直存", map[string]string{"query": "查单"}, querySchema, `{"query":"查单"}`, false, ""},
+		{"number 字段合法转换", map[string]string{"top": "3.5"}, strPtr(`[{"name":"top","type":"number"}]`), `{"top":3.5}`, false, ""},
+		{"number 字段非法拒", map[string]string{"top": "abc"}, strPtr(`[{"name":"top","type":"number"}]`), "", true, "number"},
+		{"boolean 字段合法转换", map[string]string{"flag": "true"}, boolSchema, `{"flag":true}`, false, ""},
+		{"boolean 字段非法拒", map[string]string{"flag": "yes"}, boolSchema, "", true, "boolean"},
+		{"required 缺失拒", map[string]string{"top": "1"}, mixedSchema, "", true, "query"},
+		{"optional 缺失省略", map[string]string{"query": "q"}, optionalSchema, `{"query":"q"}`, false, ""},
+		{"未声明字段拒", map[string]string{"query": "q", "extra": "x"}, querySchema, "", true, "extra"},
+		{"键按字母序输出（可复现）", map[string]string{"b": "2", "a": "1"}, twoOptSchema, `{"a":"1","b":"2"}`, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := assembleInputJSON(tt.fields, tt.schema)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.contains)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// validateOutputSchema task 型终稿按 output_schema 校验（纯函数表驱动）：
+// nil 宽容 / 非 JSON 对象拒（含数组）/ required 缺失 / 三类类型探针 / 类型不符 / 多余宽容。
+func TestValidateOutputSchema(t *testing.T) {
+	answerSchema := strPtr(`[{"name":"answer","type":"string","required":true}]`)
+	tests := []struct {
+		name     string
+		output   string
+		schema   *string
+		wantErr  bool
+		contains string
+	}{
+		{"未声明 schema：零校验", "任意文本", nil, false, ""},
+		{"非 JSON 对象拒", "子答案", answerSchema, true, "JSON"},
+		{"JSON 数组拒（须对象）", `[1,2]`, answerSchema, true, "JSON"},
+		{"required 缺失拒", `{"top":1}`, answerSchema, true, "answer"},
+		{"string 类型过", `{"answer":"ok"}`, answerSchema, false, ""},
+		{"number 类型过", `{"top":3.5}`, strPtr(`[{"name":"top","type":"number"}]`), false, ""},
+		{"boolean 类型过", `{"flag":true}`, strPtr(`[{"name":"flag","type":"boolean"}]`), false, ""},
+		{"类型不符拒", `{"answer":"txt"}`, strPtr(`[{"name":"answer","type":"number"}]`), true, "类型不符"},
+		{"多余字段宽容读取", `{"answer":"ok","extra":1}`, answerSchema, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateOutputSchema(tt.output, tt.schema)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.contains)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// ---- Execute 级嵌套端到端（真实执行器 + executeChild 全链）----
+
+// 全链 happy path：classify 渲染进 inputs → 组装 JSON 入参 → 子图池下钻 {{input.query}} →
+// 子终稿过 output_schema → 落父池 {{sub.answer}} 下钻 → 子 run 行（trigger/引用/Input）+
+// 父 run 行（chat 触发）+ parent_run_id 回填。
+func TestExecuteNestedHappyPath(t *testing.T) {
+	parent := parentNestedGraph(3, "chat", "published", 5, `{"query":"{{classify}}"}`, `{{sub.answer}}`)
+	child := childTaskGraph(5, "published",
+		`[{"name":"query","type":"string","required":true}]`,
+		`[{"name":"answer","type":"string","required":true}]`,
+		`检索：{{input.query}}`, `{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{3: parent, 5: child},
+		twoGen("ORDER_QUERY", `{"answer":"子答案"}`))
+	convID := uint64(88)
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{
+		ID: 3, Input: "查订单", ConversationID: &convID})
+	require.NoError(t, err)
+	assert.Equal(t, "子答案", res.Output, "父 end 经 {{sub.answer}} 一级下钻取子终稿字段")
+
+	require.Len(t, env.runs, 2, "子先父后两 run 行")
+	childRun := env.runs[0]
+	assert.Equal(t, uint64(5), childRun.WorkflowID)
+	assert.Equal(t, "workflow", childRun.TriggerSource)
+	require.NotNil(t, childRun.ConversationID)
+	assert.Equal(t, uint64(88), *childRun.ConversationID, "conversation 引用透传")
+	assert.Equal(t, "succeeded", childRun.Status)
+	assert.Equal(t, `{"query":"ORDER_QUERY"}`, decodeJSONb(t, childRun.Input)["input"],
+		"子 run 入参 = 渲染后按 schema 组装的 JSON 文本")
+	parentRun := env.runs[1]
+	assert.Equal(t, uint64(3), parentRun.WorkflowID)
+	assert.Equal(t, "chat", parentRun.TriggerSource)
+	assert.Equal(t, "succeeded", parentRun.Status)
+
+	assert.Equal(t, []backfillCall{{parentRunID: 8, childRunIDs: []uint64{7}}}, env.backfills,
+		"父收尾批量回填 parent_run_id")
+
+	var subTrace bool
+	for _, nt := range res.NodeTrace {
+		if nt.NodeKey == "sub" && nt.NodeType == "workflow" {
+			subTrace = true
+		}
+	}
+	assert.True(t, subTrace, "父轨迹含 workflow 类型节点行")
+}
+
+// 子池隔离（FR5）：子图模板引用父 vars（classify）→ 运行期 strict 缺失，
+// 前缀链 node sub: node c_work:；两 run 行照写（失败轨迹）且回填照常。
+func TestExecuteNestedPoolIsolationAndPrefixChain(t *testing.T) {
+	parent := parentNestedGraph(3, "chat", "published", 5, `{"input":"{{classify}}"}`, `{{sub}}`)
+	child := childTaskGraph(5, "published", "", "", `答案：{{classify}}`, `{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{3: parent, 5: child}, singleGen("ORDER_QUERY"))
+
+	_, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 3, Input: "查订单"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed, "子图缺陷 → 400")
+	assert.Contains(t, err.Error(), "node sub: node c_work:", "跨层前缀链定位")
+	assert.Contains(t, err.Error(), "classify", "报错带缺失变量名")
+
+	require.Len(t, env.runs, 2)
+	assert.Equal(t, "failed", env.runs[0].Status)
+	assert.Equal(t, "c_work", env.runs[0].ErrorNode, "子 error_node 定位子节点")
+	assert.Equal(t, "failed", env.runs[1].Status)
+	assert.Equal(t, "sub", env.runs[1].ErrorNode, "父 error_node 定位 sub-workflow 节点")
+	assert.Equal(t, []backfillCall{{parentRunID: 8, childRunIDs: []uint64{7}}}, env.backfills,
+		"失败子 run 照常链接")
+}
+
+// 子终稿 output schema 校验失败（FR9）：声明 schema 而终稿非 JSON → 图缺陷 400 带父前缀；
+// 子 run 行 error_node 定位子 end 节点；回填照常。
+func TestExecuteNestedChildOutputSchemaFail(t *testing.T) {
+	parent := parentNestedGraph(3, "chat", "published", 5, `{"input":"{{classify}}"}`, `{{sub}}`)
+	child := childTaskGraph(5, "published", "",
+		`[{"name":"answer","type":"string","required":true}]`,
+		`工作：{{input}}`, `终稿：{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{3: parent, 5: child}, singleGen("子答案"))
+
+	_, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 3, Input: "查订单"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed, "output 契约违反 → 图缺陷 400")
+	assert.Contains(t, err.Error(), "node sub:")
+	assert.Contains(t, err.Error(), "终稿非合法 JSON")
+
+	require.Len(t, env.runs, 2)
+	assert.Equal(t, "failed", env.runs[0].Status)
+	assert.Equal(t, "c_end", env.runs[0].ErrorNode, "子 error_node = 最后执行节点（output 校验在 walk 后）")
+	assert.Equal(t, "sub", env.runs[1].ErrorNode)
+	assert.Equal(t, []backfillCall{{parentRunID: 8, childRunIDs: []uint64{7}}}, env.backfills)
+}
+
+// chainGraph 深度链环节点：单 workflow 节点引 childID、无出边（隐式终止）。
+func chainGraph(id, childID uint64) *graphSnapshot {
+	wf := &Workflow{Name: "链", StartNodeKey: "w", Status: "published", Type: "task"}
+	wf.ID = id
+	nodes := []WorkflowNode{{NodeKey: "w", Type: "workflow",
+		Config: fmt.Sprintf(`{"workflow_id":%q,"inputs":{"input":"{{input}}"}}`, strconv.FormatUint(childID, 10))}}
+	return &graphSnapshot{wf: wf, nodes: nodes}
+}
+
+// 执行期深度兜底（FR4/O4）：1→2→3→4 第 3 层超限（限顶层 + 2 层），
+// 深度检查先于 loadGraph（4 号图不存在也不报 404）；三个 run 行照写失败、逐层回填。
+func TestExecuteNestedDepthExceeded(t *testing.T) {
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{
+		1: chainGraph(1, 2), 2: chainGraph(2, 3), 3: chainGraph(3, 4), // 4 不存在
+	}, singleGen("x"))
+
+	_, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 1, Input: "in"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "node w: node w: node w:", "三层前缀链")
+	assert.Contains(t, err.Error(), "深度")
+
+	require.Len(t, env.runs, 3, "每已执行层一行失败 run（第 4 层零 IO 零行）")
+	for i, run := range env.runs {
+		assert.Equal(t, "failed", run.Status, "run[%d] 失败", i)
+		assert.Equal(t, "w", run.ErrorNode)
+	}
+	assert.Equal(t, []backfillCall{
+		{parentRunID: 8, childRunIDs: []uint64{7}},
+		{parentRunID: 9, childRunIDs: []uint64{8}},
+	}, env.backfills, "中间层逐层回填")
 }

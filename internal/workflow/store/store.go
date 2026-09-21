@@ -7,6 +7,8 @@ package store
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -17,7 +19,7 @@ import (
 // select* 显式列清单（禁 SELECT *：GORM 默认 Find 发 SELECT * 文本，仓规禁止；
 // 列集 = model 字段集，加列须两处同步）。
 const (
-	selectWorkflow = "id, name, description, start_node_key, status, created_at, updated_at"
+	selectWorkflow = "id, name, description, start_node_key, status, type, input_schema, output_schema, created_at, updated_at"
 	selectNode     = "id, workflow_id, node_key, type, name, config, created_at"
 	selectEdge     = "id, workflow_id, source_node_key, target_node_key, condition, created_at"
 )
@@ -122,8 +124,10 @@ func (s *Store) Create(ctx context.Context, wf *workflowsvc.Workflow, nodes []wo
 }
 
 // ReplaceGraph 整图替换单事务：UPDATE workflows（不含 status——编辑不降级，db_model
-// 决策 #6；affected=0 → false 短路，不再删插，service 翻译 404）→ DELETE nodes →
-// DELETE edges → 批量 INSERT ×2。先删后插硬删、不做 diff（决策 #8）；updated_at 由
+// 决策 #6；也不含 type——分型不可变，spec 08，Update 携带即拒归 service guard）→
+// DELETE nodes → DELETE edges → 批量 INSERT ×2。schema 列随整图全量替换：请求未
+// 携带即置 NULL（PUT 语义，与 nodes/edges 先删后插一致）。affected=0 → false 短路，
+// 不再删插，service 翻译 404；先删后插硬删、不做 diff（决策 #8）；updated_at 由
 // autoUpdateTime 维护。返回是否命中存在行。
 func (s *Store) ReplaceGraph(ctx context.Context, wf *workflowsvc.Workflow, nodes []workflowsvc.WorkflowNode, edges []workflowsvc.WorkflowEdge) (bool, error) {
 	moved := false
@@ -134,6 +138,8 @@ func (s *Store) ReplaceGraph(ctx context.Context, wf *workflowsvc.Workflow, node
 				"name":           wf.Name,
 				"description":    wf.Description,
 				"start_node_key": wf.StartNodeKey,
+				"input_schema":   wf.InputSchema,
+				"output_schema":  wf.OutputSchema,
 			})
 		if res.Error != nil {
 			return fmt.Errorf("replace graph workflow %d: %w", wf.ID, res.Error)
@@ -215,4 +221,36 @@ func (s *Store) DeleteRunsBefore(ctx context.Context, before time.Time, limit in
 		return 0, fmt.Errorf("delete workflow runs before %s: %w", before.Format(time.RFC3339), res.Error)
 	}
 	return res.RowsAffected, nil
+}
+
+// updateParentRunIDsSQL 子 run 的 parent_run_id 批量回填（spec 08 O5）：按父 run id
+// 一次窄 UPDATE——append-only 表的唯一 UPDATE 例外（父收尾统一回填）；id 集合以
+// bigint[] 数组字面量 + 显式 cast 绑定（单语句批量、参数类型对齐列类型）。
+const updateParentRunIDsSQL = `UPDATE workflow_runs SET parent_run_id = $1 WHERE id = ANY($2::bigint[])`
+
+// buildBigIntArray []uint64 → PG 数组字面量 `{1,2,3}`（配 ANY($1::bigint[])）。
+func buildBigIntArray(ids []uint64) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatUint(id, 10))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// UpdateParentRunIDs 父 run 落库后回填其直接子 run 的 parent_run_id；childRunIDs
+// 空 → 短路零 SQL。错误 %w 包装原样上抛（调用方 WARN 不阻断返回）。
+func (s *Store) UpdateParentRunIDs(ctx context.Context, parentRunID uint64, childRunIDs []uint64) error {
+	if len(childRunIDs) == 0 {
+		return nil
+	}
+	res := s.db.WithContext(ctx).Exec(updateParentRunIDsSQL, parentRunID, buildBigIntArray(childRunIDs))
+	if res.Error != nil {
+		return fmt.Errorf("update parent_run_id for run %d: %w", parentRunID, res.Error)
+	}
+	return nil
 }

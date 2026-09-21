@@ -1,11 +1,15 @@
-# Workflow 引擎管道手动冒烟测试（chat → workflow，spec 07）
+# Workflow 引擎手动冒烟测试（spec 07 + spec 08）
 
-验证对象：chat 管道接线全链路——**绑定 workflow 的 agent，消息确定性先过工作流，终稿即本轮
-assistant 回复**（`internal/chat` 管道分支 + `internal/workflow` 执行引擎 + 组合根接线）。
+验证对象：
+- **Spec 07**：chat 管道接线全链路——**绑定 workflow 的 agent，消息确定性先过工作流，终稿即本轮
+  assistant 回复**（`internal/chat` 管道分支 + `internal/workflow` 执行引擎 + 组合根接线）
+- **Spec 08**：workflow 分型与子工作流嵌套——**chat/task 两型 + sub-workflow 节点 + R11 嵌套校验 +
+  parent_run_id 轨迹**
+
 全部为手工步骤，自动化覆盖见各包 `*_test.go`；实现决策见 `docs/changelog/workflow/`。
 
-> 本文档是 spec 07（chat 管道接线）人工验收的**唯一入口**：环境启动 → 前置数据 →
-> 冒烟三步走 → psql 两链互溯，一篇走完，不需要在 chat / workflow 两份手测文档间跳转。
+> 本文档是 workflow 引擎人工验收的**唯一入口**：环境启动 → 前置数据 → spec 07 管道冒烟 →
+> spec 08 嵌套冒烟 → psql 轨迹验证，一篇走完，不需要在多份手测文档间跳转。
 > 完整的 chat 模块冒烟见 [chat-manual-test.md](chat-manual-test.md)；完整的 workflow
 > 模块 CRUD / 执行端点冒烟见 [workflow-manual-test.md](workflow-manual-test.md)。
 
@@ -48,7 +52,7 @@ REDIS_ADDR=localhost:6379
 ```
 
 ```bash
-make migrate-up && make migrate-status   # 预期 19 条全部 applied
+make migrate-up && make migrate-status   # 预期 20 条全部 applied（00020 含内）
 make start                               # 日志落 logs/hify.log
 curl -s localhost:8081/health | jq .     # → {"success":true,...}
 ```
@@ -94,6 +98,7 @@ WF=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
   -d "{
     \"name\": \"管道冒烟\",
     \"description\": \"spec 07 管道接线验证用\",
+    \"type\": \"chat\",
     \"start_node_key\": \"llm\",
     \"nodes\": [
       {\"key\":\"llm\",\"type\":\"llm\",\"name\":\"生成节点\",
@@ -105,7 +110,7 @@ WF=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
     ]
   }")
 WF_ID=$(echo "$WF" | jq -r .data.id)
-echo "$WF" | jq '.data.status, .data.id'   # → "draft"、非空字符串
+echo "$WF" | jq '.data.status, .data.type, .data.id'   # → "draft"、"chat"、非空字符串
 
 # 发布（管道只认 published）
 curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/${WF_ID}/publish" | jq .data.status
@@ -225,6 +230,210 @@ docker exec hify-pg-test psql -U hify -d hify -c \
 - 管道路径 chat 层不记 executions（workflow 内部 llm 节点自记，conversation_id 置空）——
   `executions` 表里查不到管道轮的 chat 侧行是正常的。
 
-## 7. 走查结论
+## 7. 嵌套冒烟（spec 08：chat/task 分型 + sub-workflow）
+
+四组用例：两型创建 / 嵌套保存矩阵（R11）/ 嵌套执行 / psql 查 runs 树。
+除 7.3 标注的子把关负向外全部为确定性图（无 llm 节点，不依赖真实 LLM）。
+
+### 7.1 两型创建
+
+```bash
+# ⓪ 不带 type → 400（spec 08 起 Create 必填分型）
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"no-type","start_node_key":"e","nodes":[{"key":"e","type":"end","config":{}}],"edges":[]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"（400），message 含 "type 必填"
+
+# ① task 型：声明 input_schema / output_schema（简化形态 [{name,type,required,description}]）
+TASK=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "echo-task",
+    "type": "task",
+    "input_schema": [{"name":"query","type":"string","required":true,"description":"查询词"}],
+    "output_schema": [{"name":"answer","type":"string","required":true,"description":"回声"}],
+    "start_node_key": "echo",
+    "nodes": [
+      {"key":"echo","type":"end","name":"回声",
+       "config":{"output":"{\"answer\":\"echo:{{input.query}}\"}"}}
+    ],
+    "edges": []
+  }')
+echo "$TASK" | jq '.data.type, .data.input_schema, .data.status'
+# → "task"、字段集 round-trip 一致、"draft"
+TASK_ID=$(echo "$TASK" | jq -r .data.id)
+
+# ② chat 型零 schema：§4 已建（type 露出见 §4 预期），不重复
+
+# ③ Update 携带 type 即拒（同值也拒——分型不可变，换型 = 删了重建）
+curl -s -b /tmp/hify-jar -X PUT "localhost:8081/api/v1/workflows/$TASK_ID" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg id "$TASK_ID" '{
+    name:"echo-task", type:"task",
+    input_schema:[{name:"query",type:"string",required:true,description:"查询词"}],
+    start_node_key:"echo",
+    nodes:[{key:"echo",type:"end",name:"回声",
+      config:{output:"{\"answer\":\"echo:{{input.query}}\"}"}}],
+    edges:[]}')" | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"（400），message 含 "type 不可变"
+
+# ④ chat 型携带非空 schema 拒（强不变量：schema 仅 task 型消费）
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"chat-with-schema","type":"chat","input_schema":[{"name":"q","type":"string","required":true}],"start_node_key":"e","nodes":[{"key":"e","type":"end","config":{}}],"edges":[]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"（400），message 含 "chat 型不支持 input_schema"
+```
+
+> 存量回填（迁移 00020 `DEFAULT 'chat'`）：新起测试库无迁移前存量，直接冒烟不可达——
+> 真实升级库跑 `SELECT type, count(*) FROM workflows GROUP BY 1;` 应全为 chat；
+> 空测试库可代验列默认：`docker exec hify-pg-test psql -U hify -d hify -c
+> "SELECT column_default FROM information_schema.columns WHERE table_name='workflows' AND column_name='type';"`
+> → `'chat'::text`。
+
+### 7.2 嵌套保存矩阵（R11，全部 400 VALIDATION_FAILED）
+
+```bash
+# ① 引 chat 型拒（$WF_ID = §4 的 chat 型客服分流）
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-bad-chat","type":"task","start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$WF_ID"'","inputs":{"input":"{{input}}"}}},{"key":"end","type":"end","config":{}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"，message 含 "为 chat 型（嵌套目标仅 task 型）"
+
+# ② 引用不存在拒
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-missing","type":"task","start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"99999","inputs":{"input":"{{input}}"}}},{"key":"end","type":"end","config":{}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"，message 含 "引用的 workflow 99999 不存在"
+
+# ③ 自嵌拒（PUT 图引用自身 id——创建时无 id，自嵌只能在编辑时发生）
+curl -s -b /tmp/hify-jar -X PUT "localhost:8081/api/v1/workflows/$TASK_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"echo-task","input_schema":[{"name":"query","type":"string","required":true,"description":"查询词"}],"start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$TASK_ID"'","inputs":{"query":"{{input}}"}}},{"key":"end","type":"end","config":{}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"，message 含 "自嵌禁止"
+
+# ④ 缺 required 字段拒（echo-task 声明 required query，inputs 空映射）
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-missing-field","type":"task","start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$TASK_ID"'","inputs":{}}},{"key":"end","type":"end","config":{}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"，message 含 "inputs 缺少 required 字段 [query]"
+
+# ⑤ 多余字段拒（query 之外多带 extra）
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-extra-field","type":"task","start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$TASK_ID"'","inputs":{"query":"{{input}}","extra":"x"}}},{"key":"end","type":"end","config":{}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"，message 含 "inputs 含未声明字段 [extra]"
+
+# ⑥ 无 schema 回退恰 {input}（子图未声明 input_schema 时，键集必须恰为 [input]）
+NOSCHEMA_ID=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-noschema-child","type":"task","start_node_key":"e","nodes":[{"key":"e","type":"end","config":{"output":"{{input}}"}}],"edges":[]}' | jq -r .data.id)
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-noschema-bad","type":"task","start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$NOSCHEMA_ID"'","inputs":{"query":"{{input}}"}}},{"key":"end","type":"end","config":{}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"，message 含 "键集必须恰为 [input]"
+# （合法形态即 inputs {"input":"{{input}}"}——7.3 的父图对有 schema 子图用 {"query":...}，同理）
+
+# ⑦ 链深超上限拒：顶层 + 2 层合法、+ 3 层拒（与执行期兜底同值）
+#    链上三图同形：input_schema 声明 query，workflow 节点 inputs 用 {{input.query}} 下钻传递
+LEAF_ID=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-leaf","type":"task","input_schema":[{"name":"query","type":"string","required":true}],"start_node_key":"e","nodes":[{"key":"e","type":"end","config":{"output":"leaf:{{input.query}}"}}],"edges":[]}' | jq -r .data.id)
+MID2_ID=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-mid2","type":"task","input_schema":[{"name":"query","type":"string","required":true}],"start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$LEAF_ID"'","inputs":{"query":"{{input.query}}"}}},{"key":"end","type":"end","config":{"output":"{{sub}}"}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' | jq -r .data.id)
+MID1_ID=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-mid1","type":"task","input_schema":[{"name":"query","type":"string","required":true}],"start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$MID2_ID"'","inputs":{"query":"{{input.query}}"}}},{"key":"end","type":"end","config":{"output":"{{sub}}"}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' | jq -r .data.id)
+# nest-mid1 → mid2 → leaf = 顶层 + 2 层：保存成功（合法上限，留作 7.4 深链执行）
+
+curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"nest-top","type":"task","start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$MID1_ID"'","inputs":{"query":"{{input}}"}}},{"key":"end","type":"end","config":{}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' \
+  | jq '.error.code, .error.message'
+# → "VALIDATION_FAILED"，message 含 "引用链深度超上限"
+```
+
+> 间接环（A→B→A）在 ③ 自嵌 + ⑦ 链深的组合路径下同理被拦（DFS 链上出现自身 id 即拒），
+> 手册不单独造双图互引用例——单测已覆盖（service 测试 A→B→A 拒）。
+
+### 7.3 嵌套执行（确定性图，零 LLM 依赖）
+
+```bash
+# 父图（chat 型）：workflow 节点渲染 inputs → 子图执行 → 子终稿落父池（{{sub.answer}} 一级下钻）
+PARENT=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "嵌套-父图",
+    "type": "chat",
+    "start_node_key": "sub",
+    "nodes": [
+      {"key":"sub","type":"workflow","name":"调子任务",
+       "config":{"workflow_id":"'"$TASK_ID"'","inputs":{"query":"{{input}}"}}},
+      {"key":"end","type":"end","name":"结束","config":{"output":"{{sub.answer}}"}}
+    ],
+    "edges": [{"source_node_key":"sub","target_node_key":"end"}]
+  }')
+PARENT_ID=$(echo "$PARENT" | jq -r .data.id)
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$PARENT_ID/publish" >/dev/null
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$TASK_ID/publish" >/dev/null
+
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$PARENT_ID/execute" \
+  -H 'Content-Type: application/json' -d '{"input":"你好"}' \
+  | jq '.data.status, .data.output, (.data.node_trace | length), .data.run_id'
+# → "succeeded"、"echo:你好"（子终稿 {"answer":"echo:你好"} 落池后下钻）、2（sub + end）、run_id 非空
+
+# 子把关：正式执行子必须 published（draft 子 → 503 带父 node 前缀）
+TASK2_ID=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"echo-task-draft","type":"task","input_schema":[{"name":"query","type":"string","required":true}],"start_node_key":"echo","nodes":[{"key":"echo","type":"end","config":{"output":"{\"answer\":\"{{input.query}}\"}"}}],"edges":[]}' | jq -r .data.id)
+PARENT2_ID=$(curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Type: application/json' \
+  -d '{"name":"嵌套-父图-draft子","type":"chat","start_node_key":"sub","nodes":[{"key":"sub","type":"workflow","config":{"workflow_id":"'"$TASK2_ID"'","inputs":{"query":"{{input}}"}}},{"key":"end","type":"end","config":{}}],"edges":[{"source_node_key":"sub","target_node_key":"end"}]}' | jq -r .data.id)
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$PARENT2_ID/publish" >/dev/null
+
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$PARENT2_ID/execute" \
+  -H 'Content-Type: application/json' -d '{"input":"hi"}' | jq '.error.code, .error.message'
+# → "WORKFLOW_NOT_PUBLISHED"（503），message 以 "node sub:" 开头
+
+# trial 跟随父：父试运行 → 子放开 draft（状态机唯一例外延伸到子图）
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$PARENT2_ID/execute?trial=true" \
+  -H 'Content-Type: application/json' -d '{"input":"hi"}' | jq '.data.status'
+# → "succeeded"
+```
+
+### 7.4 psql 查 runs 树（parent_run_id 关联 + 深链执行）
+
+```bash
+# 深链执行：nest-mid1 → mid2 → leaf（7.2 ⑦ 留下的合法上限链），一次执行 3 个 run 行
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$MID1_ID/publish" >/dev/null
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$MID2_ID/publish" >/dev/null
+curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$LEAF_ID/publish" >/dev/null
+TOP_RUN_ID=$(curl -s -b /tmp/hify-jar -X POST "localhost:8081/api/v1/workflows/$MID1_ID/execute" \
+  -H 'Content-Type: application/json' -d '{"input":"{\"query\":\"深链\"}"}' | jq -r .data.run_id)
+
+# run 行全景：子行 trigger_source='workflow'、parent_run_id 逐层指向上层
+docker exec hify-pg-test psql -U hify -d hify -c \
+  "SELECT id, workflow_id, trigger_source, parent_run_id, status, is_trial FROM workflow_runs ORDER BY id DESC LIMIT 6;"
+# 预期：深链 3 行（mid1 顶层 trigger_source='console' parent_run_id=NULL
+#        + mid2 / leaf 各 1 行 trigger_source='workflow' parent_run_id=上层 id）
+#       + 7.3 父图执行 2 行（父 console + 子 workflow）、draft 拒路径无子行
+
+# 递归 CTE 还原整棵执行树
+docker exec hify-pg-test psql -U hify -d hify -c "
+WITH RECURSIVE tree AS (
+  SELECT id, workflow_id, parent_run_id, status, 0 AS lvl
+  FROM workflow_runs WHERE id = $TOP_RUN_ID
+  UNION ALL
+  SELECT r.id, r.workflow_id, r.parent_run_id, r.status, t.lvl + 1
+  FROM workflow_runs r JOIN tree t ON r.parent_run_id = t.id
+)
+SELECT * FROM tree ORDER BY lvl;"
+# 预期：3 行，lvl 0/1/2（mid1 → mid2 → leaf），parent_run_id 逐层指向上行 id
+
+# 各 run 内 seq 顺序（每 run 的节点轨迹独立编号，从 1 严格递增）
+docker exec hify-pg-test psql -U hify -d hify -c \
+  "SELECT run_id, seq, node_key, node_type, status FROM workflow_node_runs
+   WHERE run_id IN (SELECT id FROM workflow_runs WHERE parent_run_id = $TOP_RUN_ID OR id = $TOP_RUN_ID)
+   ORDER BY run_id, seq;"
+# 预期：每个 run 的 seq 从 1 起（子图 vars 池全新起步，节点编号不跨 run 连续）
+```
+
+## 8. 走查结论
 
 （待手测后填写）

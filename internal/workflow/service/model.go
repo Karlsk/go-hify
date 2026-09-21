@@ -6,14 +6,19 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/db"
 )
 
-// Workflow 对应 workflows 表：基本信息 + 入口 + 状态。图主体在 workflow_nodes /
-// workflow_edges（db_model.md §1）。Status 常量在 workflow/api（api.WorkflowStatus）。
+// Workflow 对应 workflows 表：基本信息 + 入口 + 状态 + 分型（spec 08）。图主体在
+// workflow_nodes / workflow_edges（db_model.md §1）。Status 常量在 workflow/api
+//（api.WorkflowStatus），分型常量 api.WorkflowType。Type 不可变（Update 携带即拒）；
+// schema 仅 task 型消费，chat 型强制 NULL（service 层强不变量）。
 type Workflow struct {
 	db.BaseMutable
-	Name         string `gorm:"not null"`                       // 唯一（uq_workflows_name，db_model 决策 #10）
-	Description  string `gorm:"not null"`                       // 默认空串
-	StartNodeKey string `gorm:"column:start_node_key;not null"` // 入口节点 key，图校验保证存在
-	Status       string `gorm:"not null"`                       // draft/published/disabled（DB CHECK 兜底）
+	Name         string  `gorm:"not null"`                       // 唯一（uq_workflows_name，db_model 决策 #10）
+	Description  string  `gorm:"not null"`                       // 默认空串
+	StartNodeKey string  `gorm:"column:start_node_key;not null"` // 入口节点 key，图校验保证存在
+	Status       string  `gorm:"not null"`                       // draft/published/disabled（DB CHECK 兜底）
+	Type         string  `gorm:"not null"`                       // chat/task（DB CHECK 兜底；存量回填 chat）
+	InputSchema  *string `gorm:"type:jsonb"`                     // task 型入参契约 JSON 文本；nil = NULL（chat 型 / 未声明）
+	OutputSchema *string `gorm:"type:jsonb"`                     // task 型出参契约；nil = NULL
 }
 
 func (Workflow) TableName() string { return "workflows" }
@@ -44,26 +49,30 @@ type WorkflowEdge struct {
 
 func (WorkflowEdge) TableName() string { return "workflow_edges" }
 
-// WorkflowRun 对应 workflow_runs 表（db_model §12 冻结，spec 06）：每次执行一行，
-// append-only 收尾统一写（执行结束一次性落库，无 RUNNING 态）。workflow_id /
-// conversation_id / message_id 全弱引用（无 FK——保留期日志表不阻碍业务删除；
-// workflow_name 快照保 workflow 删除后轨迹可读）。
+// WorkflowRun 对应 workflow_runs 表（db_model §12 冻结，spec 06；spec 08 加
+// parent_run_id）：每次执行一行，append-only 收尾统一写（执行结束一次性落库，无
+// RUNNING 态）。workflow_id / conversation_id / message_id 全弱引用（无 FK——保留期
+// 日志表不阻碍业务删除；workflow_name 快照保 workflow 删除后轨迹可读）。
 type WorkflowRun struct {
 	db.BaseAppendOnly
-	WorkflowID     uint64     // 弱引用 workflows.id（无 FK）
-	WorkflowName   string     // 快照
-	TriggerSource  string     // console / chat
-	IsTrial        bool       // 试运行标记（O3）：区分测试与真实流量
-	ConversationID *uint64    // chat 触发时填；console 为 nil（弱引用，无 FK）
+	WorkflowID     uint64  // 弱引用 workflows.id（无 FK）
+	WorkflowName   string  // 快照
+	TriggerSource  string  // console / chat / workflow（被 sub-workflow 节点嵌套执行）
+	IsTrial        bool    // 试运行标记（O3）：区分测试与真实流量（嵌套时跟随父）
+	ConversationID *uint64 // chat / workflow 触发透传；纯 console 为 nil（弱引用，无 FK）
 	MessageID      *uint64
 	TraceID        string
-	Status         string // succeeded / failed
-	Input          string // jsonb 文本（截断后）
-	Output         string
-	ErrorNode      string // 失败节点 key，成功 = ""
-	ErrorMsg       string
-	DurationMs     int
-	StartedAt      time.Time // 执行起点（created_at = 收尾写入时刻）
+	Status     string // succeeded / failed
+	Input      string // jsonb 文本（截断后）
+	Output     string
+	ErrorNode  string // 失败节点 key，成功 = ""
+	ErrorMsg   string
+	DurationMs int
+	StartedAt  time.Time // 执行起点（created_at = 收尾写入时刻）
+	// ParentRunID 父 run 弱引用（无 FK）；插入时恒零（NULL），由父收尾经
+	// store.UpdateParentRunIDs 批量回填（append-only 一次窄 UPDATE 例外，
+	// db_model 决策 #16）——模型上仅作列形状镜像，不经 GORM 写路径维护。
+	ParentRunID *uint64
 }
 
 func (WorkflowRun) TableName() string { return "workflow_runs" }

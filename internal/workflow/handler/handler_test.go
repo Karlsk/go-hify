@@ -52,7 +52,7 @@ func (f *fakeSvc) Create(_ context.Context, req workflowapi.UpsertReq) (*workflo
 		return nil, f.injected
 	}
 	d := &workflowapi.WorkflowDetailSchema{StartNodeKey: req.StartNodeKey}
-	d.ID, d.Name, d.Status = "42", req.Name, "draft"
+	d.ID, d.Name, d.Status, d.Type = "42", req.Name, "draft", string(req.Type)
 	d.Nodes = make([]workflowapi.NodeSchema, 0, len(req.Nodes))
 	for _, n := range req.Nodes {
 		d.Nodes = append(d.Nodes, workflowapi.NodeSchema{Key: n.Key, Type: string(n.Type), Config: n.Config})
@@ -69,7 +69,9 @@ func (f *fakeSvc) Get(_ context.Context, req workflowapi.GetWorkflowReq) (*workf
 		return nil, workflowapi.ErrWorkflowNotFound
 	}
 	d := &workflowapi.WorkflowDetailSchema{StartNodeKey: "classify"}
-	d.ID, d.Name, d.Status = "42", "智能客服分流", "published"
+	d.ID, d.Name, d.Status, d.Type = "42", "智能客服分流", "published", "task"
+	d.InputSchema = []workflowapi.SchemaField{{Name: "query", Type: "string", Required: true}}
+	d.OutputSchema = []workflowapi.SchemaField{{Name: "answer", Type: "string"}}
 	d.Nodes = []workflowapi.NodeSchema{{Key: "classify", Type: "llm", Config: json.RawMessage(`{"model_id":"3"}`)}}
 	d.Edges = []workflowapi.EdgeSchema{}
 	return d, nil
@@ -79,7 +81,8 @@ func (f *fakeSvc) List(_ context.Context, req workflowapi.ListWorkflowsReq) (*wo
 	if f.injected != nil {
 		return nil, f.injected
 	}
-	item := workflowapi.WorkflowSummarySchema{ID: "42", Name: "智能客服分流", Status: "draft"}
+	item := workflowapi.WorkflowSummarySchema{ID: "42", Name: "智能客服分流", Type: "task", Status: "draft",
+		InputSchema: []workflowapi.SchemaField{{Name: "query", Type: "string", Required: true}}}
 	return &workflowapi.WorkflowListResult{
 		Items: []workflowapi.WorkflowSummarySchema{item}, Page: 1, PageSize: 20, Total: 1,
 	}, nil
@@ -182,7 +185,15 @@ func parseEnvelope(t *testing.T, body []byte) envelope {
 	return e
 }
 
-// upsertBody 最小合法整图请求体（含 llm 节点）。
+// createBody 最小合法创建请求体（spec 08 起 type 必填，仅 Create 路径携带）。
+const createBody = `{
+	"name":"智能客服分流","description":"意图识别 → 分支","type":"chat","start_node_key":"classify",
+	"nodes":[{"key":"classify","type":"llm","name":"意图识别","config":{"model_id":"3","prompt":"判断意图"}}],
+	"edges":[]
+}`
+
+// upsertBody 最小合法整图替换请求体（PUT：不携带 type——分型不可变，spec 08；
+// 缺 type 也用作 Create 路径「type 必填拒」的 fixture）。
 const upsertBody = `{
 	"name":"智能客服分流","description":"意图识别 → 分支","start_node_key":"classify",
 	"nodes":[{"key":"classify","type":"llm","name":"意图识别","config":{"model_id":"3","prompt":"判断意图"}}],
@@ -193,13 +204,14 @@ const upsertBody = `{
 
 func TestCreateRoute(t *testing.T) {
 	r := newTestRouter(&fakeSvc{})
-	w := doReq(t, r, http.MethodPost, "/api/v1/workflows", upsertBody)
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows", createBody)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 	e := parseEnvelope(t, w.Body.Bytes())
 	assert.True(t, e.Success)
 	d := struct {
 		ID     string                    `json:"id"`
 		Status string                    `json:"status"`
+		Type   string                    `json:"type"`
 		Nodes  []workflowapi.NodeSchema  `json:"nodes"`
 		Edges  []workflowapi.EdgeSchema  `json:"edges"`
 		Config json.RawMessage           `json:"-"`
@@ -207,9 +219,30 @@ func TestCreateRoute(t *testing.T) {
 	require.NoError(t, json.Unmarshal(e.Data, &d))
 	assert.Equal(t, "42", d.ID)
 	assert.Equal(t, "draft", d.Status)
+	assert.Equal(t, "chat", d.Type, "type 随请求绑定并回显（spec 08）")
 	assert.Len(t, d.Nodes, 1)
 	assert.Equal(t, "classify", d.Nodes[0].Key)
 	assert.NotNil(t, d.Edges, "空 edges → [] 不 null")
+}
+
+// 分型守卫经既有 VALIDATION_FAILED 400 分支（spec 08 §4.1）：type 缺失 / 非法值。
+func TestCreateRouteTypeGate(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"type 缺失拒", upsertBody},
+		{"type 非法值拒", strings.Replace(createBody, `"type":"chat"`, `"type":"bogus"`, 1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter(&fakeSvc{})
+			w := doReq(t, r, http.MethodPost, "/api/v1/workflows", tc.body)
+			assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			e := parseEnvelope(t, w.Body.Bytes())
+			assert.Equal(t, "VALIDATION_FAILED", e.Error.Code)
+		})
+	}
 }
 
 func TestCreateRouteBindFail(t *testing.T) {
@@ -222,16 +255,16 @@ func TestCreateRouteBindFail(t *testing.T) {
 
 func TestCreateRouteNameConflict(t *testing.T) {
 	r := newTestRouter(&fakeSvc{injected: workflowapi.ErrWorkflowNameConflict})
-	w := doReq(t, r, http.MethodPost, "/api/v1/workflows", upsertBody)
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows", createBody)
 	assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
 	e := parseEnvelope(t, w.Body.Bytes())
 	assert.Equal(t, "WORKFLOW_NAME_CONFLICT", e.Error.Code)
 }
 
 func TestCreateRoutePrecheckValidation(t *testing.T) {
-	// service 条 9 预检翻译：errs.ErrValidationFailed 包装 → FailFromSentinel 400
+	// service 条 9 / R11 校验翻译：errs.ErrValidationFailed 包装 → FailFromSentinel 400
 	r := newTestRouter(&fakeSvc{injected: fmtValidationErr()})
-	w := doReq(t, r, http.MethodPost, "/api/v1/workflows", upsertBody)
+	w := doReq(t, r, http.MethodPost, "/api/v1/workflows", createBody)
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	e := parseEnvelope(t, w.Body.Bytes())
 	assert.Equal(t, "VALIDATION_FAILED", e.Error.Code)
@@ -290,6 +323,51 @@ func TestUpdateRouteBindFail(t *testing.T) {
 	r := newTestRouter(&fakeSvc{})
 	w := doReq(t, r, http.MethodPut, "/api/v1/workflows/7", `{"name":"缺图"}`)
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+}
+
+// TestUpdateRouteTypeImmutable Update body 携带 type → 400 VALIDATION_FAILED 信封
+//（spec 08 §4.1：携带即拒——同值 / 异值均拒；Validate guard 经 BindJSON 拦，
+// service 不被触达）。
+func TestUpdateRouteTypeImmutable(t *testing.T) {
+	svc := &fakeSvc{}
+	r := newTestRouter(svc)
+	for _, tc := range []struct{ name, body string }{
+		{"同值也拒", strings.Replace(upsertBody, `"start_node_key"`, `"type":"chat","start_node_key"`, 1)},
+		{"异值拒", strings.Replace(upsertBody, `"start_node_key"`, `"type":"task","start_node_key"`, 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := doReq(t, r, http.MethodPut, "/api/v1/workflows/7", tc.body)
+			assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			e := parseEnvelope(t, w.Body.Bytes())
+			assert.Equal(t, "VALIDATION_FAILED", e.Error.Code)
+		})
+	}
+	assert.Zero(t, svc.gotUpdateID, "Validate 层即拒，service 不被触达")
+}
+
+// TestGetListRouteTypeExposure Get / List 暴露 type 与 schema 字段（spec 08 §2.1
+// 管理面可见分型；schema 未声明 / chat 型序列化为 null）。
+func TestGetListRouteTypeExposure(t *testing.T) {
+	r := newTestRouter(&fakeSvc{})
+
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/42", "")
+	require.Equal(t, http.StatusOK, w.Code)
+	e := parseEnvelope(t, w.Body.Bytes())
+	d := struct {
+		Type         string                    `json:"type"`
+		InputSchema  []workflowapi.SchemaField `json:"input_schema"`
+		OutputSchema []workflowapi.SchemaField `json:"output_schema"`
+	}{}
+	require.NoError(t, json.Unmarshal(e.Data, &d))
+	assert.Equal(t, "task", d.Type)
+	assert.Equal(t, []workflowapi.SchemaField{{Name: "query", Type: "string", Required: true}}, d.InputSchema)
+	assert.Equal(t, []workflowapi.SchemaField{{Name: "answer", Type: "string"}}, d.OutputSchema)
+
+	w = doReq(t, r, http.MethodGet, "/api/v1/workflows?page=1&page_size=20", "")
+	require.Equal(t, http.StatusOK, w.Code)
+	e = parseEnvelope(t, w.Body.Bytes())
+	assert.Contains(t, string(e.Data), `"type":"task"`)
+	assert.Contains(t, string(e.Data), `"input_schema"`)
 }
 
 func TestDeleteRoute(t *testing.T) {

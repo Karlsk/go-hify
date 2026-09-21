@@ -111,7 +111,7 @@
 - **SC-003**: 哨兵错误零新增（四类复用：NOT_FOUND / NOT_PUBLISHED / VALIDATION_FAILED / EXECUTION_FAILED）；CLAUDE.md 错误码表零新行。
 - **SC-004**: 既有 spec 06 引擎用例与 spec 07 管道用例全绿（回归零破坏）。
 - **SC-005**: 零真实依赖同包测试（service stub Store、store sqlmock、handler httptest）；迁移 00020 applied 且既有迁移文件未动。
-- **SC-006**: 嵌套图执行冒烟 + psql 查 runs 树（parent_run_id 关联、各 run seq 顺序）人工通过（docs/testing/workflow-manual-test.md 嵌套冒烟小节）。
+- **SC-006**: 嵌套图执行冒烟 + psql 查 runs 树（parent_run_id 关联、各 run seq 顺序）人工通过（docs/testing/workflow-engine-manual-test.md §7 嵌套冒烟小节）。
 
 ## Assumptions
 

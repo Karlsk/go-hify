@@ -35,15 +35,16 @@ func newMockDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 }
 
 // 列清单（与 store.go 的 select* 常量一致，供 NewRows 用）。
-var workflowCols = []string{"id", "name", "description", "start_node_key", "status", "created_at", "updated_at"}
+var workflowCols = []string{"id", "name", "description", "start_node_key", "status", "type", "input_schema", "output_schema", "created_at", "updated_at"}
 
 var nodeCols = []string{"id", "workflow_id", "node_key", "type", "name", "config", "created_at"}
 
 var edgeCols = []string{"id", "workflow_id", "source_node_key", "target_node_key", "condition", "created_at"}
 
 // wvals 展开为 workflows 一行（列序 = workflowCols）；基础列填典型值，变体由参数带入。
-func wvals(id uint64, name, startKey, status string, now time.Time) []driver.Value {
-	return []driver.Value{id, name, "意图识别 → 分支", startKey, status, now, now}
+// schema 两列恒 NULL（task 型 schema 读回由 TestGetByIDTaskSchema 单独覆盖）。
+func wvals(id uint64, name, startKey, status, wfType string, now time.Time) []driver.Value {
+	return []driver.Value{id, name, "意图识别 → 分支", startKey, status, wfType, nil, nil, now, now}
 }
 
 // workflowRows 单行 workflows 结果集。
@@ -51,7 +52,7 @@ func workflowRows(vals []driver.Value) *sqlmock.Rows {
 	return sqlmock.NewRows(workflowCols).AddRow(vals...)
 }
 
-const getWorkflowByIDSQL = `SELECT id, name, description, start_node_key, status, created_at, updated_at FROM "workflows" WHERE "workflows"."id" = $1 ORDER BY "workflows"."id" LIMIT $2`
+const getWorkflowByIDSQL = `SELECT id, name, description, start_node_key, status, type, input_schema, output_schema, created_at, updated_at FROM "workflows" WHERE "workflows"."id" = $1 ORDER BY "workflows"."id" LIMIT $2`
 
 // ---- 读路径 ----
 
@@ -61,13 +62,36 @@ func TestGetByID(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(regexp.QuoteMeta(getWorkflowByIDSQL)).
 		WithArgs(uint64(1), 1).
-		WillReturnRows(workflowRows(wvals(1, "智能客服分流", "classify", "draft", now)))
+		WillReturnRows(workflowRows(wvals(1, "智能客服分流", "classify", "draft", "chat", now)))
 
 	wf, err := s.GetByID(context.Background(), 1)
 	assert.NoError(t, err)
 	assert.Equal(t, "智能客服分流", wf.Name)
 	assert.Equal(t, "classify", wf.StartNodeKey)
 	assert.Equal(t, "draft", wf.Status)
+	assert.Equal(t, "chat", wf.Type, "分型随显式列回读（spec 08）")
+	assert.Nil(t, wf.InputSchema, "chat 型 / 未声明 schema → NULL → nil")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// task 型 schema 列读回：jsonb 文本 → *string 原文、未声明列 NULL → nil（R11 与
+// 详情组装消费的读路径，spec 08 T009）。
+func TestGetByIDTaskSchema(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	schema := `[{"name":"query","type":"string","required":true,"description":"查询词"},{"name":"top","type":"number","required":false,"description":""}]`
+	mock.ExpectQuery(regexp.QuoteMeta(getWorkflowByIDSQL)).
+		WithArgs(uint64(7), 1).
+		WillReturnRows(sqlmock.NewRows(workflowCols).
+			AddRow(uint64(7), "子任务", "检索加排序", "only", "published", "task", schema, nil, now, now))
+
+	wf, err := s.GetByID(context.Background(), 7)
+	assert.NoError(t, err)
+	assert.Equal(t, "task", wf.Type)
+	assert.NotNil(t, wf.InputSchema)
+	assert.JSONEq(t, schema, *wf.InputSchema, "jsonb 文本原样读回（解析归 service）")
+	assert.Nil(t, wf.OutputSchema)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -128,7 +152,7 @@ func TestListEdges(t *testing.T) {
 
 const listWorkflowsCountSQL = `SELECT count(*) FROM "workflows"`
 
-const listWorkflowsPageSQL = `SELECT id, name, description, start_node_key, status, created_at, updated_at FROM "workflows" ORDER BY updated_at DESC, id DESC LIMIT $1 OFFSET $2`
+const listWorkflowsPageSQL = `SELECT id, name, description, start_node_key, status, type, input_schema, output_schema, created_at, updated_at FROM "workflows" ORDER BY updated_at DESC, id DESC LIMIT $1 OFFSET $2`
 
 func TestList(t *testing.T) {
 	db, mock := newMockDB(t)
@@ -141,14 +165,16 @@ func TestList(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(listWorkflowsPageSQL)).
 		WithArgs(10, 20).
 		WillReturnRows(sqlmock.NewRows(workflowCols).
-			AddRow(wvals(2, "查单流程", "classify", "published", now)...).
-			AddRow(wvals(1, "智能客服分流", "classify", "draft", now)...))
+			AddRow(wvals(2, "查单流程", "classify", "published", "task", now)...).
+			AddRow(wvals(1, "智能客服分流", "classify", "draft", "chat", now)...))
 
 	items, total, err := s.List(context.Background(), 20, 10)
 	assert.NoError(t, err)
 	assert.Len(t, items, 2)
 	assert.Equal(t, int64(2), total)
 	assert.Equal(t, uint64(2), items[0].ID) // 最近编辑在前（updated_at DESC, id DESC）
+	assert.Equal(t, "task", items[0].Type,  "分型随列表行回读（摘要组装消费）")
+	assert.Equal(t, "chat", items[1].Type)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -166,7 +192,7 @@ func TestListCountError(t *testing.T) {
 // testGraph 构造一份最小合法图（两节点一条件边），供整图写入测试复用。
 func testGraph() (*workflowsvc.Workflow, []workflowsvc.WorkflowNode, []workflowsvc.WorkflowEdge) {
 	wf := &workflowsvc.Workflow{
-		Name: "智能客服分流", Description: "意图识别 → 分支", StartNodeKey: "classify", Status: "draft",
+		Name: "智能客服分流", Description: "意图识别 → 分支", StartNodeKey: "classify", Status: "draft", Type: "chat",
 	}
 	cond := "true"
 	nodes := []workflowsvc.WorkflowNode{
@@ -247,8 +273,9 @@ const (
 )
 
 // replaceWfSQL 全文钉死：map Updates 键按字母序 + updated_at 由 autoUpdateTime
-// 追加尾列——status 不在 SET 内即「编辑不降级」（决策 #6）被形态级断言。
-const replaceWfSQL = `UPDATE "workflows" SET "description"=$1,"name"=$2,"start_node_key"=$3,"updated_at"=$4 WHERE id = $5`
+// 追加尾列——status 不在 SET 内即「编辑不降级」（决策 #6）、type 不在 SET 内即
+// 「分型不可变」（spec 08）均被形态级断言。
+const replaceWfSQL = `UPDATE "workflows" SET "description"=$1,"input_schema"=$2,"name"=$3,"output_schema"=$4,"start_node_key"=$5,"updated_at"=$6 WHERE id = $7`
 
 // ---- ReplaceGraph：整图替换单事务 ----
 
@@ -258,9 +285,11 @@ func TestReplaceGraph(t *testing.T) {
 	now := time.Now()
 	wf, nodes, edges := testGraph()
 	wf.ID = 42
+	schema := `[{"name":"query","type":"string","required":true,"description":""}]`
+	wf.InputSchema = &schema // 整图替换携带 schema：input 写入、output 置 NULL（PUT 全量语义）
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(replaceWfSQL)).
-		WithArgs("意图识别 → 分支", "智能客服分流", "classify", sqlmock.AnyArg(), uint64(42)).
+		WithArgs("意图识别 → 分支", schema, "智能客服分流", nil, "classify", sqlmock.AnyArg(), uint64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta(deleteNodesSQL)).
 		WithArgs(uint64(42)).
@@ -288,7 +317,7 @@ func TestReplaceGraphNotFound(t *testing.T) {
 	wf.ID = 999
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(replaceWfSQL)).
-		WithArgs("意图识别 → 分支", "智能客服分流", "classify", sqlmock.AnyArg(), uint64(999)).
+		WithArgs("意图识别 → 分支", nil, "智能客服分流", nil, "classify", sqlmock.AnyArg(), uint64(999)).
 		WillReturnResult(sqlmock.NewResult(0, 0)) // UPDATE 0 行
 	mock.ExpectCommit()
 
@@ -306,7 +335,7 @@ func TestReplaceGraphEmptyEdges(t *testing.T) {
 	wf.ID = 42
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(replaceWfSQL)).
-		WithArgs("意图识别 → 分支", "智能客服分流", "classify", sqlmock.AnyArg(), uint64(42)).
+		WithArgs("意图识别 → 分支", nil, "智能客服分流", nil, "classify", sqlmock.AnyArg(), uint64(42)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta(deleteNodesSQL)).
 		WithArgs(uint64(42)).
@@ -638,6 +667,44 @@ func TestDeleteRunsBeforeError(t *testing.T) {
 		WillReturnError(boom)
 
 	_, err := s.DeleteRunsBefore(context.Background(), before, 500)
+	assert.ErrorIs(t, err, boom)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ---- UpdateParentRunIDs：parent_run_id 批量回填（spec 08 O5，append-only 一次窄 UPDATE）----
+
+func TestUpdateParentRunIDs(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectExec(regexp.QuoteMeta(updateParentRunIDsSQL)).
+		WithArgs(uint64(7), "{11,12}").
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	err := s.UpdateParentRunIDs(context.Background(), 7, []uint64{11, 12})
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 空子列表短路：零 SQL（一条不发的形态级断言——sqlmock 对未期望调用报错）。
+func TestUpdateParentRunIDsEmpty(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+
+	err := s.UpdateParentRunIDs(context.Background(), 7, nil)
+	assert.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// SQL 失败：%w 链保留（service 侧 WARN 不阻断返回）。
+func TestUpdateParentRunIDsError(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	boom := errors.New("update failed")
+	mock.ExpectExec(regexp.QuoteMeta(updateParentRunIDsSQL)).
+		WithArgs(uint64(7), "{11}").
+		WillReturnError(boom)
+
+	err := s.UpdateParentRunIDs(context.Background(), 7, []uint64{11})
 	assert.ErrorIs(t, err, boom)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

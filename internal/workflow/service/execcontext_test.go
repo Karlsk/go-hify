@@ -124,3 +124,65 @@ func TestStepsAccumulate(t *testing.T) {
 	assert.Equal(t, "a", c.steps[0].NodeKey) // 顺序即执行序
 	assert.Equal(t, "b", c.steps[1].NodeKey)
 }
+
+// ---- 池一级下钻（spec 08 FR9 / O7②：{{input.x}} / {{node.field}}，深度一层为止）----
+
+// newDrillCtx 预置下钻典型池：string 节点输出 + JSON 对象节点输出（覆盖 string /
+// number / boolean / 对象四类字段值）。
+func newDrillCtx() *execContext {
+	c := newExecContext("查订单")
+	c.set("classify", "ORDER_QUERY")
+	c.set("structured", `{"city":"上海","top":3,"ok":true,"nested":{"a":1}}`)
+	return c
+}
+
+func TestRenderDrill(t *testing.T) {
+	c := newDrillCtx()
+	cases := []struct {
+		name string
+		tpl  string
+		want string
+	}{
+		{"string 字段取内容（去 JSON 引号）", "城市={{structured.city}}", "城市=上海"},
+		{"number 字段原 JSON 文本", "{{structured.top}}", "3"},
+		{"boolean 字段原 JSON 文本", "{{structured.ok}}", "true"},
+		{"对象字段整体 JSON 文本", "{{structured.nested}}", `{"a":1}`},
+		{"无点号引用行为不变（节点输出）", "{{classify}}", "ORDER_QUERY"},
+		{"无点号引用行为不变（input 整串）", "{{input}}", "查订单"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.render(tc.tpl)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// 下钻 strict：池值非 JSON 对象 / 字段缺失 / 超一层深度，错误文案含完整点分名
+//（错字可定位）；string 池值行为不变——不把普通文本当 JSON 解析。
+func TestRenderDrillStrictMissing(t *testing.T) {
+	c := newDrillCtx()
+	for _, ref := range []string{
+		"classify.city",       // 池值为 string 非 JSON 对象
+		"structured.bogus",    // 字段缺失
+		"structured.nested.a", // 深度一层为止：字段名整体匹配，不递归下钻
+		"input.x",             // input 非 JSON 对象
+	} {
+		_, err := c.render("{{" + ref + "}}")
+		require.Error(t, err, "ref=%q 应报错", ref)
+		assert.Contains(t, err.Error(), ref, "错误文案含完整点分名")
+	}
+}
+
+// condition 左侧同样支持下钻（比较 / 裸 var 两形态共用 lookup）。
+func TestEvalConditionDrill(t *testing.T) {
+	c := newExecContext(`{"city":"上海"}`)
+	got, err := c.evalCondition("{{input.city}} == '上海'")
+	require.NoError(t, err)
+	assert.Equal(t, "true", got)
+
+	got, err = c.evalCondition("{{input.city}}")
+	require.NoError(t, err)
+	assert.Equal(t, "上海", got)
+}

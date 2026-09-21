@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -66,6 +67,7 @@ type stubStore struct {
 	updateStatusFn func(id uint64, from []string, to string) (bool, error)
 	createRunFn    func(run *WorkflowRun, nodeRuns []WorkflowNodeRun) error
 	deleteRunsFn   func(before time.Time, limit int) (int64, error)
+	updateParentRunIDsFn func(parentRunID uint64, childRunIDs []uint64) error
 
 	seq      []string // 调用序列（方法名）
 	lastFrom []string // UpdateStatus 最近一次 from
@@ -121,6 +123,11 @@ func (s *stubStore) CreateRun(ctx context.Context, run *WorkflowRun, nodeRuns []
 func (s *stubStore) DeleteRunsBefore(ctx context.Context, before time.Time, limit int) (int64, error) {
 	s.seq = append(s.seq, "deleteRunsBefore")
 	return s.deleteRunsFn(before, limit)
+}
+
+func (s *stubStore) UpdateParentRunIDs(ctx context.Context, parentRunID uint64, childRunIDs []uint64) error {
+	s.seq = append(s.seq, "updateParentRunIDs")
+	return s.updateParentRunIDsFn(parentRunID, childRunIDs)
 }
 
 // recordCache 记录式 cacheManager stub：Get 返回预设（getVal 经 JSON 往返写入 dst，
@@ -179,6 +186,7 @@ func TestToModel(t *testing.T) {
 	req := workflowapi.UpsertReq{
 		Name:         "智能客服分流",
 		Description:  "意图识别 → 分支",
+		Type:         workflowapi.WorkflowTypeChat,
 		StartNodeKey: "classify",
 		Nodes: []workflowapi.NodeReq{
 			{Key: "classify", Type: workflowapi.NodeLLM, Name: "意图识别", Config: json.RawMessage(`{"model_id":"3","prompt":"判断意图"}`)},
@@ -190,12 +198,16 @@ func TestToModel(t *testing.T) {
 		},
 	}
 
-	wf, nodes, edges := toModel(req)
+	wf, nodes, edges, err := toModel(req)
+	require.NoError(t, err)
 
 	assert.Equal(t, "智能客服分流", wf.Name)
 	assert.Equal(t, "意图识别 → 分支", wf.Description)
 	assert.Equal(t, "classify", wf.StartNodeKey)
 	assert.Equal(t, "draft", wf.Status, "Status 恒 draft（服务端定，不看请求体）")
+	assert.Equal(t, "chat", wf.Type, "分型随请求落 model（spec 08）")
+	assert.Nil(t, wf.InputSchema, "chat 型 / 未声明 schema → NULL")
+	assert.Nil(t, wf.OutputSchema)
 
 	assert.Len(t, nodes, 2)
 	assert.Equal(t, "classify", nodes[0].NodeKey)
@@ -211,12 +223,14 @@ func TestToModel(t *testing.T) {
 }
 
 func TestToModelEmptyEdges(t *testing.T) {
-	_, _, edges := toModel(workflowapi.UpsertReq{
+	_, _, edges, err := toModel(workflowapi.UpsertReq{
 		Name:         "纯线性图",
+		Type:         workflowapi.WorkflowTypeChat,
 		StartNodeKey: "a",
 		Nodes:        []workflowapi.NodeReq{{Key: "a", Type: workflowapi.NodeLLM, Config: json.RawMessage(`{"model_id":"1","prompt":"p"}`)}},
 		Edges:        []workflowapi.EdgeReq{},
 	})
+	require.NoError(t, err)
 	assert.NotNil(t, edges, "空 edges → 空切片兜底（store 据此跳过该语句）")
 	assert.Empty(t, edges)
 }
@@ -224,15 +238,22 @@ func TestToModelEmptyEdges(t *testing.T) {
 func TestToSchemas(t *testing.T) {
 	now := time.Now()
 	cond := "true"
-	wf := &Workflow{Name: "智能客服分流", Description: "意图识别 → 分支", StartNodeKey: "classify", Status: "published"}
+	wf := &Workflow{Name: "智能客服分流", Description: "意图识别 → 分支", StartNodeKey: "classify", Status: "published",
+		Type:        "chat",
+		InputSchema: strPtr(`[{"name":"query","type":"string","required":true}]`)}
 	wf.ID, wf.CreatedAt, wf.UpdatedAt = 42, now, now
 
-	sum := toSummarySchema(wf)
+	sum, err := toSummarySchema(wf)
+	require.NoError(t, err)
 	assert.Equal(t, "42", sum.ID, "ID 字符串化")
 	assert.Equal(t, "智能客服分流", sum.Name)
 	assert.Equal(t, "published", sum.Status)
 	assert.Equal(t, now, sum.CreatedAt)
 	assert.Equal(t, now, sum.UpdatedAt)
+	assert.Equal(t, "chat", sum.Type, "分型随摘要暴露（spec 08）")
+	assert.Equal(t, []workflowapi.SchemaField{{Name: "query", Type: "string", Required: true}}, sum.InputSchema,
+		"jsonb 文本 → api schema 往返")
+	assert.Nil(t, sum.OutputSchema, "NULL → nil（JSON null）")
 
 	nodes := []WorkflowNode{
 		{NodeKey: "classify", Type: "llm", Name: "意图识别", Config: `{"model_id":"3","prompt":"判断意图"}`},
@@ -240,7 +261,8 @@ func TestToSchemas(t *testing.T) {
 	edges := []WorkflowEdge{
 		{SourceNodeKey: "classify", TargetNodeKey: "router", Condition: &cond},
 	}
-	detail := toDetailSchema(wf, nodes, edges)
+	detail, err := toDetailSchema(wf, nodes, edges)
+	require.NoError(t, err)
 	assert.Equal(t, "42", detail.ID)
 	assert.Equal(t, "classify", detail.StartNodeKey)
 	assert.Len(t, detail.Nodes, 1)
@@ -250,7 +272,8 @@ func TestToSchemas(t *testing.T) {
 	assert.Equal(t, "router", detail.Edges[0].TargetNodeKey)
 	assert.Equal(t, "true", *detail.Edges[0].Condition)
 
-	empty := toDetailSchema(wf, nil, nil)
+	empty, err := toDetailSchema(wf, nil, nil)
+	require.NoError(t, err)
 	assert.NotNil(t, empty.Nodes, "空节点 → [] 不 null（接口规范空值约定）")
 	assert.NotNil(t, empty.Edges)
 	assert.Empty(t, empty.Nodes)
@@ -260,10 +283,12 @@ func TestToSchemas(t *testing.T) {
 // ---- T3：Create（条 9 预检 + 23505 翻译 + 组装返回）----
 
 // llmUpsertReq 含 llm 节点的合法创建请求（model_id=3，条 9 预检走 provider 分支）。
+// Type=chat：spec 08 起 Create 必填分型，存量语义即 chat。
 func llmUpsertReq() workflowapi.UpsertReq {
 	return workflowapi.UpsertReq{
 		Name:         "智能客服分流",
 		Description:  "意图识别 → 分支",
+		Type:         workflowapi.WorkflowTypeChat,
 		StartNodeKey: "classify",
 		Nodes: []workflowapi.NodeReq{
 			{Key: "classify", Type: workflowapi.NodeLLM, Name: "意图识别", Config: json.RawMessage(`{"model_id":"3","prompt":"判断意图"}`)},
@@ -332,6 +357,7 @@ func TestCreateKBPrecheckFail(t *testing.T) {
 
 	req := workflowapi.UpsertReq{
 		Name:         "知识问答",
+		Type:         workflowapi.WorkflowTypeChat,
 		StartNodeKey: "retrieve",
 		Nodes: []workflowapi.NodeReq{
 			{Key: "retrieve", Type: workflowapi.NodeKnowledgeRetrieval, Config: json.RawMessage(`{"knowledge_base_id":"7","top_k":5}`)},
@@ -379,6 +405,7 @@ func r10UpsertReq() workflowapi.UpsertReq {
 	cond := "true"
 	return workflowapi.UpsertReq{
 		Name:         "查单流程",
+		Type:         workflowapi.WorkflowTypeChat,
 		StartNodeKey: "classify",
 		Nodes: []workflowapi.NodeReq{
 			{Key: "classify", Type: workflowapi.NodeLLM, Name: "意图识别",
@@ -466,6 +493,45 @@ func TestCreateTemplateRefsReject(t *testing.T) {
 	}
 }
 
+// 基名判定（spec 08 FR9）：点分引用 {{node.field}} 按点号前基名过 R10——祖先基名
+// 下钻过、错字 / 下游基名拒（报错带完整点分名）；字段名留运行期 strict。纯函数直测，
+// 零 IO。
+func TestValidateTemplateRefsBaseName(t *testing.T) {
+	llmCfg := func(prompt string) workflowapi.NodeReq {
+		return workflowapi.NodeReq{Key: "classify", Type: workflowapi.NodeLLM,
+			Config: json.RawMessage(fmt.Sprintf(`{"model_id":"3","prompt":%q}`, prompt))}
+	}
+	endCfg := func(output string) workflowapi.NodeReq {
+		return workflowapi.NodeReq{Key: "final", Type: workflowapi.NodeEnd,
+			Config: json.RawMessage(fmt.Sprintf(`{"output":%q}`, output))}
+	}
+	graph := func(classify, final workflowapi.NodeReq) ([]workflowapi.NodeReq, []workflowapi.EdgeReq) {
+		return []workflowapi.NodeReq{classify, final},
+			[]workflowapi.EdgeReq{{SourceNodeKey: "classify", TargetNodeKey: "final"}}
+	}
+
+	t.Run("祖先基名下钻过", func(t *testing.T) {
+		nodes, edges := graph(llmCfg("意图"), endCfg("城市：{{classify.city}}"))
+		assert.NoError(t, validateTemplateRefs(nodes, edges))
+	})
+	t.Run("input 基名下钻过（字段名留运行期 strict）", func(t *testing.T) {
+		nodes, edges := graph(llmCfg("城市：{{input.city}}"), endCfg("终稿"))
+		assert.NoError(t, validateTemplateRefs(nodes, edges))
+	})
+	t.Run("错字基名拒（报错带完整点分名）", func(t *testing.T) {
+		nodes, edges := graph(llmCfg("意图"), endCfg("城市：{{clasify.city}}"))
+		err := validateTemplateRefs(nodes, edges)
+		require.ErrorIs(t, err, errs.ErrValidationFailed)
+		assert.Contains(t, err.Error(), "clasify.city")
+	})
+	t.Run("下游基名拒", func(t *testing.T) {
+		nodes, edges := graph(llmCfg("预取：{{final.city}}"), endCfg("终稿"))
+		err := validateTemplateRefs(nodes, edges)
+		require.ErrorIs(t, err, errs.ErrValidationFailed)
+		assert.Contains(t, err.Error(), "final.city")
+	})
+}
+
 // condition 比较式右侧 'literal' 是字面量非引用、不查：右侧占位符形态（下游 key）
 // 也不当作引用（与执行期 evalCondition 同一切分规则）。
 func TestCreateConditionLiteralNotScanned(t *testing.T) {
@@ -491,7 +557,7 @@ func TestCreateLinearAncestors(t *testing.T) {
 	}
 	linearReq := func(promptA, promptB, outputC string) workflowapi.UpsertReq {
 		return workflowapi.UpsertReq{
-			Name: "线性链", StartNodeKey: "a",
+			Name: "线性链", Type: workflowapi.WorkflowTypeChat, StartNodeKey: "a",
 			Nodes: []workflowapi.NodeReq{llmNode("a", promptA), llmNode("b", promptB), endNode(outputC)},
 			Edges: []workflowapi.EdgeReq{
 				{SourceNodeKey: "a", TargetNodeKey: "b"},
@@ -745,6 +811,21 @@ func TestUpdatePrecheckFail(t *testing.T) {
 	assert.Empty(t, st.seq, "预检失败不动 store")
 }
 
+// TestUpdateTypeImmutable Update 携带 type 即拒（spec 08 §4.1，clarify 拍板：同值 /
+// 异值均拒，不比对当前值——分型不可变，换型 = 删了重建）。拒在一切预检前，零 store 访问
+//（防绕过 handler 直调 service 的调用方）。
+func TestUpdateTypeImmutable(t *testing.T) {
+	st := &stubStore{}
+	svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+	for _, v := range []string{"chat", "task"} {
+		typ := v
+		_, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{ID: 42, UpsertReq: llmUpsertReq(), Type: &typ})
+		assert.ErrorIs(t, err, errs.ErrValidationFailed, "携带 type=%s 即拒（不比对当前值）", typ)
+	}
+	assert.Empty(t, st.seq, "拒改不动 store")
+}
+
 func TestUpdateNotFound(t *testing.T) {
 	st := &stubStore{replaceGraphFn: func(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) (bool, error) {
 		return false, nil
@@ -921,4 +1002,262 @@ func TestStatusActionUpdateError(t *testing.T) {
 
 	_, err := svc.Publish(context.Background(), workflowapi.PublishWorkflowReq{ID: 7})
 	assert.ErrorIs(t, err, boom)
+}
+
+// ---- spec 08 T005：分型 CRUD（type 必填 / chat 强不变量 / task schema 持久化回读）----
+
+// strPtr 字符串取址（schema jsonb 文本 fixture 用）。
+func strPtr(s string) *string { return &s }
+
+func TestCreateTaskTypingRoundTrip(t *testing.T) {
+	t.Run("task 型 schema 持久化与回读", func(t *testing.T) {
+		var gotWf *Workflow
+		var gotNodes []WorkflowNode
+		st := &stubStore{
+			createFn: func(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) error {
+				gotWf, gotNodes = wf, nodes
+				wf.ID = 42 // 模拟 RETURNING 回填
+				return nil
+			},
+			getByIDFn: func(id uint64) (*Workflow, error) {
+				wf := *gotWf // 回读返回落库行（ID 已回填）
+				return &wf, nil
+			},
+			listNodesFn: func(workflowID uint64) ([]WorkflowNode, error) { return gotNodes, nil },
+			listEdgesFn: func(workflowID uint64) ([]WorkflowEdge, error) { return nil, nil },
+		}
+		svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+		schema := []workflowapi.SchemaField{
+			{Name: "query", Type: "string", Required: true, Description: "查询词"},
+			{Name: "top", Type: "number"},
+		}
+		req := llmUpsertReq()
+		req.Type = workflowapi.WorkflowTypeTask
+		req.InputSchema = schema
+		req.OutputSchema = schema[:1]
+
+		d, err := svc.Create(context.Background(), req)
+		require.NoError(t, err)
+
+		assert.Equal(t, "task", gotWf.Type, "type 必填落库")
+		require.NotNil(t, gotWf.InputSchema, "schema 序列化 jsonb 文本")
+		assert.JSONEq(t, `[{"name":"query","type":"string","required":true,"description":"查询词"},{"name":"top","type":"number","required":false,"description":""}]`, *gotWf.InputSchema,
+			"零值字段不省略（SchemaField 无 omitempty，同 Hify 空值约定）")
+		require.NotNil(t, gotWf.OutputSchema)
+		assert.JSONEq(t, `[{"name":"query","type":"string","required":true,"description":"查询词"}]`, *gotWf.OutputSchema)
+
+		assert.Equal(t, "task", d.Type, "回读暴露分型")
+		assert.Equal(t, schema, d.InputSchema, "jsonb 文本 → api schema 往返")
+		assert.Equal(t, schema[:1], d.OutputSchema)
+	})
+	t.Run("chat 型空数组 schema 等价未声明", func(t *testing.T) {
+		var gotWf *Workflow
+		st := &stubStore{
+			createFn: func(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) error {
+				gotWf = wf
+				wf.ID = 42
+				return nil
+			},
+			getByIDFn:   func(id uint64) (*Workflow, error) { return gotWf, nil },
+			listNodesFn: func(workflowID uint64) ([]WorkflowNode, error) { return nil, nil },
+			listEdgesFn: func(workflowID uint64) ([]WorkflowEdge, error) { return nil, nil },
+		}
+		svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+		req := llmUpsertReq() // Type=chat
+		req.InputSchema = []workflowapi.SchemaField{}
+
+		_, err := svc.Create(context.Background(), req)
+		require.NoError(t, err, "空 schema 与 nil 等价（len 0 → NULL），不触 chat 强不变量")
+		assert.Nil(t, gotWf.InputSchema)
+	})
+}
+
+func TestCreateTypingRejects(t *testing.T) {
+	schema := []workflowapi.SchemaField{{Name: "query", Type: "string", Required: true}}
+	tests := []struct {
+		name   string
+		mutate func(*workflowapi.UpsertReq)
+		contains string
+	}{
+		{"type 缺失拒", func(r *workflowapi.UpsertReq) { r.Type = "" }, "type"},
+		{"type 非法值拒", func(r *workflowapi.UpsertReq) { r.Type = "bogus" }, "type"},
+		{"chat 型携带非空 input_schema 拒（强不变量）", func(r *workflowapi.UpsertReq) { r.InputSchema = schema }, "chat"},
+		{"chat 型携带非空 output_schema 拒（强不变量）", func(r *workflowapi.UpsertReq) { r.OutputSchema = schema }, "chat"},
+		{"task 型 schema 字段重名拒", func(r *workflowapi.UpsertReq) {
+			r.Type = workflowapi.WorkflowTypeTask
+			r.InputSchema = []workflowapi.SchemaField{{Name: "q", Type: "string"}, {Name: "q", Type: "number"}}
+		}, "重名"},
+		{"task 型 schema 非法 type 拒", func(r *workflowapi.UpsertReq) {
+			r.Type = workflowapi.WorkflowTypeTask
+			r.InputSchema = []workflowapi.SchemaField{{Name: "q", Type: "integer"}}
+		}, "type"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := createOkStore()
+			svc := New(st, okModels(), nil, &recordCache{}, nil, nil, nil, false)
+
+			req := llmUpsertReq()
+			tt.mutate(&req)
+			_, err := svc.Create(context.Background(), req)
+			require.ErrorIs(t, err, errs.ErrValidationFailed, "分型校验 → 400 VALIDATION_FAILED")
+			assert.Contains(t, err.Error(), tt.contains)
+			assert.NotContains(t, st.seq, "create", "校验失败不动 store")
+		})
+	}
+}
+
+// ---- spec 08 T006：R11 保存期嵌套矩阵（五拒两过）----
+
+// taskWFRow 已存 task 型工作流行（inputSchema 空串 = 未声明 → NULL）。
+func taskWFRow(id uint64, inputSchema string) *Workflow {
+	wf := &Workflow{Name: "子任务", StartNodeKey: "only", Status: "published", Type: "task"}
+	wf.ID = id
+	if inputSchema != "" {
+		wf.InputSchema = strPtr(inputSchema)
+	}
+	return wf
+}
+
+// chatWFRow 已存 chat 型工作流行（不可被嵌）。
+func chatWFRow(id uint64) *Workflow {
+	wf := &Workflow{Name: "聊天图", StartNodeKey: "only", Status: "published", Type: "chat"}
+	wf.ID = id
+	return wf
+}
+
+// llmNodeRow 终点节点行（无嵌套引用，DFS 链在此终止）。
+func llmNodeRow(key string) WorkflowNode {
+	return WorkflowNode{NodeKey: key, Type: "llm", Config: `{"model_id":"3","prompt":"p"}`}
+}
+
+// wfNodeRow 已存图里的 sub-workflow 节点行（config 指向 childID，inputs 为 raw JSON）。
+func wfNodeRow(key string, childID uint64, inputs string) WorkflowNode {
+	return WorkflowNode{NodeKey: key, Type: "workflow",
+		Config: fmt.Sprintf(`{"workflow_id":%q,"inputs":%s}`, strconv.FormatUint(childID, 10), inputs)}
+}
+
+// r11Req 父图保存请求：单 workflow 节点引用 childID（inputs 为 raw JSON 映射文本）。
+func r11Req(parentType workflowapi.WorkflowType, childID uint64, inputs string) workflowapi.UpsertReq {
+	return workflowapi.UpsertReq{
+		Name: "父图", Type: parentType, StartNodeKey: "call",
+		Nodes: []workflowapi.NodeReq{{Key: "call", Type: workflowapi.NodeWorkflow,
+			Config: json.RawMessage(fmt.Sprintf(`{"workflow_id":%q,"inputs":%s}`, strconv.FormatUint(childID, 10), inputs))}},
+		Edges: []workflowapi.EdgeReq{},
+	}
+}
+
+// r11Store R11 矩阵用 store：wfs / nodes 按 id 返回（未命中 404）；create / replaceGraph
+// 恒成功（createFn 回填 ID=42，父图自身回读由 wfs[42] 预置）。
+func r11Store(wfs map[uint64]*Workflow, nodes map[uint64][]WorkflowNode) *stubStore {
+	return &stubStore{
+		getByIDFn: func(id uint64) (*Workflow, error) {
+			wf, ok := wfs[id]
+			if !ok {
+				return nil, gorm.ErrRecordNotFound
+			}
+			return wf, nil
+		},
+		listNodesFn:    func(workflowID uint64) ([]WorkflowNode, error) { return nodes[workflowID], nil },
+		listEdgesFn:    func(workflowID uint64) ([]WorkflowEdge, error) { return nil, nil },
+		createFn:       func(wf *Workflow, ns []WorkflowNode, es []WorkflowEdge) error { wf.ID = 42; return nil },
+		replaceGraphFn: func(wf *Workflow, ns []WorkflowNode, es []WorkflowEdge) (bool, error) { return true, nil },
+	}
+}
+
+// 两过：chat⊃task 与 task⊃task 均合法（嵌套矩阵只看被引方是 task；父型不限），
+// 无 schema 子图回退恰 {input}。
+func TestR11NestingPass(t *testing.T) {
+	tests := []struct {
+		name       string
+		parentType workflowapi.WorkflowType
+		child      *Workflow
+		inputs     string
+	}{
+		{"chat⊃task 过（schema 全覆盖）", workflowapi.WorkflowTypeChat,
+			taskWFRow(7, `[{"name":"query","type":"string","required":true}]`), `{"query":"{{input}}"}`},
+		{"task⊃task 过（schema 全覆盖）", workflowapi.WorkflowTypeTask,
+			taskWFRow(7, `[{"name":"query","type":"string","required":true},{"name":"top","type":"number"}]`), `{"query":"{{input}}","top":"3"}`},
+		{"无 schema 子图恰 {input} 过（单一入参回退）", workflowapi.WorkflowTypeChat,
+			taskWFRow(7, ""), `{"input":"{{input}}"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := r11Store(map[uint64]*Workflow{7: tt.child, 42: taskWFRow(42, "")},
+				map[uint64][]WorkflowNode{7: {llmNodeRow("only")}})
+			svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+			d, err := svc.Create(context.Background(), r11Req(tt.parentType, 7, tt.inputs))
+			require.NoError(t, err)
+			assert.Equal(t, "42", d.ID)
+			assert.Contains(t, st.seq, "create", "合法嵌套照常落库")
+		})
+	}
+}
+
+// 五拒（Create 路径）：引 chat 型 / 引用不存在 / 缺 required / 多余字段 /
+// 无 schema 非 {input} / 链深超 3——全部 400 VALIDATION_FAILED 且不动 store 写路径。
+func TestR11NestingReject(t *testing.T) {
+	querySchema := `[{"name":"query","type":"string","required":true},{"name":"top","type":"number"}]`
+	tests := []struct {
+		name     string
+		wfs      map[uint64]*Workflow
+		nodes    map[uint64][]WorkflowNode
+		childID  uint64
+		inputs   string
+		contains string
+	}{
+		{"引用 chat 型拒", map[uint64]*Workflow{7: chatWFRow(7)}, nil, 7, `{"input":"{{input}}"}`, "task"},
+		{"引用不存在拒", map[uint64]*Workflow{}, nil, 999, `{"input":"{{input}}"}`, "999"},
+		{"inputs 缺 required 拒", map[uint64]*Workflow{7: taskWFRow(7, querySchema)}, nil, 7, `{"top":"3"}`, "query"},
+		{"inputs 多余字段拒", map[uint64]*Workflow{7: taskWFRow(7, querySchema)}, nil, 7, `{"query":"{{input}}","extra":"x"}`, "extra"},
+		{"无 schema 子图非 {input} 拒", map[uint64]*Workflow{7: taskWFRow(7, "")}, nil, 7, `{"query":"{{input}}"}`, "input"},
+		{"链深超 3 拒（父→7→8→9）", map[uint64]*Workflow{7: taskWFRow(7, "")},
+			map[uint64][]WorkflowNode{
+				7: {wfNodeRow("c1", 8, `{"input":"{{input}}"}`)},
+				8: {wfNodeRow("c2", 9, `{"input":"{{input}}"}`)},
+			}, 7, `{"input":"{{input}}"}`, "深度"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := r11Store(tt.wfs, tt.nodes)
+			svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+			_, err := svc.Create(context.Background(), r11Req(workflowapi.WorkflowTypeChat, tt.childID, tt.inputs))
+			require.ErrorIs(t, err, errs.ErrValidationFailed, "R11 保存期拦截 → 400")
+			assert.Contains(t, err.Error(), `"call"`, "错误带父节点 key 定位")
+			assert.Contains(t, err.Error(), tt.contains)
+			assert.NotContains(t, st.seq, "create", "R11 拒绝不动写路径")
+		})
+	}
+}
+
+// 自嵌拒（Update 路径）：保存图引用自身 id——长度 1 的环特例。
+func TestR11SelfNestingReject(t *testing.T) {
+	st := r11Store(map[uint64]*Workflow{42: taskWFRow(42, "")}, nil)
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	_, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{
+		ID: 42, UpsertReq: r11Req(workflowapi.WorkflowTypeTask, 42, `{"input":"{{input}}"}`),
+	})
+	require.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), `"call"`)
+	assert.Contains(t, err.Error(), "自嵌")
+	assert.NotContains(t, st.seq, "replaceGraph", "拒绝不动 store")
+}
+
+// 间接环拒（Update 路径）：保存 G=42 引用 7，而 7 的存量图引用 42——链上出现自身 id。
+func TestR11IndirectCycleReject(t *testing.T) {
+	st := r11Store(map[uint64]*Workflow{7: taskWFRow(7, "")},
+		map[uint64][]WorkflowNode{7: {wfNodeRow("inner", 42, `{"input":"{{input}}"}`)}})
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	_, err := svc.Update(context.Background(), workflowapi.UpdateWorkflowReq{
+		ID: 42, UpsertReq: r11Req(workflowapi.WorkflowTypeTask, 7, `{"input":"{{input}}"}`),
+	})
+	require.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "环")
+	assert.NotContains(t, st.seq, "replaceGraph")
 }

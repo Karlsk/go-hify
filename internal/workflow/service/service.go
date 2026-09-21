@@ -53,6 +53,9 @@ type Store interface {
 	// DeleteRunsBefore 保留期清理（FR8）：批删 created_at < before 的 run 行（单批至多
 	// limit 行，防长事务），node_runs 随 FK CASCADE 连带删；返回实际删除行数。
 	DeleteRunsBefore(ctx context.Context, before time.Time, limit int) (int64, error)
+	// UpdateParentRunIDs 父 run 落库后批量回填直接子 run 的 parent_run_id（spec 08
+	// O5——append-only 一次窄 UPDATE 例外）；childRunIDs 空 → 短路零 SQL。
+	UpdateParentRunIDs(ctx context.Context, parentRunID uint64, childRunIDs []uint64) error
 }
 
 // cacheManager 是 platform/cache 的窄接口：service 只用读 / 写 / 删三个动作
@@ -83,10 +86,12 @@ type workflowService struct {
 func New(store Store, models providerapi.ModelService, kbs ragapi.KnowledgeBaseService,
 	cm cacheManager, clients llmClientFactory, execs executionWriter, rags ragRetriever,
 	blockPrivate bool) workflowapi.WorkflowService {
-	return &workflowService{
+	s := &workflowService{
 		store: store, models: models, kbs: kbs, cache: cm,
 		exec: newExecutor(models, clients, execs, rags, blockPrivate),
 	}
+	s.exec.execChild = s.executeChild // workflow 节点缝接线（spec 08 §4.3）：executor 不持有 service 类型，避免环
+	return s
 }
 
 // 编译期断言：workflowService 实现了 api 接口（spec 04 §2.1）。
@@ -94,15 +99,28 @@ var _ workflowapi.WorkflowService = (*workflowService)(nil)
 
 // toModel 将 UpsertReq 组装为 model 行：Status 恒 draft（服务端定；Update 路径的
 // store.ReplaceGraph 不写 status——编辑不降级，此字段被忽略），Config 直存请求 JSON
-// 原文（api 层已强校验），Edges.Condition 指针透传（区分没传与空串）。子表 FK 由
+// 原文（api 层已强校验），Edges.Condition 指针透传（区分没传与空串）。Type 落列
+// （Create 路径已过分型守卫；Update 路径 ReplaceGraph 同样不写 type——分型不可变，
+// spec 08），schema 序列化为 jsonb 文本（空数组与 nil 等价 → NULL）。子表 FK 由
 // store 事务内回填，组装期不填。
-func toModel(req workflowapi.UpsertReq) (*Workflow, []WorkflowNode, []WorkflowEdge) {
+func toModel(req workflowapi.UpsertReq) (*Workflow, []WorkflowNode, []WorkflowEdge, error) {
 	wf := &Workflow{
 		Name:         req.Name,
 		Description:  req.Description,
 		StartNodeKey: req.StartNodeKey,
 		Status:       string(workflowapi.StatusDraft),
+		Type:         string(req.Type),
 	}
+	in, err := schemaJSON(req.InputSchema)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal input_schema: %w", err)
+	}
+	wf.InputSchema = in
+	out, err := schemaJSON(req.OutputSchema)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("marshal output_schema: %w", err)
+	}
+	wf.OutputSchema = out
 	nodes := make([]WorkflowNode, 0, len(req.Nodes))
 	for _, n := range req.Nodes {
 		nodes = append(nodes, WorkflowNode{
@@ -120,26 +138,69 @@ func toModel(req workflowapi.UpsertReq) (*Workflow, []WorkflowNode, []WorkflowEd
 			Condition:     e.Condition,
 		})
 	}
-	return wf, nodes, edges
+	return wf, nodes, edges, nil
 }
 
-// toSummarySchema model → 摘要（列表 / 状态动作返回）。
-func toSummarySchema(wf *Workflow) workflowapi.WorkflowSummarySchema {
+// schemaJSON api schema 字段集 → jsonb 文本；nil / 空数组 → NULL（未声明语义，
+// spec 08 §4.5——chat 型空数组与不携带等价）。
+func schemaJSON(fields []workflowapi.SchemaField) (*string, error) {
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	s := string(b)
+	return &s, nil
+}
+
+// schemaFields jsonb 文本 → api schema 字段集；NULL / 空串 → nil。写入时已过形态
+// 校验，读侧解析失败即数据损坏——原样上抛由调用方 500 兜底，不静默吞。
+func schemaFields(p *string) ([]workflowapi.SchemaField, error) {
+	if p == nil || *p == "" {
+		return nil, nil
+	}
+	var fields []workflowapi.SchemaField
+	if err := json.Unmarshal([]byte(*p), &fields); err != nil {
+		return nil, fmt.Errorf("unmarshal schema jsonb: %w", err)
+	}
+	return fields, nil
+}
+
+// toSummarySchema model → 摘要（列表 / 状态动作返回）；type 与 schema 列回读暴露
+// （spec 08——存量行迁移 00020 已回填 chat，schema NULL → nil）。
+func toSummarySchema(wf *Workflow) (workflowapi.WorkflowSummarySchema, error) {
+	in, err := schemaFields(wf.InputSchema)
+	if err != nil {
+		return workflowapi.WorkflowSummarySchema{}, fmt.Errorf("workflow %d input_schema: %w", wf.ID, err)
+	}
+	out, err := schemaFields(wf.OutputSchema)
+	if err != nil {
+		return workflowapi.WorkflowSummarySchema{}, fmt.Errorf("workflow %d output_schema: %w", wf.ID, err)
+	}
 	return workflowapi.WorkflowSummarySchema{
 		ID:          strconv.FormatUint(wf.ID, 10),
 		Name:        wf.Name,
 		Description: wf.Description,
+		Type:        wf.Type,
 		Status:      wf.Status,
+		InputSchema: in,
+		OutputSchema: out,
 		CreatedAt:   wf.CreatedAt,
 		UpdatedAt:   wf.UpdatedAt,
-	}
+	}, nil
 }
 
 // toDetailSchema 三查结果 → 详情；Nodes / Edges 空切片兜底（禁 null，接口规范空值
 // 约定），config 原样透传（库里即校验过的原文）。
-func toDetailSchema(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) *workflowapi.WorkflowDetailSchema {
+func toDetailSchema(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) (*workflowapi.WorkflowDetailSchema, error) {
+	sum, err := toSummarySchema(wf)
+	if err != nil {
+		return nil, err
+	}
 	d := &workflowapi.WorkflowDetailSchema{
-		WorkflowSummarySchema: toSummarySchema(wf),
+		WorkflowSummarySchema: sum,
 		StartNodeKey:          wf.StartNodeKey,
 		Nodes:                 make([]workflowapi.NodeSchema, 0, len(nodes)),
 		Edges:                 make([]workflowapi.EdgeSchema, 0, len(edges)),
@@ -159,7 +220,7 @@ func toDetailSchema(wf *Workflow, nodes []WorkflowNode, edges []WorkflowEdge) *w
 			Condition:     e.Condition,
 		})
 	}
-	return d
+	return d, nil
 }
 
 // pgCodeUniqueViolation PG 唯一约束错误码（uq_workflows_name）。
@@ -181,16 +242,27 @@ func isFKViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == pgCodeFKViolation
 }
 
-// Create：R10 模板引用校验（纯内存）→ 条 9 预检 → 组装 model 行 → store.Create
-//（一事务三表）→ 三查组装 detail 返回（round-trip 即校验）。不预热缓存（写路径，spec 04 §3）。
+// Create：分型守卫（spec 08）→ R10 模板引用校验（纯内存）→ 条 9 预检 → R11 嵌套
+// 校验（sub-workflow 节点：存在性 / task 型 / 环 / 链深 / inputs 覆盖）→ 组装
+// model 行 → store.Create（一事务三表）→ 三查组装 detail 返回（round-trip 即校验）。
+// 不预热缓存（写路径，spec 04 §3）。
 func (s *workflowService) Create(ctx context.Context, req workflowapi.UpsertReq) (*workflowapi.WorkflowDetailSchema, error) {
+	if err := validateTyping(req); err != nil {
+		return nil, err
+	}
 	if err := validateTemplateRefs(req.Nodes, req.Edges); err != nil {
 		return nil, err
 	}
 	if err := s.precheckRefs(ctx, req.Nodes); err != nil {
 		return nil, err
 	}
-	wf, nodes, edges := toModel(req)
+	if err := s.validateNesting(ctx, 0, req.Nodes); err != nil {
+		return nil, err // selfID=0：创建时尚无 id，自嵌不可能（spec 08 §4.2）
+	}
+	wf, nodes, edges, err := toModel(req)
+	if err != nil {
+		return nil, fmt.Errorf("assemble workflow %s: %w", req.Name, err)
+	}
 	if err := s.store.Create(ctx, wf, nodes, edges); err != nil {
 		if isUniqueViolation(err) {
 			return nil, workflowapi.ErrWorkflowNameConflict // 409
@@ -243,6 +315,176 @@ func (s *workflowService) precheckRefs(ctx context.Context, nodes []workflowapi.
 	return nil
 }
 
+// validateTyping 分型守卫（spec 08 §4.1，Create 路径）：type 必填 oneof chat/task；
+// task 型 schema 形态校验（api.ValidateSchemaFields——重名 / type ∈ string|number|
+// boolean）；chat 型强不变量——携带非空 schema 即拒（schema 仅 task 型消费，空数组
+// 与不携带等价不触拒）。Update 路径的对应 guard（携带 type 即拒、chat 不变量按库内
+// 型判）见 Update / T023。
+func validateTyping(req workflowapi.UpsertReq) error {
+	switch req.Type {
+	case workflowapi.WorkflowTypeChat:
+		if len(req.InputSchema) > 0 || len(req.OutputSchema) > 0 {
+			return fmt.Errorf("%w: chat 型不支持 input_schema / output_schema（仅 task 型）", errs.ErrValidationFailed)
+		}
+	case workflowapi.WorkflowTypeTask:
+		if err := workflowapi.ValidateSchemaFields(req.InputSchema); err != nil {
+			return fmt.Errorf("%w: %s", errs.ErrValidationFailed, err)
+		}
+		if err := workflowapi.ValidateSchemaFields(req.OutputSchema); err != nil {
+			return fmt.Errorf("%w: %s", errs.ErrValidationFailed, err)
+		}
+	default:
+		return fmt.Errorf("%w: type 必填且限 chat/task（当前 %q）", errs.ErrValidationFailed, req.Type)
+	}
+	return nil
+}
+
+// maxNestLevel 子工作流嵌套层级上限（spec 08 §4.2 O4：顶层 + 2 层嵌套 = 总链长 3，
+// 与执行期深度兜底同值）。被保存图的直接引用是第 1 层，链上再引用第 2 层，超出即拒。
+const maxNestLevel = 2
+
+// validateNesting R11 保存期嵌套校验（spec 08 §4.2，Create / Update 整图提交共用），
+// 对图中每个 sub-workflow 节点：① workflow_id 存在（store 直查）② 被引必须 task 型
+//（嵌套矩阵 O3：父型不限、目标仅 task）③ 自嵌禁止 ④ 沿被引图引用链 DFS——链上出现
+// 被保存图自身 id 即环拒绝 ⑤ 链深 ≤ maxNestLevel ⑥ inputs 键集覆盖（required ⊆
+// 映射键 ⊆ 声明字段名；子图无 schema 回退恰 {input}）。并发互引竞态窗口接受（单管理
+// 员内部规模），执行期深度兜底（FR4）。selfID：Update 为被保存图 id；Create 为 0
+//（创建时尚无 id，自嵌不可能；执行期引用已删图 fail-fast 归 FR10）。
+func (s *workflowService) validateNesting(ctx context.Context, selfID uint64, nodes []workflowapi.NodeReq) error {
+	for _, n := range nodes {
+		if n.Type != workflowapi.NodeWorkflow {
+			continue
+		}
+		cfg, err := workflowapi.ParseNodeConfig(n.Type, n.Config)
+		if err != nil {
+			return fmt.Errorf("node %q: %w", n.Key, err) // 理论不可达（api Validate 已过）
+		}
+		wc, ok := cfg.(*workflowapi.WorkflowNodeConfig)
+		if !ok {
+			return fmt.Errorf("node %q: unexpected config type %T", n.Key, cfg)
+		}
+		wf, err := s.store.GetByID(ctx, wc.WorkflowID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: node %q 引用的 workflow %d 不存在", errs.ErrValidationFailed, n.Key, wc.WorkflowID)
+			}
+			return fmt.Errorf("node %q: load workflow %d: %w", n.Key, wc.WorkflowID, err)
+		}
+		if wf.Type != string(workflowapi.WorkflowTypeTask) {
+			return fmt.Errorf("%w: node %q 引用的 workflow %d 为 %s 型（嵌套目标仅 task 型）",
+				errs.ErrValidationFailed, n.Key, wc.WorkflowID, wf.Type)
+		}
+		if wc.WorkflowID == selfID {
+			return fmt.Errorf("%w: node %q 自嵌禁止：workflow %d 引用自身", errs.ErrValidationFailed, n.Key, selfID)
+		}
+		if err := checkInputsCoverage(n.Key, wf.InputSchema, wc.Inputs); err != nil {
+			return err
+		}
+		if err := s.walkNestingChain(ctx, selfID, n.Key, wc.WorkflowID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// walkNestingChain 沿被引图 sub-workflow 引用链 DFS（R11 ④⑤：环 + 链深）。只做这两
+// 项——链上目标自身的存在性 / 分型 / inputs 合法性在该图保存时已校验（FR10：存量缺
+// 陷在它下次编辑时拦截），展开只需节点行（ListNodes）。visited 按 (id, level) 去重：
+// 同一图经不同路径到达的层级不同、深度语义不同；层级硬上限保证递归有界（最深
+// maxNestLevel+1 层，即便存量数据成环也不会死循环）。
+func (s *workflowService) walkNestingChain(ctx context.Context, selfID uint64, nodeKey string, refID uint64) error {
+	visited := make(map[[2]uint64]bool)
+	var visit func(id uint64, level int) error
+	visit = func(id uint64, level int) error {
+		nodeRows, err := s.store.ListNodes(ctx, id)
+		if err != nil {
+			return fmt.Errorf("node %q: list workflow %d nodes: %w", nodeKey, id, err)
+		}
+		for _, nr := range nodeRows {
+			if nr.Type != string(workflowapi.NodeWorkflow) {
+				continue
+			}
+			cfg, err := workflowapi.ParseNodeConfig(workflowapi.NodeWorkflow, json.RawMessage(nr.Config))
+			if err != nil {
+				return fmt.Errorf("node %q: workflow %d 节点 %q 存量配置损坏: %w", nodeKey, id, nr.NodeKey, err)
+			}
+			wc, ok := cfg.(*workflowapi.WorkflowNodeConfig)
+			if !ok {
+				return fmt.Errorf("node %q: workflow %d 节点 %q: unexpected config type %T", nodeKey, id, nr.NodeKey, cfg)
+			}
+			childLevel := level + 1
+			if childLevel > maxNestLevel {
+				return fmt.Errorf("%w: node %q 引用链深度超上限：workflow %d → %d 为第 %d 层（限顶层 + %d 层嵌套）",
+					errs.ErrValidationFailed, nodeKey, id, wc.WorkflowID, childLevel, maxNestLevel)
+			}
+			if selfID != 0 && wc.WorkflowID == selfID {
+				return fmt.Errorf("%w: node %q 引用链存在环：workflow %d 引回被保存图 %d",
+					errs.ErrValidationFailed, nodeKey, id, selfID)
+			}
+			key := [2]uint64{wc.WorkflowID, uint64(childLevel)}
+			if visited[key] {
+				continue
+			}
+			visited[key] = true
+			if err := visit(wc.WorkflowID, childLevel); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return visit(refID, 1)
+}
+
+// checkInputsCoverage R11 ⑥ inputs 键集覆盖（spec 08 §4.2）：required ⊆ 映射键 ⊆
+// 声明字段名；子图未声明 input_schema 时回退单一入参语义——映射必须恰为 {input}。
+// 违例字段名排序保证报错可复现。
+func checkInputsCoverage(nodeKey string, schemaText *string, inputs map[string]string) error {
+	fields, err := schemaFields(schemaText)
+	if err != nil {
+		return fmt.Errorf("node %q: %w", nodeKey, err) // 存量 schema 损坏，原样上抛 500 兜底
+	}
+	if len(fields) == 0 {
+		if _, hasInput := inputs["input"]; len(inputs) != 1 || !hasInput {
+			keys := make([]string, 0, len(inputs))
+			for k := range inputs {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return fmt.Errorf("%w: node %q 的子图未声明 input_schema，inputs 键集必须恰为 [input]（当前 %v）",
+				errs.ErrValidationFailed, nodeKey, keys)
+		}
+		return nil
+	}
+	declared := make(map[string]bool, len(fields))
+	required := make([]string, 0, len(fields))
+	for _, f := range fields {
+		declared[f.Name] = true
+		if f.Required {
+			required = append(required, f.Name)
+		}
+	}
+	var missing, extra []string
+	for _, name := range required {
+		if _, ok := inputs[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	for k := range inputs {
+		if !declared[k] {
+			extra = append(extra, k)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("%w: node %q inputs 缺少 required 字段 %v", errs.ErrValidationFailed, nodeKey, missing)
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		return fmt.Errorf("%w: node %q inputs 含未声明字段 %v", errs.ErrValidationFailed, nodeKey, extra)
+	}
+	return nil
+}
+
 // validateTemplateRefs R10 保存期模板引用校验（db_model §7 条 11，2026-09-17 O2 拍板）：
 // llm.prompt / api.url + headers + body / end.output / condition.expression 内 {{var}}
 // 引用名 ∈ {input} ∪ 该节点祖先 node_key 集（R7 无环 ⇒ DAG 祖先可算）。违例 →
@@ -261,7 +503,8 @@ func validateTemplateRefs(nodes []workflowapi.NodeReq, edges []workflowapi.EdgeR
 			return err
 		}
 		for _, ref := range refs {
-			if ref != "input" && !ancestors[ref] {
+			base, _, _ := strings.Cut(ref, ".") // 基名判定（spec 08 FR9）：点分引用按基名过 R10，字段名留运行期 strict
+			if base != "input" && !ancestors[base] {
 				return fmt.Errorf("%w: node %q 引用未定义变量 %q（可用：input 与祖先节点 key）",
 					errs.ErrValidationFailed, n.Key, ref)
 			}
@@ -288,7 +531,8 @@ func ancestorsOf(key string, inEdges map[string][]string) map[string]bool {
 }
 
 // nodeTemplateRefs 按节点类型提取冻结清单内的模板字段引用（db_model §7 条 11）；
-// tool / knowledge_retrieval 无模板字段。condition 比较式仅取 == 左侧——右侧
+// tool / knowledge_retrieval 无模板字段；workflow 节点查 inputs 各值模板（键是子
+// schema 字段名非变量引用，不查，spec 08）。condition 比较式仅取 == 左侧——右侧
 // 'literal' 是字面量非引用、不查（与执行期 evalCondition 同一切分规则）。
 func nodeTemplateRefs(n workflowapi.NodeReq) ([]string, error) {
 	switch n.Type {
@@ -322,6 +566,17 @@ func nodeTemplateRefs(n workflowapi.NodeReq) ([]string, error) {
 		}
 	case *workflowapi.EndConfig:
 		refs = templateRefs(v.Output)
+	case *workflowapi.WorkflowNodeConfig:
+		// inputs 值是 {{var}} 模板（spec 08 §4.1），R10 天然覆盖；键是子 schema 字段名
+		// 非变量引用，不查。
+		inKeys := make([]string, 0, len(v.Inputs))
+		for k := range v.Inputs {
+			inKeys = append(inKeys, k)
+		}
+		sort.Strings(inKeys) // 确定性：多字段违例时报错可复现
+		for _, k := range inKeys {
+			refs = append(refs, templateRefs(v.Inputs[k])...)
+		}
 	default:
 		return nil, fmt.Errorf("node %q: unexpected config type %T", n.Key, cfg)
 	}
@@ -368,7 +623,7 @@ func (s *workflowService) assembleDetail(ctx context.Context, id uint64) (*workf
 	if err != nil {
 		return nil, err
 	}
-	return toDetailSchema(wf, nodes, edges), nil
+	return toDetailSchema(wf, nodes, edges)
 }
 
 // cacheKey workflow 详情的缓存 key（全键 = hify:cache:workflow-cache:{id}，前缀由
@@ -427,22 +682,37 @@ func (s *workflowService) List(ctx context.Context, req workflowapi.ListWorkflow
 	}
 	summaries := make([]workflowapi.WorkflowSummarySchema, 0, len(items))
 	for i := range items {
-		summaries = append(summaries, toSummarySchema(&items[i]))
+		sum, err := toSummarySchema(&items[i])
+		if err != nil {
+			return nil, fmt.Errorf("list workflows: %w", err)
+		}
+		summaries = append(summaries, sum)
 	}
 	return &workflowapi.WorkflowListResult{Items: summaries, Page: page, PageSize: pageSize, Total: total}, nil
 }
 
-// Update：R10 模板引用校验（纯内存）→ 条 9 预检 → store.ReplaceGraph 整图替换单事务
-//（affected=0 → 404 哨兵；23505 → 409）→ 事务提交后 evict 删 key → 三查组装 detail
-// 返回（status 库里回读，编辑不降级——ReplaceGraph 不写 status）。
+// Update：R10 模板引用校验（纯内存）→ 条 9 预检 → R11 嵌套校验（selfID=被保存图
+// id——自嵌与间接环在此拦截）→ store.ReplaceGraph 整图替换单事务（affected=0 → 404
+// 哨兵；23505 → 409）→ 事务提交后 evict 删 key → 三查组装 detail 返回（status 库里
+// 回读，编辑不降级——ReplaceGraph 不写 status / type）。
 func (s *workflowService) Update(ctx context.Context, req workflowapi.UpdateWorkflowReq) (*workflowapi.WorkflowDetailSchema, error) {
+	if req.Type != nil { // 分型不可变（spec 08 §4.1）：携带即拒，先于一切预检——防绕过 handler 直调
+		return nil, fmt.Errorf("%w: type 不可变：Update 不得携带 type（当前携带 %q；换型 = 删了重建）",
+			errs.ErrValidationFailed, *req.Type)
+	}
 	if err := validateTemplateRefs(req.Nodes, req.Edges); err != nil {
 		return nil, err
 	}
 	if err := s.precheckRefs(ctx, req.Nodes); err != nil {
 		return nil, err
 	}
-	wf, nodes, edges := toModel(req.UpsertReq)
+	if err := s.validateNesting(ctx, req.ID, req.Nodes); err != nil {
+		return nil, err
+	}
+	wf, nodes, edges, err := toModel(req.UpsertReq)
+	if err != nil {
+		return nil, fmt.Errorf("assemble workflow %d: %w", req.ID, err)
+	}
 	wf.ID = req.ID
 	moved, err := s.store.ReplaceGraph(ctx, wf, nodes, edges)
 	if err != nil {

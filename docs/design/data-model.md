@@ -29,6 +29,8 @@ erDiagram
     models ||--o{ executions : "记录模型"
     workflows ||--o{ workflow_runs : "弱引用，无 FK（spec 06）"
     workflow_runs ||--o{ workflow_node_runs : "节点轨迹（CASCADE）"
+    workflows }o--o{ workflows : "sub-workflow 节点引用（jsonb 弱引用，仅 task 型，spec 08）"
+    workflow_runs ||--o{ workflow_runs : "parent_run_id 子 run 归属（spec 08）"
 ```
 
 ## 表清单（按模块）
@@ -62,10 +64,10 @@ erDiagram
 - 全链路数据流与字段明细见 [docs/changelog/chat/data_flow_and_model.md](../changelog/chat/data_flow_and_model.md)（executions 字段明细同此文档）
 
 ### workflow
-- `workflows` — 工作流主表（name 唯一、status 状态机、config 顶层 JSONB）
-- `workflow_nodes` — 节点（llm/knowledge_retrieval/condition/api/tool/end，config 按类型密封）
+- `workflows` — 工作流主表（name 唯一、status 状态机、`type` 分型 chat/task 不可变、`input_schema`/`output_schema` 仅 task 型，spec 08）
+- `workflow_nodes` — 节点（llm/knowledge_retrieval/condition/api/tool/end/workflow，config 按类型密封；`workflow` = sub-workflow 嵌套引用，spec 08）
 - `workflow_edges` — 边（source→target，condition 分支表达式）
-- `workflow_runs` — 执行轨迹（每次运行一行，spec 06）：append-only 收尾统一写、无 RUNNING 态；**弱引用 workflows（无 FK）**——workflow 删除后轨迹保留
+- `workflow_runs` — 执行轨迹（每次运行一行，spec 06）：append-only 收尾统一写、无 RUNNING 态；**弱引用 workflows（无 FK）**——workflow 删除后轨迹保留；`parent_run_id` 记子 run 归属（spec 08）
 - `workflow_node_runs` — 节点执行轨迹（每节点一行，spec 06）：seq 是回放顺序唯一事实源；input/output 为截断摘要非 ctx 全量快照
 
 ### platform/logging
@@ -100,6 +102,8 @@ workflows 1──N workflow_edges                  # 一个工作流多条边（
 workflows ──(LLM 节点调用)──▶ executions        # 工作流节点的调用也进 executions
 workflows 1──N workflow_runs                   # 运行轨迹（弱引用：无 FK，workflow 删除后轨迹保留，spec 06）
 workflow_runs 1──N workflow_node_runs          # 节点轨迹（ON DELETE CASCADE）
+workflows N──M workflows                       # sub-workflow 嵌套（workflow 节点 jsonb 弱引用被引图 id，只许嵌 task 型，环/链深由 R11 校验，spec 08）
+workflow_runs 1──N workflow_runs               # 子 run 归属（parent_run_id 弱引用，父收尾回填，spec 08）
 ```
 
 ## Redis-only（不建 PG 表）

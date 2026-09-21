@@ -23,8 +23,18 @@ const (
 	StatusDisabled  WorkflowStatus = "disabled"
 )
 
-// NodeType 节点类型（db_model §4：六类，config 格式按 type 判别；00016 建四类，
-// 00017 加宽补 api/end，2026-09-16 拍板）。
+// WorkflowType 工作流分型（spec 08 §4.1，2026-09-18 拍板）：chat = 对话管道终答 /
+// task = string→string 可组合任务函数（可被 sub-workflow 节点引用）。类型不可变
+//（Update 携带即拒，换型 = 删了重建）；存量回填 chat。
+type WorkflowType string
+
+const (
+	WorkflowTypeChat WorkflowType = "chat"
+	WorkflowTypeTask WorkflowType = "task"
+)
+
+// NodeType 节点类型（db_model §4：七类，config 格式按 type 判别；00016 建四类，
+// 00017 加宽补 api/end，00020 补 workflow——sub-workflow 嵌套节点）。
 type NodeType string
 
 const (
@@ -34,11 +44,12 @@ const (
 	NodeKnowledgeRetrieval NodeType = "knowledge_retrieval"
 	NodeAPI                NodeType = "api"
 	NodeEnd                NodeType = "end"
+	NodeWorkflow           NodeType = "workflow"
 )
 
 // ── NodeConfig 密封接口：实现集封闭本包，引擎 type switch 穷举（db_model §8）──
 
-// NodeConfig 节点 config 的密封接口：六类 config 各自实现 isNodeConfig（非导出方法，
+// NodeConfig 节点 config 的密封接口：七类 config 各自实现 isNodeConfig（非导出方法，
 // 包外无法新增实现），执行引擎按具体类型 type switch 消费，无断言无反射。
 type NodeConfig interface{ isNodeConfig() }
 
@@ -162,6 +173,25 @@ func (EndConfig) isNodeConfig() {}
 // Validate 跨字段校验；空配置即合法（output 可选）。
 func (c EndConfig) Validate() error { return nil }
 
+// WorkflowNodeConfig sub-workflow 嵌套节点（spec 08 §4.1 / §4.3）：引用一个 task 型
+// 工作流作为可组合任务函数。inputs 是「子 schema 字段 → 父图 {{var}} 模板」映射；
+// 键集语义（required 全覆盖、多余拒、无 schema 回退恰 {input}）与 workflow_id 的
+// 存在性 / task 型 / 环 / 链深校验全归 service R11——本层只管形状（workflow_id 非零）。
+type WorkflowNodeConfig struct {
+	WorkflowID uint64            `json:"workflow_id,string"` // workflows.id；存在性与分型由 service R11 校验
+	Inputs     map[string]string `json:"inputs,omitempty"`   // 值支持 {{var}} 模板（R10 天然覆盖）
+}
+
+func (WorkflowNodeConfig) isNodeConfig() {}
+
+// Validate 必填校验（workflow_id 非零；inputs 键集语义归 R11，可空）。
+func (c WorkflowNodeConfig) Validate() error {
+	if c.WorkflowID == 0 {
+		return fmt.Errorf("workflow_id 必填")
+	}
+	return nil
+}
+
 // errInvalidNodeConfig config 强校验失败的包内哨兵：对外错误统一由 handler 翻成
 // errs.ErrValidationFailed（400），本哨兵只做包内错误链判别（db_model §8）。
 var errInvalidNodeConfig = errors.New("INVALID_NODE_CONFIG")
@@ -191,6 +221,8 @@ func ParseNodeConfig(t NodeType, raw json.RawMessage) (NodeConfig, error) {
 		cfg = &ApiCallConfig{}
 	case NodeEnd:
 		cfg = &EndConfig{}
+	case NodeWorkflow:
+		cfg = &WorkflowNodeConfig{}
 	default:
 		return nil, fmt.Errorf("%w: 未知节点类型 %q", errInvalidNodeConfig, t)
 	}
@@ -203,17 +235,56 @@ func ParseNodeConfig(t NodeType, raw json.RawMessage) (NodeConfig, error) {
 	return cfg, nil
 }
 
+// ── 分型结构化契约（spec 08 §4.5：task 型简化 I/O schema）──
+
+// SchemaField task 型结构化 I/O 契约的字段（spec 08 §4.5 简化形态）：
+// [{name, type, required, description}]，type ∈ string / number / boolean；
+// 仅 task 型消费（chat 型携带非空 schema 由 service 强不变量拒）。
+type SchemaField struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"` // string / number / boolean
+	Required    bool   `json:"required"`
+	Description string `json:"description"`
+}
+
+// ValidateSchemaFields 校验 schema 字段集形态（service 保存路径 Create / Update 调用，
+// HTTP 与直调共用；字段级规则全归此处，不打 binding tag——与节点 config 同理，
+// jsonb 形状由代码兜底）：name 非空不重名、type ∈ string/number/boolean。
+func ValidateSchemaFields(fields []SchemaField) error {
+	seen := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		if f.Name == "" {
+			return fmt.Errorf("schema 字段 name 必填")
+		}
+		if seen[f.Name] {
+			return fmt.Errorf("schema 字段重名: %s", f.Name)
+		}
+		seen[f.Name] = true
+		switch f.Type {
+		case "string", "number", "boolean":
+		default:
+			return fmt.Errorf("schema 字段 %s type 非法: %q（限 string/number/boolean）", f.Name, f.Type)
+		}
+	}
+	return nil
+}
+
 // ── 请求（api_contract §3 冻结；config 延迟解析）──
 
 // UpsertReq 创建 / 整图替换共用请求（POST / PUT 同构）。请求体不含 status——状态
-// 只能经 publish / disable 动作改变（编辑不降级，db_model 决策 #6）。数量界（节点
-// 1-50 / 边 0-100）由 binding tag 管，Validate 只管跨字段图规则，两层不重复。
+// 只能经 publish / disable 动作改变（编辑不降级，db_model 决策 #6）。Type 必填
+// oneof 只在 Validate 管（spec 08）：Update 复用本结构但不携带 type（携带即拒归
+// UpdateWorkflowReq），binding tag 会误伤嵌入空值，故不打。数量界（节点 1-50 /
+// 边 0-100）由 binding tag 管，Validate 只管跨字段图规则，两层不重复。
 type UpsertReq struct {
-	Name         string    `json:"name" binding:"required,max=128"`
-	Description  string    `json:"description"`
-	StartNodeKey string    `json:"start_node_key" binding:"required"`
-	Nodes        []NodeReq `json:"nodes" binding:"required,min=1,max=50"`
-	Edges        []EdgeReq `json:"edges" binding:"required,max=100"` // 纯线性可传 []
+	Name         string         `json:"name" binding:"required,max=128"`
+	Description  string         `json:"description"`
+	Type         WorkflowType   `json:"type"` // chat / task（spec 08）；Create 必填，Update 不携带
+	InputSchema  []SchemaField  `json:"input_schema"`  // 仅 task 型；chat 型携带非空由 service 强不变量拒
+	OutputSchema []SchemaField  `json:"output_schema"` // 仅 task 型
+	StartNodeKey string         `json:"start_node_key" binding:"required"`
+	Nodes        []NodeReq      `json:"nodes" binding:"required,min=1,max=50"`
+	Edges        []EdgeReq      `json:"edges" binding:"required,max=100"` // 纯线性可传 []
 }
 
 // NodeReq 节点：config 保持 RawMessage 延迟解析——绑定阶段还不知道类型，
@@ -232,11 +303,23 @@ type EdgeReq struct {
 	Condition     *string `json:"condition" binding:"omitempty,max=128"` // nil = 无条件
 }
 
-// Validate 整图校验（db_model §7 的纯函数子集，spec 02 §3.2）：
+// Validate 整图校验入口：分型 oneof（spec 08，Create 必填）+ 图规则委托
+// validateGraph。Update 路径不经此处（UpdateWorkflowReq.Validate 只走图规则，
+// type 不可变、携带即拒）。
+func (r UpsertReq) Validate() error {
+	switch r.Type {
+	case WorkflowTypeChat, WorkflowTypeTask:
+	default:
+		return fmt.Errorf("type 必填且限 chat/task")
+	}
+	return r.validateGraph()
+}
+
+// validateGraph 图规则（db_model §7 的纯函数子集，spec 02 §3.2）：
 // R1 key 唯一 → R2 config 强校验 → R3 start 存在 → R4 悬挂边 → R5 出边匹配值 →
 // R6 非 condition 出边数 → R7 无环 → R8 无不可达 → R9 end 禁出边。数量界归
 // binding tag，jsonb 引用存在性归 service（spec 04）——三层各管一段。
-func (r UpsertReq) Validate() error {
+func (r UpsertReq) validateGraph() error {
 	// R1 节点 key 请求内唯一（uq_workflow_nodes_wf_key 的前置早暴露）。
 	nodes := make(map[string]NodeReq, len(r.Nodes))
 	for _, n := range r.Nodes {
@@ -324,17 +407,25 @@ func (r UpsertReq) Validate() error {
 }
 
 // UpdateWorkflowReq：ID 由 handler BindUri 后赋值（provider UpdateModelReq 同款，body 不含 id）。
+// Type 遮蔽嵌入 UpsertReq.Type（encoding/json 浅字段优先）：body 的 type 落指针、
+// 不渗入嵌入字段——nil = 未携带（合法），非 nil = 携带即拒。
 type UpdateWorkflowReq struct {
-	ID uint64 `json:"-"`
+	ID   uint64  `json:"-"`
+	Type *string `json:"type"` // 携带即拒（spec 08 §4.1：分型不可变，同值 / 异值均拒）
 	UpsertReq
 }
 
-// Validate：ID 兜底（防绕过 handler 的调用方）+ 整图规则委托 UpsertReq.Validate。
+// Validate：ID 兜底（防绕过 handler 的调用方）+ type 携带即拒 + 图规则委托
+// validateGraph。不走 UpsertReq.Validate——type 不可变（spec 08）：Update body
+// 不携带 type，必填检查会误伤；携带即拒（clarify 拍板：不比对当前值，同值也拒）。
 func (r UpdateWorkflowReq) Validate() error {
 	if r.ID == 0 {
 		return fmt.Errorf("id 必填")
 	}
-	return r.UpsertReq.Validate()
+	if r.Type != nil {
+		return fmt.Errorf("type 不可变：Update 不得携带 type（当前携带 %q；换型 = 删了重建）", *r.Type)
+	}
+	return r.UpsertReq.validateGraph()
 }
 
 // GetWorkflowReq 详情请求（路径参数 id）。
@@ -401,14 +492,18 @@ func (r ExecuteWorkflowReq) Validate() error {
 
 // ── 响应 Schema（api_contract §3 冻结）──
 
-// WorkflowSummarySchema 摘要（列表用，不带图）。
+// WorkflowSummarySchema 摘要（列表用，不带图）。Type / schema 字段 spec 08 起
+// 暴露：schema 未声明（含 chat 型恒空）序列化为 null。
 type WorkflowSummarySchema struct {
-	ID          string    `json:"id"` //〔2026-09-16 修订〕原 `json:"id,string"` 系笔误：,string 只用于数字字段，挂在 string 字段上会双重编码
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Status      string    `json:"status"` // draft/published/disabled
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string        `json:"id"` //〔2026-09-16 修订〕原 `json:"id,string"` 系笔误：,string 只用于数字字段，挂在 string 字段上会双重编码
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Type        string        `json:"type"` // chat/task（spec 08；存量回填 chat）
+	Status      string        `json:"status"` // draft/published/disabled
+	InputSchema  []SchemaField `json:"input_schema"`  // task 型入参契约；null = 未声明
+	OutputSchema []SchemaField `json:"output_schema"` // task 型出参契约；null = 未声明
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
 }
 
 // WorkflowDetailSchema 详情（创建/更新/详情接口返回）；结构与创建入参一致

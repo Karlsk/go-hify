@@ -87,7 +87,7 @@ migrations/
 docs/design/data-model.md                       # type + workflows 自引用弱引用
 docs/changelog/workflow/db_model.md             # R11 条 12 + 决策 #16
 docs/changelog/workflow/api_contract.md         # type 字段 + 节点类型清单 + 嵌套语义
-docs/testing/workflow-manual-test.md            # 嵌套冒烟小节
+docs/testing/workflow-engine-manual-test.md     # §7 嵌套冒烟小节
 CLAUDE.md                                        # 错误码表零新行注记、索引地图
 ```
 

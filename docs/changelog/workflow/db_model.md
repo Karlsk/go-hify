@@ -124,6 +124,7 @@ DROP TABLE IF EXISTS workflows;
 | `knowledge_retrieval` | 知识库检索（结果注入上下文） | `knowledge_base_id`、`top_k?` | rag 模块 api |
 | `api` | 直接 HTTP 调用（不经 MCP 注册的轻量出站请求） | `url`、`method`（GET/POST/PUT/DELETE/PATCH）、`headers?`、`body?`、`timeout_sec?`（0=默认 10s，1-60）、`ssl_verify?`（默认 false = 跳过证书校验，内网自签端点） | 执行器 `callApi`（SSRF 防护与 TLS 配置归执行器，spec 05） |
 | `end` | 显式终止节点（**可选**，2026-09-16 拍板）：`output` 模板拼工作流终稿，空 = 取最后执行节点输出 | `output?` | 执行器 `buildOutput`，零外部调用 |
+| `workflow` | sub-workflow 嵌套节点（spec 08）：引用一个 task 型工作流作为可组合任务函数，子终稿落父变量池 | `workflow_id`（字符串化弱引用，存在性 / task 型 / 环 / 链深归 R11）、`inputs?`（子 schema 字段 → 父图 `{{var}}` 模板映射；键集覆盖归 R11） | 执行器 `callWorkflow` → service `executeChild` 进程内递归（同 goroutine、每层自包 5min） |
 
 ```jsonc
 // config 按类型各异，存同一 jsonb 列（判别字段 = 同行 type 列）
@@ -133,9 +134,10 @@ DROP TABLE IF EXISTS workflows;
 { "knowledge_base_id": "7", "top_k": 3 }
 { "url": "https://api.example.com/orders", "method": "POST", "headers": { "X-Request-Id": "{{input.req_id}}" }, "body": "{\"id\":\"{{input.id}}\"}", "timeout_sec": 30, "ssl_verify": true }
 { "output": "回复：{{reply}}" }
+{ "workflow_id": "42", "inputs": { "query": "{{input}}", "top_k": "3" } }
 ```
 
-模板变量：`{{input}}` = 工作流输入；`{{<node_key>}}` = 该节点的输出（执行上下文按 node_key 存每个节点的产出，condition 求值结果同样以 node_key 落上下文，后续节点可复用）。
+模板变量：`{{input}}` = 工作流输入；`{{<node_key>}}` = 该节点的输出（执行上下文按 node_key 存每个节点的产出，condition 求值结果同样以 node_key 落上下文，后续节点可复用）。〔spec 08 追加：池一级下钻 `{{input.x}}` / `{{node.field}}`——池值为 JSON 对象时可下钻一层字段，string 值行为不变，深度一层为止；R10 保存期只校验基名（点号前 ∈ {input} ∪ 祖先 node_key），字段名运行期 strict（缺失 / 非 JSON → 图缺陷 400 带 node 前缀）。〕
 
 ## 5. 关键决策（四轮收敛，勿回头）
 
@@ -156,6 +158,7 @@ DROP TABLE IF EXISTS workflows;
 | 13 | **agent → workflow 绑定：`agents.workflow_id` 可空真列 + `fk_agents_workflow` ON DELETE RESTRICT**（2026-09-17 拍板，spec 05） | 五项拍板：A=RESTRICT（被绑定时挡删 workflow → 409 `WORKFLOW_IN_USE`，nodes/edges 随删除 CASCADE）；B=绑定期不校验发布态、B2=执行读实时版本（无发布快照，编辑立即生效）——均由消费方（chat/执行器）经 workflowapi 在执行期把关；C=既有 Create/PUT 字段化 `workflow_id`（PUT 全量语义：缺省/null = 解绑）；C2=不与任何现有字段互斥（叠加语义）。双向哨兵：agent 侧 23503 按约束名分发（`fk_agents_workflow` → `agentapi.ErrWorkflowNotFound` 404，与 workflowapi 同码各持一份、KB 先例；model 侧约束名/无约束名兜底 → `ErrModelNotFound`）——依赖清单只允许 workflow → agent，FK 是绑定期 workflow 存在性的唯一校验。拒绝 service 预检存在性——依赖方向不容 agent import workflowapi，且 FK 已是原子兜底 |
 | 14 | **执行轨迹两层表 `workflow_runs` + `workflow_node_runs`**（2026-09-17 拍板要建，可追溯优先级最高；schema 已随 spec 06 冻结，§12） | ① **append-only 收尾统一写**——执行结束（成功/失败）一次性落库，无 `RUNNING` 可变态、无逐节点写库事务（同步执行内存即真相，落库只为追溯；拒绝"每节点前后 UPDATE status"的写放大与僵尸 RUNNING 清理问题）；② **弱引用零跨模块 FK**——`workflow_id` 与 chat 触发的 `conversation_id` / `message_id` 都不建 FK（executions 先例：保留期日志表不能反过来阻碍业务删除）；run 行冗余 `workflow_name` 快照，workflow 删除后轨迹仍可读；唯一 FK 是 `node_runs.run_id`（同模块真子表 CASCADE）；③ **seq 排序键** `UNIQUE (run_id, seq)`——执行顺序的唯一事实源，不靠 id 插入序近似；④ **`started_at` 记执行起点**（`created_at` = 收尾写入时刻，差值即耗时）；⑤ 命名 `workflow_node_runs`（弃 `workflow_steps`，与 run 成名词链）；⑥ **PG 方言**（IDENTITY / timestamptz / text+CHECK / jsonb），拒绝 MySQL `AUTO_INCREMENT` / `DATETIME` 移植稿 |
 | 15 | **R10 保存期模板引用校验**（2026-09-17 O2 拍板、随 spec 06 冻结） | 模板 `{{var}}` 引用 ∈ {input} ∪ 该节点祖先 node_key——错字在保存时即 400（执行期 strict 兜底不变）。拒绝只靠运行时报错（n8n 静默 undefined 教训：错字被吞、输出莫名变差难排查）。规则落 §7 条 11 |
+| 16 | **分型 chat/task + sub-workflow 嵌套 + parent_run_id 轨迹**（2026-09-18 拍板，spec 08） | ① **type 不可变**（Update 携带即拒，同值 / 异值均拒——换型 = 删了重建）：被嵌合法性与消费语义系于类型，中途换型等于暗中改写所有引用方的合法性；存量回填 chat（存量绑定全为管道用法，回填语义精确）。② **嵌套矩阵只许嵌 task**：父图（chat 型或 task 型均可）引用目标只允许 task 型——可被嵌的必须是纯函数语义的 string→string 任务函数；chat 型接管对话轮、语义上不可被嵌。③ **自嵌 / 间接环一律禁止 + 引用链深度上限 3**（顶层 + 2 层）：保存期 DFS 环检测（§7 条 12）+ 执行期深度计数兜底（竞态窗口接受，单管理员内部规模）。④ **`workflow_runs.parent_run_id` 是 append-only 的一次窄 UPDATE 例外**：子 run 行先落（trigger_source='workflow'、conversation_id/message_id 与父相同——因果归属语义），父 run 行收尾成功后按父 run id 批量回填；父行写失败跳过回填、trace_id 兜底。⑤ **子图 vars 池全新起步**（只含自身 input）：父子仅经 input/output 通信，父不能引用子内部 var、子不能引用父 vars。⑥ `input_schema` / `output_schema` 仅 task 型消费，chat 型携带非空 schema 由 service 强不变量拒 |
 
 ## 6. 状态机与生命周期
 
@@ -193,7 +196,8 @@ POST/PUT /workflows  {name, start_node_key, nodes[], edges[]}
 8. 节点 1..50、边 0..100（binding 封顶）；
 9. jsonb 内引用存在性经下游 api 校验：model_id→provider、knowledge_base_id→rag；tool_id 推迟到执行器（决策 #9 修订，mcp api 未建）。
 10. end 节点不得有出边（显式终止；不强制每图必有 end——无出边 = 隐式结束仍合法，决策 #12）。
-11. 模板引用校验（R10，2026-09-17 O2 拍板、随 spec 06 冻结同步进本清单）：llm.prompt / api.url + headers + body / end.output / condition.expression 内 `{{var}}` 引用名 ∈ {input} ∪ 该节点祖先 node_key 集（R7 无环 ⇒ DAG 祖先可算；整图提交不存在先引用后建节点的窗口）；condition 比较式右侧 `'literal'` 是字面量非引用、不查。违例 → VALIDATION_FAILED 400，details 带节点 key 与引用名（执行期 strict 兜底不变）。
+11. 模板引用校验（R10，2026-09-17 O2 拍板、随 spec 06 冻结同步进本清单）：llm.prompt / api.url + headers + body / end.output / condition.expression 内 `{{var}}` 引用名 ∈ {input} ∪ 该节点祖先 node_key 集（R7 无环 ⇒ DAG 祖先可算；整图提交不存在先引用后建节点的窗口）；condition 比较式右侧 `'literal'` 是字面量非引用、不查。违例 → VALIDATION_FAILED 400，details 带节点 key 与引用名（执行期 strict 兜底不变）。spec 08 追加：workflow 节点 inputs 值同为模板、天然覆盖；保存期只校验基名（`{{input.x}}` 点号前 ∈ {input} ∪ 祖先 key），字段名运行期 strict。
+12. 嵌套校验 R11（spec 08 §4.2，对每个 `workflow` 节点，任一不过 → VALIDATION_FAILED 400 带节点 key）：① `workflow_id` 存在（同模块 store 直查）；② 被引 workflow 必须 **task 型**（chat 型不可被嵌，嵌套矩阵决策 #16）；③ 环检测——从被保存图 DFS 沿被引图 sub-workflow 引用链展开，链上出现被保存图自身 id 即拒（自嵌是长度 1 特例）；④ 引用链深度上限 3（顶层 + 2 层嵌套，与执行期兜底同值）；⑤ inputs 键集覆盖——被引图声明 input_schema 时须逐一覆盖全部 required 字段且无多余字段，无 schema 时映射键集必须恰为 {input}（回退单一入参语义）。并发互引竞态窗口接受（单管理员内部规模），执行期深度兜底。
 
 ## 8. Go 类型安全解析
 
@@ -355,6 +359,8 @@ default:
 ## 12. 执行轨迹表：workflow_runs / workflow_node_runs（已冻结，spec 06）
 
 > 状态：**已冻结**（2026-09-18，随 spec 06 [impl_spec_06_execution_engine.md](./impl_spec_06_execution_engine.md)；拍板要点见决策 #14）——DDL 为定稿，与本文主线同等效力。迁移号预排 **00019**（00018 已被 spec 05 agent 绑定占用；动手前 `make migrate-status` 确认 18 条 applied）。
+>
+> 〔spec 08 增量（迁移 00020，2026-09-20）：① `trigger_source` CHECK 重建为三值 `('console','chat','workflow')`——workflow 节点递归执行的子 run 行记 'workflow'；② 新增 `parent_run_id bigint`（可空，弱引用 workflow_runs.id 不建 FK——子 run 行先落、父 run 收尾成功后按父 run id 批量回填一次窄 UPDATE，父行写失败跳过回填 trace_id 兜底；`conversation_id` / `message_id` 与父相同，因果归属语义）；③ 子 run 写入失败降级同既有语义（重试一次，仍败照常返回）。下方 DDL 为 00019 冻结原稿，00020 增量以其为准叠加。〕
 
 两层结构，对齐 Dify `workflow_runs` / `workflow_node_executions` 的分层——run 回答"这次执行"，node_run 回答"走到第几步、错在哪一步"：
 

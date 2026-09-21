@@ -23,9 +23,9 @@
 
 **Purpose**: 迁移与数据基座——全部故事的 blocking 前提
 
-- [ ] T001 编写迁移 `migrations/00020_workflow_typing_nesting.sql`：workflows 加 `type`（text NOT NULL CHECK (type IN ('chat','task'))，存量回填 'chat'）+ `input_schema` / `output_schema` jsonb 可空 + COMMENT ON；`workflow_nodes_type_check` 约束重建加 'workflow'（00017 同名模式，Down 反向）；`workflow_runs_trigger_source_check` 约束重建加 'workflow'（00019 内联 CHECK 的 PG 自动命名，Drop + Add）+ `parent_run_id` bigint 可空 + COMMENT ON。写完 `make migrate-status` 核对 20 条 applied（本地 dev 库）
-- [ ] T002 [P] `internal/workflow/service/model.go`：Workflow 增 `Type` / `InputSchema` / `OutputSchema` 字段（jsonb 列，GORM tag；model 不打 json tag）
-- [ ] T003 [P] `internal/workflow/api/schema.go`：`WorkflowTypeChat` / `WorkflowTypeTask` 常量、`NodeTypeWorkflow = "workflow"` 常量、`SchemaField` 类型（name/type/required/description）及其形态校验 helper（重名 / type ∈ string|number|boolean）
+- [X] T001 编写迁移 `migrations/00020_workflow_typing_nesting.sql`：workflows 加 `type`（text NOT NULL CHECK (type IN ('chat','task'))，存量回填 'chat'）+ `input_schema` / `output_schema` jsonb 可空 + COMMENT ON；`workflow_nodes_type_check` 约束重建加 'workflow'（00017 同名模式，Down 反向）；`workflow_runs_trigger_source_check` 约束重建加 'workflow'（00019 内联 CHECK 的 PG 自动命名，Drop + Add）+ `parent_run_id` bigint 可空 + COMMENT ON。写完 `make migrate-status` 核对 20 条 applied（本地 dev 库）
+- [X] T002 [P] `internal/workflow/service/model.go`：Workflow 增 `Type` / `InputSchema` / `OutputSchema` 字段（jsonb 列，GORM tag；model 不打 json tag）
+- [X] T003 [P] `internal/workflow/api/schema.go`：`WorkflowTypeChat` / `WorkflowTypeTask` 常量、`NodeTypeWorkflow = "workflow"` 常量、`SchemaField` 类型（name/type/required/description）及其形态校验 helper（重名 / type ∈ string|number|boolean）
 
 **Checkpoint**: 列与类型就位，用户故事可开始。
 
@@ -39,17 +39,17 @@
 
 ### Tests for User Story 1 (TDD - 先 RED)
 
-- [ ] T004 [P] [US1] `internal/workflow/api/schema_test.go`（或既有测试文件追加）：WorkflowNodeConfig 解析（合法 config / workflow_id 缺失 / inputs 非映射拒）、UpsertReq.Type 必填与 oneof、SchemaField 形态校验（重名拒 / 非法 type 拒）
-- [ ] T005 [P] [US1] `internal/workflow/service/service_test.go`：分型 CRUD 表驱动——Create type 必填落库、chat 型携带非空 schema 拒（clarify 拍板）、task 型 schema 持久化与回读
-- [ ] T006 [US1] `internal/workflow/service/service_test.go`：R11 矩阵表驱动——五拒两过（stub Store 提供被引图 fixture；无 schema 子图回退恰 `{input}`）
+- [X] T004 [P] [US1] `internal/workflow/api/schema_test.go`（或既有测试文件追加）：WorkflowNodeConfig 解析（合法 config / workflow_id 缺失 / inputs 非映射拒）、UpsertReq.Type 必填与 oneof、SchemaField 形态校验（重名拒 / 非法 type 拒）
+- [X] T005 [P] [US1] `internal/workflow/service/service_test.go`：分型 CRUD 表驱动——Create type 必填落库、chat 型携带非空 schema 拒（clarify 拍板）、task 型 schema 持久化与回读
+- [X] T006 [US1] `internal/workflow/service/service_test.go`：R11 矩阵表驱动——五拒两过（stub Store 提供被引图 fixture；无 schema 子图回退恰 `{input}`）
 
 ### Implementation for User Story 1
 
-- [ ] T007 [US1] `internal/workflow/api/schema.go`：WorkflowNodeConfig 密封实现 + ParseNodeConfig 分发 'workflow'；UpsertReq 增 Type / InputSchema / OutputSchema 字段与 Validate 规则（T004 GREEN）
-- [ ] T008 [US1] `internal/workflow/service/service.go`：toModel / toSchema 增三字段转换；schema 形态校验接入 Create 路径；chat 型 schema 强不变量（T005 GREEN）
-- [ ] T009 [US1] `internal/workflow/store/store.go` + `store_test.go`：type / schema 列读写（Create / Get / List / Update SELECT 显式列）+ 被引 workflow 直查（GetByID 供 R11 用）；sqlmock 断言 SQL 形态
-- [ ] T010 [US1] `internal/workflow/service/service.go`：R11 保存期校验（①存在性 store 直查 ②task 型 ③DFS 环检测——链上出现被保存图自身 id 拒、visited 防重复展开 ④链深 ≤3 ⑤inputs 键集覆盖）；接入 Create 与 Update 整图提交路径（T006 GREEN）
-- [ ] T011 [US1] `internal/workflow/handler/handler.go` + `handler_test.go`：既有 create / update 绑定函数适配 type 字段；R11 / schema 校验失败走既有 VALIDATION_FAILED 400 分支；httptest 断言
+- [X] T007 [US1] `internal/workflow/api/schema.go`：WorkflowNodeConfig 密封实现 + ParseNodeConfig 分发 'workflow'；UpsertReq 增 Type / InputSchema / OutputSchema 字段与 Validate 规则（T004 GREEN）
+- [X] T008 [US1] `internal/workflow/service/service.go`：toModel / toSchema 增三字段转换；schema 形态校验接入 Create 路径；chat 型 schema 强不变量（T005 GREEN）
+- [X] T009 [US1] `internal/workflow/store/store.go` + `store_test.go`：type / schema 列读写（Create / Get / List / Update SELECT 显式列）+ 被引 workflow 直查（GetByID 供 R11 用）；sqlmock 断言 SQL 形态
+- [X] T010 [US1] `internal/workflow/service/service.go`：R11 保存期校验（①存在性 store 直查 ②task 型 ③DFS 环检测——链上出现被保存图自身 id 拒、visited 防重复展开 ④链深 ≤3 ⑤inputs 键集覆盖）；接入 Create 与 Update 整图提交路径（T006 GREEN）
+- [X] T011 [US1] `internal/workflow/handler/handler.go` + `handler_test.go`：既有 create / update 绑定函数适配 type 字段；R11 / schema 校验失败走既有 VALIDATION_FAILED 400 分支；httptest 断言
 
 **Checkpoint**: US1 独立可测——保存期拦截全量落地。
 
@@ -63,18 +63,18 @@
 
 ### Tests for User Story 2 (TDD - 先 RED)
 
-- [ ] T012 [P] [US2] `internal/workflow/service/execcontext_test.go`：池一级下钻表驱动——`{{input.x}}` / `{{node.field}}`（池值 JSON 时取字段）、string 值行为不变、深度一层为止、字段缺失运行期 strict
-- [ ] T013 [P] [US2] `internal/workflow/service/execute_test.go`：executeChild 表驱动——trial 跟随（父 trial 子 draft 放开）、正式子 draft 拒（NotPublished 带父 node 前缀）、深度计数超限图缺陷 400、trigger_source='workflow' + conversation_id / message_id 透传、子 run 写失败重试一次降级、父写失败跳过 parent_run_id 回填
-- [ ] T014 [US2] `internal/workflow/service/executor_test.go`：runNode workflow 分支表驱动——inputs 逐值渲染（strict）、JSON 文本组装（number / boolean 类型转换）、子终稿落父池 node_key、下游模板可引、output schema 校验失败 400 带父前缀、声明 schema 终稿非 JSON 拒、子图错误前缀链 `node a: node b:`、子池隔离（子图引用父 vars 报缺失）
-- [ ] T015 [P] [US2] `internal/workflow/store/store_test.go`：UpdateParentRunIDs sqlmock——`UPDATE workflow_runs SET parent_run_id WHERE id = ANY($1)` 批量一次窄写
+- [X] T012 [P] [US2] `internal/workflow/service/execcontext_test.go`：池一级下钻表驱动——`{{input.x}}` / `{{node.field}}`（池值 JSON 时取字段）、string 值行为不变、深度一层为止、字段缺失运行期 strict
+- [X] T013 [P] [US2] `internal/workflow/service/execute_test.go`：executeChild 表驱动——trial 跟随（父 trial 子 draft 放开）、正式子 draft 拒（NotPublished 带父 node 前缀）、深度计数超限图缺陷 400、trigger_source='workflow' + conversation_id / message_id 透传、子 run 写失败重试一次降级、父写失败跳过 parent_run_id 回填
+- [X] T014 [US2] `internal/workflow/service/executor_test.go`：runNode workflow 分支表驱动——inputs 逐值渲染（strict）、JSON 文本组装（number / boolean 类型转换）、子终稿落父池 node_key、下游模板可引、output schema 校验失败 400 带父前缀、声明 schema 终稿非 JSON 拒、子图错误前缀链 `node a: node b:`、子池隔离（子图引用父 vars 报缺失）
+- [X] T015 [P] [US2] `internal/workflow/store/store_test.go`：UpdateParentRunIDs sqlmock——`UPDATE workflow_runs SET parent_run_id WHERE id = ANY($1)` 批量一次窄写
 
 ### Implementation for User Story 2
 
-- [ ] T016 [US2] `internal/workflow/service/execcontext.go`：渲染器一级下钻（基名解析后池值为合法 JSON 对象且含字段则取值；string 不变；深度一层）（T012 GREEN）
-- [ ] T017 [US2] `internal/workflow/service/execute.go`：executeChild（把关 trial 跟随 / published；`WithTimeoutCause(5min)` 每层自包；子 vars 池全新起步只含自身 input；同 goroutine 共享父 ctx；深度计数传递超限拒）+ buildRun trigger_source 显式传参（console / chat / workflow——O7b 透传后 ConversationID 判定退役，research D2）+ 子 run id 累积 + 入口结构化入参检测（合法 JSON 对象且声明 input_schema → 解析入池，否则整串落 input）（T013 GREEN）
-- [ ] T018 [US2] `internal/workflow/store/store.go`：UpdateParentRunIDs（按父 run id 批量 UPDATE，DML 带 WHERE、参数类型 bigint[]）（T015 GREEN）
-- [ ] T019 [US2] `internal/workflow/service/executor.go`：runNode 增 'workflow' 分支——渲染 inputs → 按子 input_schema 组装 JSON 文本 → executeChild → output schema 校验 → 落父变量池 node_key；错误统一过既有 `node %s: %w` 前缀包装点（T014 GREEN）
-- [ ] T020 [US2] 父收尾回填接线：父 run 行落库（既有 WithoutCancel 路径）后调 UpdateParentRunIDs；父写失败（重试后仍败）跳过回填 trace_id 兜底
+- [X] T016 [US2] `internal/workflow/service/execcontext.go`：渲染器一级下钻（基名解析后池值为合法 JSON 对象且含字段则取值；string 不变；深度一层）（T012 GREEN）
+- [X] T017 [US2] `internal/workflow/service/execute.go`：executeChild（把关 trial 跟随 / published；`WithTimeoutCause(5min)` 每层自包；子 vars 池全新起步只含自身 input；同 goroutine 共享父 ctx；深度计数传递超限拒）+ buildRun trigger_source 显式传参（console / chat / workflow——O7b 透传后 ConversationID 判定退役，research D2）+ 子 run id 累积 + 入口结构化入参检测（合法 JSON 对象且声明 input_schema → 解析入池，否则整串落 input）（T013 GREEN）
+- [X] T018 [US2] `internal/workflow/store/store.go`：UpdateParentRunIDs（按父 run id 批量 UPDATE，DML 带 WHERE、参数类型 bigint[]）（T015 GREEN）
+- [X] T019 [US2] `internal/workflow/service/executor.go`：runNode 增 'workflow' 分支——渲染 inputs → 按子 input_schema 组装 JSON 文本 → executeChild → output schema 校验 → 落父变量池 node_key；错误统一过既有 `node %s: %w` 前缀包装点（T014 GREEN）
+- [X] T020 [US2] 父收尾回填接线：父 run 行落库（既有 WithoutCancel 路径）后调 UpdateParentRunIDs；父写失败（重试后仍败）跳过回填 trace_id 兜底
 
 **Checkpoint**: US1 + US2 联合可测——嵌套执行与轨迹全量落地。
 
@@ -88,14 +88,14 @@
 
 ### Tests for User Story 3 (TDD - 先 RED)
 
-- [ ] T021 [P] [US3] `internal/workflow/api/schema_test.go` + `internal/workflow/service/service_test.go`：UpdateWorkflowReq 携带 Type（同值 / 异值）→ errs.ErrValidationFailed（clarify 拍板：携带即拒，不比对当前值）
-- [ ] T022 [P] [US3] `internal/workflow/handler/handler_test.go`：update 绑定函数携带 type → 400 VALIDATION_FAILED 信封；get / list 响应含 `type`（及 schema 字段）
+- [X] T021 [P] [US3] `internal/workflow/api/schema_test.go` + `internal/workflow/service/service_test.go`：UpdateWorkflowReq 携带 Type（同值 / 异值）→ errs.ErrValidationFailed（clarify 拍板：携带即拒，不比对当前值）
+- [X] T022 [P] [US3] `internal/workflow/handler/handler_test.go`：update 绑定函数携带 type → 400 VALIDATION_FAILED 信封；get / list 响应含 `type`（及 schema 字段）
 
 ### Implementation for User Story 3
 
-- [ ] T023 [US3] `internal/workflow/api/schema.go` + `internal/workflow/service/service.go`：UpdateWorkflowReq 增 `Type *string` 携带即拒 + Update 路径 guard（T021 GREEN）
-- [ ] T024 [US3] `internal/workflow/handler/handler.go`：update 绑定函数拒改映射（既有 VALIDATION_FAILED 分支覆盖，确认无新哨兵）（T022 GREEN）
-- [ ] T025 [US3] 回归验证：`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿（含 spec 06 引擎既有用例 + spec 07 chat 管道用例——分型不 gate 绑定零行为改动）；依赖方向 grep（`internal/workflow/` 无 `internal/chat` import；api 包无 gin / gorm）
+- [X] T023 [US3] `internal/workflow/api/schema.go` + `internal/workflow/service/service.go`：UpdateWorkflowReq 增 `Type *string` 携带即拒 + Update 路径 guard（T021 GREEN）
+- [X] T024 [US3] `internal/workflow/handler/handler.go`：update 绑定函数拒改映射（既有 VALIDATION_FAILED 分支覆盖，确认无新哨兵）（T022 GREEN）
+- [X] T025 [US3] 回归验证：`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿（含 spec 06 引擎既有用例 + spec 07 chat 管道用例——分型不 gate 绑定零行为改动）；依赖方向 grep（`internal/workflow/` 无 `internal/chat` import；api 包无 gin / gorm）
 
 **Checkpoint**: 全部故事独立可测——功能面收口。
 
@@ -105,10 +105,10 @@
 
 **Purpose**: 文档同步、覆盖率、人工验收清单
 
-- [ ] T026 文档同步：`CLAUDE.md`（错误码表零新行注记 + 索引地图 workflows / workflow_runs 相关行）、`docs/design/data-model.md`（type + workflows 自引用弱引用关系）、`docs/changelog/workflow/db_model.md`（§7 R11 条 12 + 决策 #16：分型 / 嵌套矩阵 / parent_run_id append-only 例外）、`docs/changelog/workflow/api_contract.md`（type 字段 + 节点类型清单 + 嵌套语义）、`docs/testing/workflow-manual-test.md`（嵌套冒烟小节：两型创建 / 嵌套保存矩阵 / 嵌套执行 / psql 查 runs 树）
-- [ ] T027 覆盖率核验：`go test ./internal/workflow/... -race -count=1 -cover` 各包 ≥80%；不足补测（禁删断言 / t.Skip / 调门槛）
-- [ ] T028 迁移只增不改核验：`git status --porcelain migrations/` 仅新增 00020；`make migrate-status` 20 条 applied
-- [ ] T029 quickstart.md 场景走查准备 + 剩余人工项清单输出（真 provider 嵌套执行冒烟、psql 树查询——归用户人工验收）
+- [X] T026 文档同步：`CLAUDE.md`（错误码表零新行注记 + 索引地图 workflows / workflow_runs 相关行）、`docs/design/data-model.md`（type + workflows 自引用弱引用关系）、`docs/changelog/workflow/db_model.md`（§7 R11 条 12 + 决策 #16：分型 / 嵌套矩阵 / parent_run_id append-only 例外）、`docs/changelog/workflow/api_contract.md`（type 字段 + 节点类型清单 + 嵌套语义）、`docs/testing/workflow-engine-manual-test.md`（§7 嵌套冒烟：两型创建 / 嵌套保存矩阵 / 嵌套执行 / psql 查 runs 树）
+- [X] T027 覆盖率核验：`go test ./internal/workflow/... -race -count=1 -cover` 各包 ≥80%（api 97.5% / handler 83.9% / service 88.3% / store 96.6%）；不足补测（禁删断言 / t.Skip / 调门槛）
+- [X] T028 迁移只增不改核验：`git status --porcelain migrations/` 仅新增 00020；`make migrate-status` 20 条 applied
+- [X] T029 quickstart.md 场景走查准备 + 剩余人工项清单输出（真 provider 嵌套执行冒烟、psql 树查询——归用户人工验收）
 
 ---
 

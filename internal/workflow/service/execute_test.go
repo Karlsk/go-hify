@@ -8,7 +8,9 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -426,4 +428,258 @@ func TestExecuteCreateRunDegrade(t *testing.T) {
 	gotTrace, ok := attrString(*errRec, "trace_id")
 	require.True(t, ok, "ERROR 日志带 trace_id（对账 slog 与既有线索）")
 	assert.Equal(t, "trace-degrade-1", gotTrace)
+}
+
+// ---- spec 08 T013：executeChild（递归执行 / 子把关 / 子 run 行 / 深度兜底）----
+
+// graphSnapshot 一张已存图的完整快照（wf + 节点 + 边），newNestedEnv 按 id dispatch。
+type graphSnapshot struct {
+	wf    *Workflow
+	nodes []WorkflowNode
+	edges []WorkflowEdge
+}
+
+// backfillCall 一次 parent_run_id 回填的入参快照。
+type backfillCall struct {
+	parentRunID uint64
+	childRunIDs []uint64
+}
+
+// nestedEnv 嵌套执行测试装配（spec 08）：多图 store dispatch（未命中 404）+ run 落库
+// 记录（子先父后：子 run 在父 walk 内写完才轮到父收尾，id 从 7 起按序分配）+
+// parent_run_id 回填记录。既有 newExecEnv 的 Workflow fixture 无 Type / schema 字段且
+// CreateRun 硬编码 run.ID=7，嵌套场景需要本套独立装配。
+type nestedEnv struct {
+	svc      *workflowService
+	st       *stubStore
+	factory  *stubClientFactory
+	streamer *genStreamer
+	execs    *execRecorder
+	rags     *stubRetrieve
+
+	createRunCalls int
+	runs           []*WorkflowRun
+	backfills      []backfillCall
+	nextRunID      uint64
+}
+
+// newNestedEnv 按 graphs 构建 dispatch store 与全量服务（真实执行器 + fake 上游）。
+func newNestedEnv(t *testing.T, graphs map[uint64]*graphSnapshot,
+	gen func(context.Context, int) (*schema.Message, error)) *nestedEnv {
+	t.Helper()
+	env := &nestedEnv{nextRunID: 7}
+	env.streamer = &genStreamer{gen: gen}
+	env.factory = &stubClientFactory{client: llm.NewClient("test", fastProfile(), env.streamer)}
+	env.execs = &execRecorder{}
+	env.rags = &stubRetrieve{}
+	env.st = &stubStore{
+		getByIDFn: func(id uint64) (*Workflow, error) {
+			g, ok := graphs[id]
+			if !ok {
+				return nil, gorm.ErrRecordNotFound
+			}
+			return g.wf, nil
+		},
+		listNodesFn: func(workflowID uint64) ([]WorkflowNode, error) { return graphs[workflowID].nodes, nil },
+		listEdgesFn: func(workflowID uint64) ([]WorkflowEdge, error) { return graphs[workflowID].edges, nil },
+		createRunFn: func(run *WorkflowRun, nodeRuns []WorkflowNodeRun) error {
+			env.createRunCalls++
+			run.ID = env.nextRunID // 模拟 RETURNING 回填
+			env.nextRunID++
+			env.runs = append(env.runs, run)
+			return nil
+		},
+		updateParentRunIDsFn: func(parentRunID uint64, childRunIDs []uint64) error {
+			env.backfills = append(env.backfills, backfillCall{parentRunID: parentRunID, childRunIDs: childRunIDs})
+			return nil
+		},
+	}
+	models := &stubModels{resolveFn: func(req providerapi.ResolveLLMConfigReq) (*providerapi.LLMConfig, error) {
+		return testResolveCfg(), nil
+	}}
+	env.svc = New(env.st, models, nil, &recordCache{}, env.factory, env.execs, env.rags, false).(*workflowService)
+	return env
+}
+
+// parentNestedGraph 嵌套父图：classify(llm) → sub(workflow，引 childID，inputs 为
+// raw JSON 映射文本) → finish(end，output 引 sub 终稿)。
+func parentNestedGraph(id uint64, wfType, status string, childID uint64, inputs, endOutput string) *graphSnapshot {
+	wf := &Workflow{Name: "父图", StartNodeKey: "classify", Status: status, Type: wfType}
+	wf.ID = id
+	nodeCfg := fmt.Sprintf(`{"workflow_id":%q,"inputs":%s}`, strconv.FormatUint(childID, 10), inputs)
+	nodes := []WorkflowNode{
+		{NodeKey: "classify", Type: "llm", Name: "意图识别", Config: `{"model_id":"3","prompt":"判断意图：{{input}}"}`},
+		{NodeKey: "sub", Type: "workflow", Config: nodeCfg},
+		{NodeKey: "finish", Type: "end", Config: fmt.Sprintf(`{"output":%q}`, endOutput)},
+	}
+	edges := []WorkflowEdge{
+		{SourceNodeKey: "classify", TargetNodeKey: "sub"},
+		{SourceNodeKey: "sub", TargetNodeKey: "finish"},
+	}
+	return &graphSnapshot{wf: wf, nodes: nodes, edges: edges}
+}
+
+// childTaskGraph 嵌套子图（task 型）：c_work(llm) → c_end(end)。schema 空串 = 未声明
+// → NULL（单一入参回退）。
+func childTaskGraph(id uint64, status, inputSchema, outputSchema, promptTpl, outputTpl string) *graphSnapshot {
+	wf := &Workflow{Name: "子任务", StartNodeKey: "c_work", Status: status, Type: "task"}
+	wf.ID = id
+	if inputSchema != "" {
+		wf.InputSchema = strPtr(inputSchema)
+	}
+	if outputSchema != "" {
+		wf.OutputSchema = strPtr(outputSchema)
+	}
+	nodes := []WorkflowNode{
+		{NodeKey: "c_work", Type: "llm", Config: fmt.Sprintf(`{"model_id":"3","prompt":%q}`, promptTpl)},
+		{NodeKey: "c_end", Type: "end", Config: fmt.Sprintf(`{"output":%q}`, outputTpl)},
+	}
+	edges := []WorkflowEdge{{SourceNodeKey: "c_work", TargetNodeKey: "c_end"}}
+	return &graphSnapshot{wf: wf, nodes: nodes, edges: edges}
+}
+
+// 子 run 行形态（O5 Option A）：trigger_source='workflow'、引用透传、trial 跟随、
+// Input 为按子 input_schema 组装的 JSON 文本（wrapTraceJSON 包 {"input": ...}）。
+func TestExecuteChildTransfersRefs(t *testing.T) {
+	child := childTaskGraph(5, "published",
+		`[{"name":"query","type":"string","required":true}]`, "",
+		`检索：{{input.query}}`, `{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{5: child}, singleGen("子答案"))
+
+	parent := newExecContext("in")
+	parent.trial = true
+	convID, msgID := uint64(88), uint64(99)
+	parent.conversationID, parent.messageID = &convID, &msgID
+
+	res, err := env.svc.executeChild(context.Background(), 5, map[string]string{"query": "查单"}, parent)
+	require.NoError(t, err)
+	assert.Equal(t, "子答案", res.output, "子终稿原样返回")
+	assert.Equal(t, uint64(7), res.runID)
+
+	require.Len(t, env.runs, 1)
+	run := env.runs[0]
+	assert.Equal(t, uint64(5), run.WorkflowID)
+	assert.Equal(t, "workflow", run.TriggerSource)
+	assert.True(t, run.IsTrial, "trial 跟随父")
+	require.NotNil(t, run.ConversationID)
+	assert.Equal(t, uint64(88), *run.ConversationID)
+	require.NotNil(t, run.MessageID)
+	assert.Equal(t, uint64(99), *run.MessageID)
+	assert.Equal(t, "succeeded", run.Status)
+	inObj := decodeJSONb(t, run.Input)
+	assert.Equal(t, `{"query":"查单"}`, inObj["input"], "组装入参按 schema 转 JSON 文本")
+	assert.Empty(t, env.backfills, "子无孙 run：不回填")
+}
+
+// 深度兜底（FR4）：父 depth 已达上限 → 图缺陷 400，零 IO 零轨迹（先于 loadGraph）。
+func TestExecuteChildDepthExceededNoStore(t *testing.T) {
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{}, singleGen("x"))
+	parent := newExecContext("in")
+	parent.depth = maxNestLevel
+
+	_, err := env.svc.executeChild(context.Background(), 5, map[string]string{"input": "v"}, parent)
+	require.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "深度")
+	assert.Empty(t, env.st.seq, "超限即拒：不触任何 store 调用（无 run 行）")
+}
+
+// 引用已删图（FR10）：loadGraph 404 → ErrWorkflowNotPublished 之前的 NOT_FOUND 透传。
+func TestExecuteChildNotFound(t *testing.T) {
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{}, singleGen("x"))
+	parent := newExecContext("in")
+
+	_, err := env.svc.executeChild(context.Background(), 5, map[string]string{"input": "v"}, parent)
+	require.ErrorIs(t, err, workflowapi.ErrWorkflowNotFound)
+	assert.Equal(t, 0, env.createRunCalls, "无子 run 行")
+}
+
+// 子 run 写失败降级：重试恰好一次，runID=0 照返（调用方继续消费子终稿）。
+func TestExecuteChildCreateRunDegrade(t *testing.T) {
+	child := childTaskGraph(5, "published", "", "", `工作：{{input}}`, `{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{5: child}, singleGen("子答案"))
+	env.st.createRunFn = func(run *WorkflowRun, nodeRuns []WorkflowNodeRun) error {
+		env.createRunCalls++
+		return assert.AnError
+	}
+	parent := newExecContext("in")
+
+	res, err := env.svc.executeChild(context.Background(), 5, map[string]string{"input": "v"}, parent)
+	require.NoError(t, err, "写入降级不影响业务返回")
+	assert.Equal(t, "子答案", res.output)
+	assert.Equal(t, uint64(0), res.runID, "降级：runID=0（不参与父回填）")
+	assert.Equal(t, 2, env.createRunCalls, "重试恰好一次后放弃")
+	assert.Empty(t, env.backfills)
+}
+
+// 正式运行子 draft 拒（FR7）：executeChild 直接调用——哨兵原样（父节点前缀由
+// executor 的 runNode 包装点加）。
+func TestExecuteChildFormalDraftBlocked(t *testing.T) {
+	child := childTaskGraph(5, "draft", "", "", `工作：{{input}}`, `{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{5: child}, singleGen("x"))
+	parent := newExecContext("in")
+
+	_, err := env.svc.executeChild(context.Background(), 5, map[string]string{"input": "v"}, parent)
+	require.ErrorIs(t, err, workflowapi.ErrWorkflowNotPublished)
+	assert.Contains(t, err.Error(), "draft")
+	assert.Equal(t, 0, env.createRunCalls, "把关失败零 run 行")
+}
+
+// Execute 级：trial 跟随——父 trial 放开子 draft（FR7），子 run IsTrial 透传。
+func TestExecuteNestedTrialFollowsChildDraft(t *testing.T) {
+	parent := parentNestedGraph(3, "chat", "published", 5, `{"input":"{{classify}}"}`, `{{sub}}`)
+	child := childTaskGraph(5, "draft", "", "", `工作：{{input}}`, `{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{3: parent, 5: child}, singleGen("子答案"))
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 3, Input: "查订单", Trial: true})
+	require.NoError(t, err, "父试运行放开子 draft")
+	assert.Equal(t, "子答案", res.Output)
+
+	require.Len(t, env.runs, 2)
+	assert.True(t, env.runs[0].IsTrial, "子 run trial 跟随父")
+	assert.Equal(t, "workflow", env.runs[0].TriggerSource)
+	assert.True(t, env.runs[1].IsTrial, "父 run 自身 trial")
+	assert.Len(t, env.backfills, 1)
+}
+
+// Execute 级：正式运行子 draft 拒——哨兵带父 node 前缀，子零 run 行，父写失败行，
+// 无回填（无子 run 可链）。
+func TestExecuteNestedFormalChildDraftBlocked(t *testing.T) {
+	parent := parentNestedGraph(3, "chat", "published", 5, `{"input":"{{classify}}"}`, `{{sub}}`)
+	child := childTaskGraph(5, "draft", "", "", `工作：{{input}}`, `{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{3: parent, 5: child}, singleGen("x"))
+
+	_, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 3, Input: "查订单"})
+	require.ErrorIs(t, err, workflowapi.ErrWorkflowNotPublished)
+	assert.Contains(t, err.Error(), "node sub:", "哨兵带父 node 前缀（FR6）")
+	assert.Contains(t, err.Error(), "draft")
+
+	require.Len(t, env.runs, 1, "子把关失败零 run 行、父写失败行")
+	assert.Equal(t, "sub", env.runs[0].ErrorNode, "父 error_node 定位到 sub-workflow 节点")
+	assert.Equal(t, "failed", env.runs[0].Status)
+	assert.Empty(t, env.backfills)
+}
+
+// 父 run 写失败跳过回填（O5）：子 run 已落（id=7）但父行写败两次 → RunID 空、
+// 不发 UpdateParentRunIDs（trace_id 兜底走既有 ERROR 日志路径）。
+func TestExecuteNestedParentWriteFailSkipsBackfill(t *testing.T) {
+	parent := parentNestedGraph(3, "chat", "published", 5, `{"input":"{{classify}}"}`, `{{sub}}`)
+	child := childTaskGraph(5, "published", "", "", `工作：{{input}}`, `{{c_work}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{3: parent, 5: child}, singleGen("子答案"))
+	env.st.createRunFn = func(run *WorkflowRun, nodeRuns []WorkflowNodeRun) error {
+		env.createRunCalls++
+		if run.WorkflowID == 3 { // 父行写败；子行照常
+			return assert.AnError
+		}
+		run.ID = env.nextRunID
+		env.nextRunID++
+		env.runs = append(env.runs, run)
+		return nil
+	}
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 3, Input: "查订单"})
+	require.NoError(t, err, "父写失败降级不影响业务返回")
+	assert.Equal(t, "子答案", res.Output)
+	assert.Empty(t, res.RunID)
+	assert.Equal(t, 3, env.createRunCalls, "子 1 次 + 父重试 1 次")
+	assert.Empty(t, env.backfills, "父行未落库 → 跳过回填")
 }

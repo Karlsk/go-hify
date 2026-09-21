@@ -5,6 +5,7 @@ package service
 // steps 按执行序累积节点步骤，收尾统一转写 workflow_node_runs（O7，无 RUNNING 态）。
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -32,6 +33,15 @@ type execContext struct {
 	vars      map[string]string
 	steps     []nodeStep
 	pendingIn map[string]string // 当前节点入参摘要：executor 分支写、walk record 时取走
+
+	// 嵌套执行透传（spec 08）：depth 顶层=0（executeChild 递增、超 maxNestLevel 拒）；
+	// trial / conversationID / messageID 子 run 行与把关跟随父；childRunIDs 直接子
+	// run id 集（callWorkflow 落、收尾 UpdateParentRunIDs 批量回填 parent_run_id）。
+	depth          int
+	trial          bool
+	conversationID *uint64
+	messageID      *uint64
+	childRunIDs    []uint64
 }
 
 // newExecContext 以唯一入参 input 建池（O1）。
@@ -62,13 +72,53 @@ func (c *execContext) takeNodeIn() map[string]string {
 	return m
 }
 
-// render strict 模板渲染：{{var}} 替换为池值，缺失变量即执行错误（文案含变量名，
-// 错字可定位），报首个缺失。
+// lookup 变量取值 + 一级下钻（spec 08 FR9 / O7②）：无点号直取池值（行为不变）；
+// 带点号时基名（首个点号前）取池值、值须为合法 JSON 对象且含该字段——string 字段取
+// 内容（去 JSON 引号），number / boolean / 对象字段取原 JSON 文本；深度一层为止
+//（字段名含点号整体匹配，不递归）。任一条件不满足即视为变量未定义（strict，错误
+// 文案由调用方带完整点分名）。
+func (c *execContext) lookup(name string) (string, bool) {
+	if base, field, ok := strings.Cut(name, "."); ok {
+		raw, exists := c.vars[base]
+		if !exists {
+			return "", false
+		}
+		return drillField(raw, field)
+	}
+	v, ok := c.vars[name]
+	return v, ok
+}
+
+// drillField JSON 对象池值的一级字段下钻；非 JSON 对象或字段缺失 → 未定义。
+func drillField(poolVal, field string) (string, bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(poolVal), &obj); err != nil {
+		return "", false
+	}
+	raw, ok := obj[field]
+	if !ok {
+		return "", false
+	}
+	return rawJSONToText(raw), true
+}
+
+// rawJSONToText JSON 值 → 模板文本：string 值去引号取内容，其余（number /
+// boolean / 对象 / 数组）取原 JSON 文本。
+func rawJSONToText(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
+}
+
+// render strict 模板渲染：{{var}} 替换为池值（经 lookup 支持一级下钻），缺失变量即
+// 执行错误（文案含变量名，错字可定位），报首个缺失。
 func (c *execContext) render(tpl string) (string, error) {
 	var missing string
 	out := placeholderRE.ReplaceAllStringFunc(tpl, func(m string) string {
 		name := m[2 : len(m)-2]
-		if v, ok := c.vars[name]; ok {
+		if v, ok := c.lookup(name); ok {
 			return v
 		}
 		if missing == "" {
@@ -94,7 +144,7 @@ func (c *execContext) evalCondition(expr string) (string, error) {
 		if m == nil {
 			return "", fmt.Errorf("invalid condition expression %q", expr)
 		}
-		v, ok := c.vars[m[1]]
+		v, ok := c.lookup(m[1])
 		if !ok {
 			return "", fmt.Errorf("variable %q not defined", m[1])
 		}
@@ -106,7 +156,7 @@ func (c *execContext) evalCondition(expr string) (string, error) {
 		if m == nil {
 			return "", fmt.Errorf("invalid condition expression %q: left must be {{var}}", expr)
 		}
-		v, ok := c.vars[m[1]]
+		v, ok := c.lookup(m[1])
 		if !ok {
 			return "", fmt.Errorf("variable %q not defined", m[1])
 		}

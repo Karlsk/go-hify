@@ -1,7 +1,7 @@
 # Quickstart: workflow 分型与子工作流嵌套验证指南
 
 > 验证对象：`internal/workflow` 分型 CRUD + R11 保存期校验 + sub-workflow 嵌套执行 + 子 run 轨迹。
-> 详细人工冒烟（含 psql 树查询）落 [docs/testing/workflow-manual-test.md](../../../docs/testing/workflow-manual-test.md) 嵌套冒烟小节——本篇收尾时新增。
+> 详细人工冒烟（含 psql 树查询）见 [docs/testing/workflow-engine-manual-test.md](../../../docs/testing/workflow-engine-manual-test.md) §7 嵌套冒烟（两型创建 / 嵌套保存矩阵 / 嵌套执行 / runs 树），已于本篇收尾落盘。
 
 ## 前置
 
@@ -31,7 +31,7 @@ go build ./... && go vet ./... && go test ./... -race -count=1   # 全绿
 | workflow_id 不存在 | 400 |
 | inputs 缺 required / 多余字段；子无 schema 时非 `{input}` | 400 |
 
-## 场景 3：嵌套执行 + 轨迹（人工，需 LLM provider）
+## 场景 3：嵌套执行 + 轨迹（人工；确定性图零 LLM 依赖，含 llm 节点的图才需真 provider）
 
 1. 发布父图与子图，`POST /api/v1/workflows/{parent}/execute`，input 按子 schema 可渲染。
 2. 预期：父终稿含子输出；子 draft 时正式执行 → 503 `WORKFLOW_NOT_PUBLISHED`（带父 node 前缀）；父 trial → 子 draft 放开。

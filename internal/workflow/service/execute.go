@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -104,13 +105,31 @@ func (s *workflowService) Execute(ctx context.Context, req workflowapi.ExecuteWo
 
 	started := time.Now()
 	ec := newExecContext(req.Input)
+	ec.trial = req.Trial // 嵌套透传（spec 08）：子把关 trial 跟随、子 run 引用透传
+	ec.conversationID = req.ConversationID
+	ec.messageID = req.MessageID
 	outcome, execErr := s.walk(ctx, wf, nodes, edges, ec)
+
+	// 终稿 output 契约校验（spec 08 FR9）：声明了 output_schema 而终稿不符（非 JSON
+	// 对象 / required 缺失 / 类型不符）→ 图缺陷 400，error_node 定位最后执行节点
+	//（校验在 walk 后，节点本身已成功）。
+	if execErr == nil {
+		if oErr := validateOutputSchema(outcome.output, wf.OutputSchema); oErr != nil {
+			outcome = walkOutcome{status: runStatusFailed, output: outcome.output, errorNode: lastStepKey(ec)}
+			execErr = fmt.Errorf("%w: workflow %d output: %v", errs.ErrValidationFailed, wf.ID, oErr)
+		}
+	}
 
 	// ④ 收尾：两层轨迹一事务统一写（失败 / 取消路径也写——排障唯一线索，FR7）。
 	// 写入脱钩请求 ctx：调用方断连不能丢轨迹。写入失败降级（O7 ③）：重试恰好一次，
 	// 仍败则结果照返、RunID 置空、ERROR 日志带 trace_id——轨迹可丢，执行结果不可丢。
 	writeCtx := context.WithoutCancel(ctx)
-	run := s.buildRun(writeCtx, req, wf, started, outcome, execErr)
+	meta := runMeta{trigger: "console", trial: req.Trial, conversationID: req.ConversationID,
+		messageID: req.MessageID, input: req.Input}
+	if req.ConversationID != nil {
+		meta.trigger = "chat" // 进程内调用方（FR1 下游消费者；O7b trigger 显式传参）
+	}
+	run := s.buildRun(writeCtx, meta, wf, started, outcome, execErr)
 	nodeRuns := buildNodeRuns(ec) // RunID 由 store 事务内 INSERT RETURNING 后回填
 	runID := ""
 	writeErr := s.store.CreateRun(writeCtx, run, nodeRuns)
@@ -126,6 +145,12 @@ func (s *workflowService) Execute(ctx context.Context, req workflowapi.ExecuteWo
 			"workflow_id", req.ID, "trace_id", traceID, "err", writeErr)
 	} else {
 		runID = strconv.FormatUint(run.ID, 10)
+		if len(ec.childRunIDs) > 0 { // 父收尾回填 parent_run_id（spec 08 O5）：父行已落才回填，失败仅 WARN
+			if err := s.store.UpdateParentRunIDs(writeCtx, run.ID, ec.childRunIDs); err != nil {
+				slog.WarnContext(writeCtx, "workflow: backfill parent_run_id failed",
+					"workflow_id", req.ID, "run_id", run.ID, "err", err)
+			}
+		}
 	}
 	return &workflowapi.RunResultSchema{
 		RunID:      runID,
@@ -205,23 +230,30 @@ func (s *workflowService) walk(ctx context.Context, wf *Workflow, nodes []Workfl
 	return walkOutcome{status: runStatusSucceeded, output: out}, nil
 }
 
+// runMeta run 行组装入参（spec 08 O7b）：trigger 显式传参（console / chat / workflow
+// 三源）——引用透传后子 run 也带 ConversationID，原「有 ConversationID 即 chat」判定
+// 不再成立；trial 标记、引用与 input 原文随行，子 run 复用同一组装路径。
+type runMeta struct {
+	trigger        string
+	trial          bool
+	conversationID *uint64
+	messageID      *uint64
+	input          string
+}
+
 // buildRun 组装 run 行（快照语义：WorkflowName / 触发来源 / trial 标记 / 终态与
 // 失败定位；trace_id 从 ctx 提取串起 slog 与轨迹）。
-func (s *workflowService) buildRun(ctx context.Context, req workflowapi.ExecuteWorkflowReq,
+func (s *workflowService) buildRun(ctx context.Context, meta runMeta,
 	wf *Workflow, started time.Time, outcome walkOutcome, execErr error) *WorkflowRun {
-	trigger := "console"
-	if req.ConversationID != nil {
-		trigger = "chat" // 进程内调用方（FR1 下游消费者）
-	}
 	run := &WorkflowRun{
 		WorkflowID:     wf.ID,
 		WorkflowName:   wf.Name, // 冗余快照：改名后历史可读
-		TriggerSource:  trigger,
-		IsTrial:        req.Trial,
-		ConversationID: req.ConversationID,
-		MessageID:      req.MessageID,
+		TriggerSource:  meta.trigger,
+		IsTrial:        meta.trial,
+		ConversationID: meta.conversationID,
+		MessageID:      meta.messageID,
 		Status:         outcome.status,
-		Input:          wrapTraceJSON(map[string]string{"input": req.Input}), // jsonb 对象（db_model §12「执行入参（截断后）」）
+		Input:          wrapTraceJSON(map[string]string{"input": meta.input}), // jsonb 对象（db_model §12「执行入参（截断后）」）
 		Output:         truncateUTF8(outcome.output, maxTraceValueBytes), // text 列：截断无标记容器
 		ErrorNode:      outcome.errorNode,
 		DurationMs:     int(time.Since(started).Milliseconds()),
@@ -266,4 +298,230 @@ func toNodeTrace(ec *execContext) []workflowapi.NodeRunSummary {
 		})
 	}
 	return trace
+}
+
+// ---- spec 08：子工作流嵌套执行（executeChild 递归 + 结构化 I/O 契约）----
+
+// childResult executeChild 的产物：output = 子终稿（照返——写入降级不吞业务结果）；
+// runID = 子 run 行 id（0 = 写入降级或把关前失败，不参与父回填）。
+type childResult struct {
+	output string
+	runID  uint64
+}
+
+// executeChild 递归执行子工作流（spec 08 §4.3 / FR5-FR8）：深度兜底（先于一切 IO，
+// 存量图被并发删改 / 保存期漏网兜底）→ 三查加载子图（404 哨兵透传，FR10）→ 子把关
+//（trial 跟随父，正式须 published，FR7）→ 每层自包 5min（O8）→ 按子 input_schema 组装
+// JSON 文本入参 → 子池全新起步游走（父子仅经 input/output 通信）→ 终稿过 output_schema
+// 校验（FR9）→ 子 run 行独立落库（trigger_source='workflow'、引用透传、写入降级重试
+// 一次）。同 goroutine 共享父 ctx：调用方断连整链取消。
+func (s *workflowService) executeChild(ctx context.Context, workflowID uint64, fields map[string]string, parent *execContext) (childResult, error) {
+	// 深度兜底（FR4 执行期）：超限零 IO 零轨迹——保存期 R11 已挡合法图，此处只兜漏网。
+	depth := parent.depth + 1
+	if depth > maxNestLevel {
+		return childResult{}, fmt.Errorf("%w: 嵌套深度超上限（限顶层 + %d 层）", errs.ErrValidationFailed, maxNestLevel)
+	}
+
+	wf, nodes, edges, err := s.loadGraph(ctx, workflowID)
+	if err != nil {
+		return childResult{}, err // ErrWorkflowNotFound 透传（FR10 引用已删图 fail-fast）
+	}
+
+	// 子把关（FR7）：正式运行子必须 published；trial 跟随父。
+	if wf.Status != string(workflowapi.StatusPublished) && !parent.trial {
+		switch wf.Status {
+		case string(workflowapi.StatusDraft):
+			return childResult{}, fmt.Errorf("%w: sub-workflow %d is draft, publish it first or run parent with ?trial=true",
+				workflowapi.ErrWorkflowNotPublished, workflowID)
+		case string(workflowapi.StatusDisabled):
+			return childResult{}, fmt.Errorf("%w: sub-workflow %d is disabled",
+				workflowapi.ErrWorkflowNotPublished, workflowID)
+		default:
+			return childResult{}, fmt.Errorf("%w: sub-workflow %d status is %s",
+				workflowapi.ErrWorkflowNotPublished, workflowID, wf.Status)
+		}
+	}
+
+	// 每层自包 5min（O8）：整链墙钟受最外层约束，单层失控有界。
+	ctx, cancel := context.WithTimeoutCause(ctx, workflowTimeout, errWorkflowTimeout)
+	defer cancel()
+
+	assembled, err := assembleInputJSON(fields, wf.InputSchema)
+	if err != nil {
+		return childResult{}, fmt.Errorf("%w: workflow %d inputs: %v", errs.ErrValidationFailed, workflowID, err)
+	}
+
+	// 子池全新起步（FR5）：只含自身 input（组装出的 JSON 文本），不继承父 vars。
+	ec := newExecContext(assembled)
+	ec.depth = depth
+	ec.trial = parent.trial
+	ec.conversationID = parent.conversationID
+	ec.messageID = parent.messageID
+	started := time.Now()
+	outcome, execErr := s.walk(ctx, wf, nodes, edges, ec)
+
+	// 子终稿 output 契约校验（FR9）：与顶层同款，失败定位子最后执行节点（子作者契约）。
+	if execErr == nil {
+		if oErr := validateOutputSchema(outcome.output, wf.OutputSchema); oErr != nil {
+			outcome = walkOutcome{status: runStatusFailed, output: outcome.output, errorNode: lastStepKey(ec)}
+			execErr = fmt.Errorf("%w: workflow %d output: %v", errs.ErrValidationFailed, wf.ID, oErr)
+		}
+	}
+
+	// 子 run 行独立落库（FR8 / O5）：写入降级同顶层语义（重试一次，仍败 runID=0 照返
+	// 业务结果）；孙 run 由本层逐级回填，与顶层收尾对称。
+	writeCtx := context.WithoutCancel(ctx)
+	meta := runMeta{trigger: "workflow", trial: parent.trial,
+		conversationID: parent.conversationID, messageID: parent.messageID, input: assembled}
+	run := s.buildRun(writeCtx, meta, wf, started, outcome, execErr)
+	nodeRuns := buildNodeRuns(ec)
+	var res childResult
+	if err := s.store.CreateRun(writeCtx, run, nodeRuns); err != nil {
+		err = s.store.CreateRun(writeCtx, run, nodeRuns) // 重试恰好一次
+	}
+	if err != nil {
+		traceID := "" // 显式带 trace_id：链断处兜底可对账
+		if id, ok := traceid.From(writeCtx); ok {
+			traceID = id
+		}
+		slog.ErrorContext(writeCtx, "workflow: write child run trace failed",
+			"workflow_id", workflowID, "trace_id", traceID, "err", err)
+	} else {
+		res.runID = run.ID
+		if len(ec.childRunIDs) > 0 { // 孙 run 链接：中间层逐级回填
+			if err := s.store.UpdateParentRunIDs(writeCtx, run.ID, ec.childRunIDs); err != nil {
+				slog.WarnContext(writeCtx, "workflow: backfill child parent_run_id failed",
+					"workflow_id", workflowID, "run_id", run.ID, "err", err)
+			}
+		}
+	}
+	res.output = outcome.output
+	return res, execErr
+}
+
+// assembleInputJSON 按子 input_schema 组装 JSON 文本入参（spec 08 §4.5，纯函数）：
+// string 字段直存、number / boolean 转换（原文落位，3.50 不规约）、required 缺失拒、
+// optional 缺省省略、未声明字段拒；子图未声明 schema 时回退单一入参——键集必须恰为
+// {input}，值原样返回（非 JSON 包装）。违例键名排序输出，报错可复现。错误为朴素描述
+// 串（调用方包哨兵）。
+func assembleInputJSON(fields map[string]string, schemaText *string) (string, error) {
+	parsed, err := schemaFields(schemaText)
+	if err != nil {
+		return "", err // 存量 schema 损坏原样上抛（调用方 500 兜底）
+	}
+	if len(parsed) == 0 {
+		if _, hasInput := fields["input"]; len(fields) != 1 || !hasInput {
+			keys := make([]string, 0, len(fields))
+			for k := range fields {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return "", fmt.Errorf("子图未声明 input_schema，inputs 键集必须恰为 [input]（当前 %v）", keys)
+		}
+		return fields["input"], nil
+	}
+	obj := make(map[string]any, len(parsed))
+	for _, f := range parsed {
+		v, ok := fields[f.Name]
+		if !ok {
+			if f.Required {
+				return "", fmt.Errorf("缺少 required 字段 %s", f.Name)
+			}
+			continue // optional 缺省省略
+		}
+		switch f.Type {
+		case "string":
+			obj[f.Name] = v
+		case "number":
+			if _, err := strconv.ParseFloat(v, 64); err != nil {
+				return "", fmt.Errorf("字段 %s 非法 number: %q", f.Name, v)
+			}
+			obj[f.Name] = json.Number(v) // 原文落位（3.50 不规约）
+		case "boolean":
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return "", fmt.Errorf("字段 %s 非法 boolean: %q", f.Name, v)
+			}
+			obj[f.Name] = b // 真 bool——json.Number("true") 过不了 Marshal 校验
+		default:
+			return "", fmt.Errorf("字段 %s 声明了非法类型 %q", f.Name, f.Type)
+		}
+	}
+	var extra []string
+	for k := range fields {
+		declared := false
+		for _, f := range parsed {
+			if f.Name == k {
+				declared = true
+				break
+			}
+		}
+		if !declared {
+			extra = append(extra, k)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		return "", fmt.Errorf("含未声明字段 %v", extra)
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "", err // 防御兜底：map[string]any 全为合法 JSON 值，不会失败
+	}
+	return string(b), nil
+}
+
+// validateOutputSchema 终稿按 output_schema 校验（spec 08 FR9，纯函数）：未声明
+// schema 零校验；终稿须为 JSON 对象（null / 数组 / 纯文本拒）；required 缺失拒；
+// 字段类型探针不符拒；多余字段宽容（向前兼容）。错误为朴素描述串（调用方包哨兵）。
+func validateOutputSchema(output string, schemaText *string) error {
+	fields, err := schemaFields(schemaText)
+	if err != nil {
+		return err // 存量 schema 损坏原样上抛（调用方 500 兜底）
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &obj); err != nil || obj == nil {
+		return fmt.Errorf("终稿非合法 JSON 对象")
+	}
+	for _, f := range fields {
+		raw, ok := obj[f.Name]
+		if !ok {
+			if f.Required {
+				return fmt.Errorf("output 缺少 required 字段 %s", f.Name)
+			}
+			continue
+		}
+		if !probeSchemaType(string(raw), f.Type) {
+			return fmt.Errorf("output 字段 %s 类型不符（声明 %s）", f.Name, f.Type)
+		}
+	}
+	return nil
+}
+
+// probeSchemaType JSON 原文按声明类型探针：Unmarshal 目标类型即校验器。
+func probeSchemaType(raw, typ string) bool {
+	switch typ {
+	case "string":
+		var s string
+		return json.Unmarshal([]byte(raw), &s) == nil
+	case "number":
+		var n json.Number
+		return json.Unmarshal([]byte(raw), &n) == nil
+	case "boolean":
+		var b bool
+		return json.Unmarshal([]byte(raw), &b) == nil
+	}
+	return false
+}
+
+// lastStepKey 最后执行节点 key（output 契约校验失败的 error_node 定位——校验在 walk
+// 后，节点本身已成功）；无步骤（end 即首节点等）返回空串。
+func lastStepKey(ec *execContext) string {
+	if len(ec.steps) == 0 {
+		return ""
+	}
+	return ec.steps[len(ec.steps)-1].NodeKey
 }
