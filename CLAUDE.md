@@ -1193,7 +1193,7 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/007-chat-pipeline/plan.md](specs/007-chat-pipeline/plan.md)
-(feature: chat 管道接线；冻结契约见
-docs/changelog/workflow/impl_spec_07_chat_pipeline.md §4 + api_contract §5/§8；零迁移)
+[specs/008-workflow-typing-nesting/plan.md](specs/008-workflow-typing-nesting/plan.md)
+(feature: workflow 分型与子工作流嵌套；冻结契约见
+docs/changelog/workflow/impl_spec_08_typing_nesting.md §4 + §5 O1-O8；迁移 00020)
 <!-- SPECKIT END -->
