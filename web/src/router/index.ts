@@ -52,6 +52,24 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '新建工作流' },
   },
   {
+    path: '/workflows/create/orchestrate',
+    name: 'workflow-create-orchestrate',
+    component: () => import('@/views/workflow/WorkflowOrchestrate.vue'),
+    meta: { title: '编排工作流', fullBleed: true },
+  },
+  {
+    path: '/workflows/:id',
+    name: 'workflow-detail',
+    component: () => import('@/views/workflow/WorkflowDetail.vue'),
+    meta: { title: '工作流详情' },
+  },
+  {
+    path: '/workflows/:id/edit',
+    name: 'workflow-edit',
+    component: () => import('@/views/workflow/WorkflowEdit.vue'),
+    meta: { title: '编辑工作流', fullBleed: true },
+  },
+  {
     path: '/knowledge-bases',
     name: 'rag-kbs',
     component: () => import('@/views/rag/KnowledgeBaseList.vue'),

@@ -53,7 +53,8 @@ web/
     │   ├── useConfirm.ts   # 删除确认全流程：调用即执行，返回 Promise<boolean>
     │   └── useBreakpoint.ts # 响应式断点单例：BREAKPOINTS 常量 + isNarrow(≤1200)/isCompact(≤992)
     ├── stores/
-    │   └── auth.ts          # 会话 store：登录用户唯一事实源（fetchMe 引导 / 401 清理 / 注销）
+    │   ├── auth.ts          # 会话 store：登录用户唯一事实源（fetchMe 引导 / 401 清理 / 注销）
+    │   └── workflowCreateDraft.ts # 两步式创建草稿（内存态）：第一步表单 ↔ 第二步图编排互访保留
     ├── utils/
     │   ├── request.ts      # axios 实例 + Result 信封拆包 + 错误统一处理 + getList
     │   ├── notify.ts       # notifySuccess/Error/Warning（duration 统一 3s）
@@ -63,7 +64,7 @@ web/
     ├── api/
     │   ├── auth.ts          # Auth 模块 API 层：登录/注册/注销/me（cookie 会话，token 不经前端）
     │   ├── provider.ts      # Provider 模块 API 层：类型 + 请求方法（对齐后端 api 契约，唯一事实源）
-    │   └── workflow.ts      # Workflow 模块 API 层：类型 + 列表/创建/删除/发布/停用
+    │   └── workflow.ts      # Workflow 模块 API 层：类型 + 列表/创建/删除/发布/停用/详情/更新（PUT 不带 type）
     └── views/
         ├── auth/
         │   ├── LoginView.vue     # 登录页（bare：无 chrome 分栏布局，回跳 redirect）
@@ -72,11 +73,16 @@ web/
         ├── agent/AgentList.vue
         ├── chat/ChatView.vue
         ├── workflow/
-        │   ├── WorkflowList.vue       # 工作流列表：三态 tag / 删除 / 发布停用（HifyTable 偏移分页）
-        │   ├── WorkflowCreate.vue     # 创建页：表单 + JSON/拖拽双模式配置区
-        │   ├── graph.ts               # 图配置纯逻辑（无 Vue 依赖）：类型 / 解析序列化 / 画布双向转换 / 提交组装
-        │   ├── JsonConfigEditor.vue   # JSON 编辑器：textarea + 格式化 + 校验态（供提交与切模式判定）
-        │   ├── CanvasEditor.vue       # 拖拽画布：Vue Flow + 左侧五类节点面板（DnD / 连线 / 删除 / 起始标识）
+        │   ├── WorkflowList.vue       # 工作流列表：三态 tag / 查看编辑入口 / 删除 / 发布停用（HifyTable 偏移分页）
+        │   ├── WorkflowCreate.vue     # 创建第一步：纯表单（名称/描述/类型 + task 型 Schema 行表单）
+        │   ├── WorkflowOrchestrate.vue # 创建第二步：整页编排（fullBleed，草稿 store 传递，保存并创建一次 POST）
+        │   ├── WorkflowDetail.vue     # 详情页：基础信息 + task 型 Schema 只读表 + 图编排只读双模式
+        │   ├── WorkflowEdit.vue       # 编辑页：整页回填 + PUT 保存（type 禁改 / 脏态守卫双通道）
+        │   ├── SchemaFieldsEditor.vue # Schema 字段行编辑器：四控件行 + 增删行（v-model SchemaField[]）
+        │   ├── GraphModeEditor.vue    # 双模式图编排容器：JSON ↔ 拖拽切换（readonly/fill 透传两子组件）
+        │   ├── graph.ts               # 图配置纯逻辑（无 Vue 依赖）：类型 / 解析序列化 / 画布双向转换 / 提交组装 / 详情转换与 Schema 校验
+        │   ├── JsonConfigEditor.vue   # JSON 编辑器：textarea + 格式化 + 校验态（readonly 供详情/编辑只读文本）
+        │   ├── CanvasEditor.vue       # 拖拽画布：Vue Flow + 左侧五类节点面板（DnD / 连线 / 删除 / 起始标识；readonly 态 + fill 整页形态）
         │   └── NodeInspector.vue      # 右侧检查器：按节点类型分化表单 + 连线 condition 标签编辑
         └── design/
             ├── DesignTokens.vue      # 设计 token 预览页（/design，不进菜单）

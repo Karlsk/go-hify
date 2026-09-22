@@ -19,17 +19,17 @@
 
 ## Phase 1: Setup（共享基础设施）
 
-- [ ] T001 基线核验：分支 `010-workflow-frontend-detail-edit`；`cd web && npm run type-check && npm run build` 全绿；`git status --short` 仅 010 规划产物（specs/010-…/ + CLAUDE.md + .specify/feature.json）——在干净基线上开工（009 交付 c37a89b 后无未预期变更）
+- [x] T001 基线核验：分支 `010-workflow-frontend-detail-edit`；`cd web && npm run type-check && npm run build` 全绿；`git status --short` 仅 010 规划产物（specs/010-…/ + CLAUDE.md + .specify/feature.json）——在干净基线上开工（009 交付 c37a89b 后无未预期变更）
 
 ---
 
 ## Phase 2: Foundational（跨 Story 共享层：api / 纯逻辑 / 共享组件）
 
-- [ ] T002 [P] web/src/api/workflow.ts 增量：`WorkflowDetailNode`（key / type 后端 7 类全集字符串 / name 恒串 / config `Record<string, unknown>`）/ `WorkflowDetailEdge`（condition: string | null）/ `WorkflowDetail` / `UpdateWorkflowData`（**无 type 字段**——PUT 携带即拒硬红线的类型层闸）四类型 + `getWorkflowDetail(id)` / `updateWorkflow(id, data)`（复用 request.ts 既有 put helper）两方法；文件头注释更新（009「本篇纯消费不接 GET/PUT」→ 010 已接详情 / 更新）；字段与 contracts/workflow-frontend-api.md §2/§3/§6 逐字对齐（description 恒空串非 null、config 外键值字符串保形）
-- [ ] T003 [P] web/src/views/workflow/JsonConfigEditor.vue 加 `readonly?: boolean` prop：textarea `disabled` + 藏「格式化」按钮；`validate` 行为不变（research #10）
-- [ ] T004 [P] web/src/views/workflow/CanvasEditor.vue 加 `readonly?: boolean` + `fill?: boolean` 两 prop：readonly = 左侧节点面板与 NodeInspector 整块 v-if 不渲染 + VueFlow `:nodes-draggable="false"` + `:nodes-connectable="false"` + onDrop / onConnect / onNodeDoubleClick 开头 `if (props.readonly) return` 短路（平移缩放保留——FR-005 只禁编辑交互，research #3）；fill = 高度铺满父容器（**缺省保持 420px** 不回归 009 既有表单内嵌形态——US4 重构前 WorkflowCreate 仍在直接使用）
-- [ ] T005 web/src/views/workflow/graph.ts 纯逻辑增量（依赖 T002 类型）：`detailToGraphConfig(detail): GraphConfig`（name `""`→省略键、condition null→省略键、config 引用直传——未知键透传的根基；schema 不进 GraphConfig）+ `schemaFieldsError(fields): string | null`（name trim 非空、不重名、type ∈ string/number/boolean，错误文案带行号——对齐后端 ValidateSchemaFields 三规则，SC-004）+ `buildUpdatePayload(form, graph, schemas): UpdateWorkflowData`（form 的 type 仅作 task/chat 分支判定、**不组装进 payload**；task 型带 input/output_schema、chat 型不带；config 引用直传）+ PREFILL 深拷贝辅助（`parseGraphConfig(serializeGraphConfig(PREFILL_GRAPH))`——防画布编辑污染模块级常量，research #7）；**parseSchemaFields 暂留**（T016 重构 WorkflowCreate 时一并退役删除，避免中间态编译断）（data-model §2/§4）
-- [ ] T006 web/src/views/workflow/GraphModeEditor.vue 新建（依赖 T003/T004）：收编 009 WorkflowCreate 的双模式逻辑——mode radio（JSON / 拖拽）+ JsonConfigEditor + CanvasEditor 条件渲染 + 切换语义（切画布 = 解析 JSON，非法 notify 阻断并回退；切回 JSON = 画布 getGraph 序列化——SC-002 双模式一致）+ props（`initial: GraphConfig` 挂载一次性、`defaultMode?: 'json' | 'canvas'` 缺省 json、`readonly?`、`fill?`——后三者透传子组件）+ expose `getGraph(): GraphConfig | null`（JSON 非法 notify + null）及宿主页脏态快照所需的当前态访问（JSON 模式文本 / 画布模式序列化，data-model §5/§6，research #2）；**009 WorkflowCreate 本任务不接**——其双模式逻辑在 T016 整体删除，不做双改
+- [x] T002 [P] web/src/api/workflow.ts 增量：`WorkflowDetailNode`（key / type 后端 7 类全集字符串 / name 恒串 / config `Record<string, unknown>`）/ `WorkflowDetailEdge`（condition: string | null）/ `WorkflowDetail` / `UpdateWorkflowData`（**无 type 字段**——PUT 携带即拒硬红线的类型层闸）四类型 + `getWorkflowDetail(id)` / `updateWorkflow(id, data)`（复用 request.ts 既有 put helper）两方法；文件头注释更新（009「本篇纯消费不接 GET/PUT」→ 010 已接详情 / 更新）；字段与 contracts/workflow-frontend-api.md §2/§3/§6 逐字对齐（description 恒空串非 null、config 外键值字符串保形）
+- [x] T003 [P] web/src/views/workflow/JsonConfigEditor.vue 加 `readonly?: boolean` prop：textarea `disabled` + 藏「格式化」按钮；`validate` 行为不变（research #10）
+- [x] T004 [P] web/src/views/workflow/CanvasEditor.vue 加 `readonly?: boolean` + `fill?: boolean` 两 prop：readonly = 左侧节点面板与 NodeInspector 整块 v-if 不渲染 + VueFlow `:nodes-draggable="false"` + `:nodes-connectable="false"` + onDrop / onConnect / onNodeDoubleClick 开头 `if (props.readonly) return` 短路（平移缩放保留——FR-005 只禁编辑交互，research #3）；fill = 高度铺满父容器（**缺省保持 420px** 不回归 009 既有表单内嵌形态——US4 重构前 WorkflowCreate 仍在直接使用）
+- [x] T005 web/src/views/workflow/graph.ts 纯逻辑增量（依赖 T002 类型）：`detailToGraphConfig(detail): GraphConfig`（name `""`→省略键、condition null→省略键、config 引用直传——未知键透传的根基；schema 不进 GraphConfig）+ `schemaFieldsError(fields): string | null`（name trim 非空、不重名、type ∈ string/number/boolean，错误文案带行号——对齐后端 ValidateSchemaFields 三规则，SC-004）+ `buildUpdatePayload(form, graph, schemas): UpdateWorkflowData`（form 的 type 仅作 task/chat 分支判定、**不组装进 payload**；task 型带 input/output_schema、chat 型不带；config 引用直传）+ PREFILL 深拷贝辅助（`parseGraphConfig(serializeGraphConfig(PREFILL_GRAPH))`——防画布编辑污染模块级常量，research #7）；**parseSchemaFields 暂留**（T016 重构 WorkflowCreate 时一并退役删除，避免中间态编译断）（data-model §2/§4）
+- [x] T006 web/src/views/workflow/GraphModeEditor.vue 新建（依赖 T003/T004）：收编 009 WorkflowCreate 的双模式逻辑——mode radio（JSON / 拖拽）+ JsonConfigEditor + CanvasEditor 条件渲染 + 切换语义（切画布 = 解析 JSON，非法 notify 阻断并回退；切回 JSON = 画布 getGraph 序列化——SC-002 双模式一致）+ props（`initial: GraphConfig` 挂载一次性、`defaultMode?: 'json' | 'canvas'` 缺省 json、`readonly?`、`fill?`——后三者透传子组件）+ expose `getGraph(): GraphConfig | null`（JSON 非法 notify + null）及宿主页脏态快照所需的当前态访问（JSON 模式文本 / 画布模式序列化，data-model §5/§6，research #2）；**009 WorkflowCreate 本任务不接**——其双模式逻辑在 T016 整体删除，不做双改
 
 **Checkpoint**: 共享层就绪，`npm run type-check && npm run build` 绿。
 
@@ -43,9 +43,9 @@
 
 ### Implementation for User Story 1
 
-- [ ] T007 [US1] web/src/views/workflow/WorkflowDetail.vue 新建：onMounted `getWorkflowDetail(route.params.id)`（loading 态；catch → 拦截器已弹错，页面跳回 /workflows）→ `detailToGraphConfig` → `GraphModeEditor(readonly, defaultMode: 'canvas', :initial, v-if 数据就绪)`；基础信息区（名称 / 描述 / 类型 chat|task / 状态三态映射 / 创建时间——沿用列表页既有映射与 tag 形态）；task 型 input/output 两张只读表（四列 name/type/required/description；chat 型整块不渲染，FR-003）；「编辑」按钮 → `/workflows/:id/edit`（FR-006）
-- [ ] T008 [US1] web/src/router/index.ts 新增 `/workflows/:id`（name workflow-detail，meta.title「工作流详情」；vue-router 静态段优先——/workflows/create 不被 :id 吃掉，research #5；登录守卫自动生效）
-- [ ] T009 [P] [US1] web/src/views/workflow/WorkflowList.vue 操作列加「查看」「编辑」两个 link 按钮（type primary，分别跳 /workflows/:id 与 /workflows/:id/edit；列宽 180→220，平铺不收纳——同屏最多 4 链接，research #6；本任务覆盖 FR-001 + FR-002 入口侧，编辑链接目标随 T014 路由生效）
+- [x] T007 [US1] web/src/views/workflow/WorkflowDetail.vue 新建：onMounted `getWorkflowDetail(route.params.id)`（loading 态；catch → 拦截器已弹错，页面跳回 /workflows）→ `detailToGraphConfig` → `GraphModeEditor(readonly, defaultMode: 'canvas', :initial, v-if 数据就绪)`；基础信息区（名称 / 描述 / 类型 chat|task / 状态三态映射 / 创建时间——沿用列表页既有映射与 tag 形态）；task 型 input/output 两张只读表（四列 name/type/required/description；chat 型整块不渲染，FR-003）；「编辑」按钮 → `/workflows/:id/edit`（FR-006）
+- [x] T008 [US1] web/src/router/index.ts 新增 `/workflows/:id`（name workflow-detail，meta.title「工作流详情」；vue-router 静态段优先——/workflows/create 不被 :id 吃掉，research #5；登录守卫自动生效）
+- [x] T009 [P] [US1] web/src/views/workflow/WorkflowList.vue 操作列加「查看」「编辑」两个 link 按钮（type primary，分别跳 /workflows/:id 与 /workflows/:id/edit；列宽 180→220，平铺不收纳——同屏最多 4 链接，research #6；本任务覆盖 FR-001 + FR-002 入口侧，编辑链接目标随 T014 路由生效）
 
 **Checkpoint**: US1 独立可用——门禁绿 + 手测 spec US1 四场景（画布只读五禁 + 平移缩放可用 + 404 回列表 + 切 JSON 内容一致）。
 
@@ -59,7 +59,7 @@
 
 ### Implementation for User Story 3
 
-- [ ] T010 [US3] web/src/views/workflow/SchemaFieldsEditor.vue 新建：`v-model: SchemaField[]` + `disabled?: boolean` prop；每行四控件（name el-input / type el-select 三值 string-number-boolean / required el-switch / description el-input）+ 行删除按钮；底部「添加字段」追加空行 `{ name: '', type: 'string', required: false, description: '' }`；**非法历史数据**（回填值 type 不在三值内）el-select 显示原值字符串不炸（spec Edge Case，research #8）；组件本体不做提交校验——校验由宿主页提交前调 graph.ts `schemaFieldsError`（错误文案含行号由函数产出，SC-004）
+- [x] T010 [US3] web/src/views/workflow/SchemaFieldsEditor.vue 新建：`v-model: SchemaField[]` + `disabled?: boolean` prop；每行四控件（name el-input / type el-select 三值 string-number-boolean / required el-switch / description el-input）+ 行删除按钮；底部「添加字段」追加空行 `{ name: '', type: 'string', required: false, description: '' }`；**非法历史数据**（回填值 type 不在三值内）el-select 显示原值字符串不炸（spec Edge Case，research #8）；组件本体不做提交校验——校验由宿主页提交前调 graph.ts `schemaFieldsError`（错误文案含行号由函数产出，SC-004）
 
 **Checkpoint**: 组件就绪（type-check / build 绿）；US3 场景 1~4 的页面级验收在 T011 / T016 的 checkpoint 合并执行。
 
@@ -73,10 +73,10 @@
 
 ### Implementation for User Story 2
 
-- [ ] T011 [US2] web/src/views/workflow/WorkflowEdit.vue 页面骨架与回填：onMounted `getWorkflowDetail`（loading 态；404 / 失败 → 回列表）→ `detailToGraphConfig` → `GraphModeEditor(:initial, defaultMode: 'canvas', fill)`（v-if 数据就绪再挂载——initial 挂载一次性契约；画布默认可切 JSON，quickstart C.1）；fullBleed 工具栏（meta.fullBleed → App.vue `app__main--flush` 既有机制，research #9）：返回 + 名称 / 描述内联输入 + type 禁用单选（带「类型不可变，换型需删除重建」提示，FR-010）+ task 型「I/O Schema」按钮开 el-drawer（抽屉内 input/output 两个 SchemaFieldsEditor v-model 页面状态，`detail.input_schema ?? []` 兜底；chat 型无按钮，FR-008）
-- [ ] T012 [US2] WorkflowEdit.vue 脏态守卫双通道（FR-011，research #4）：加载完成记基准快照 `JSON.stringify({ name, description, inputSchema, outputSchema, graphText })`（graphText = JSON 模式取编辑器文本 / 画布模式守卫触发时取 getGraph() 序列化）→ dirty computed 逐帧比对（序列化比对覆盖检查器直改共享引用——watch 不到的深层变更）；`onBeforeRouteLeave` dirty 时 `ElMessageBox.confirm('未保存的修改将丢失，确认离开？')`（确认放行 / 取消留下）；`watch(dirty)` 注册 / 注销 `beforeunload`（preventDefault + returnValue = ''，拦浏览器刷新 / 关闭）；保存成功置 `saved` 再跳转（守卫放行）
-- [ ] T013 [US2] WorkflowEdit.vue 保存链路（FR-009）：点击保存 → task 型先 `schemaFieldsError`（非 null 则 notify 拦截、不发请求——SC-004）→ `GraphModeEditor.getGraph()`（null 拦截）→ `buildUpdatePayload`（**payload 不出现 type 键**——硬红线的组装层闸，与 T002 类型层双重保证）→ `updateWorkflow` → 成功 notifySuccess + `saved` 置位 + 跳 `/workflows/:id`；失败（409 名称冲突 / 400 图规则）留编辑页、内容不丢（错误弹窗由拦截器承担，页面不重复）
-- [ ] T014 [US2] web/src/router/index.ts 新增 `/workflows/:id/edit`（name workflow-edit，meta { title: '编辑工作流', fullBleed: true }；/workflows/create/orchestrate 静态段优先不被 :id/edit 吃掉，research #5）
+- [x] T011 [US2] web/src/views/workflow/WorkflowEdit.vue 页面骨架与回填：onMounted `getWorkflowDetail`（loading 态；404 / 失败 → 回列表）→ `detailToGraphConfig` → `GraphModeEditor(:initial, defaultMode: 'canvas', fill)`（v-if 数据就绪再挂载——initial 挂载一次性契约；画布默认可切 JSON，quickstart C.1）；fullBleed 工具栏（meta.fullBleed → App.vue `app__main--flush` 既有机制，research #9）：返回 + 名称 / 描述内联输入 + type 禁用单选（带「类型不可变，换型需删除重建」提示，FR-010）+ task 型「I/O Schema」按钮开 el-drawer（抽屉内 input/output 两个 SchemaFieldsEditor v-model 页面状态，`detail.input_schema ?? []` 兜底；chat 型无按钮，FR-008）
+- [x] T012 [US2] WorkflowEdit.vue 脏态守卫双通道（FR-011，research #4）：加载完成记基准快照 `JSON.stringify({ name, description, inputSchema, outputSchema, graphText })`（graphText = JSON 模式取编辑器文本 / 画布模式守卫触发时取 getGraph() 序列化）→ dirty computed 逐帧比对（序列化比对覆盖检查器直改共享引用——watch 不到的深层变更）；`onBeforeRouteLeave` dirty 时 `ElMessageBox.confirm('未保存的修改将丢失，确认离开？')`（确认放行 / 取消留下）；`watch(dirty)` 注册 / 注销 `beforeunload`（preventDefault + returnValue = ''，拦浏览器刷新 / 关闭）；保存成功置 `saved` 再跳转（守卫放行）
+- [x] T013 [US2] WorkflowEdit.vue 保存链路（FR-009）：点击保存 → task 型先 `schemaFieldsError`（非 null 则 notify 拦截、不发请求——SC-004）→ `GraphModeEditor.getGraph()`（null 拦截）→ `buildUpdatePayload`（**payload 不出现 type 键**——硬红线的组装层闸，与 T002 类型层双重保证）→ `updateWorkflow` → 成功 notifySuccess + `saved` 置位 + 跳 `/workflows/:id`；失败（409 名称冲突 / 400 图规则）留编辑页、内容不丢（错误弹窗由拦截器承担，页面不重复）
+- [x] T014 [US2] web/src/router/index.ts 新增 `/workflows/:id/edit`（name workflow-edit，meta { title: '编辑工作流', fullBleed: true }；/workflows/create/orchestrate 静态段优先不被 :id/edit 吃掉，research #5）
 
 **Checkpoint**: US1 + US2 + US3 独立可用——门禁绿 + 手测 spec US2 六场景 + US3 场景 1~4（编辑侧）+ SC-003 往返一致（含未知 config 键、连线条件标签不改丢）。
 
@@ -90,10 +90,10 @@
 
 ### Implementation for User Story 4
 
-- [ ] T015 [US4] web/src/stores/workflowCreateDraft.ts 新建：Pinia options API（对齐 stores/auth.ts 惯例）——state { name, description, type, inputSchema, outputSchema, graph: GraphConfig | null }；actions `saveForm(partial)` / `saveGraph(g)` / `clear()`；getter `hasForm`（name !== ''——直访 / 刷新判定；内存态刷新即清零 = 「回第一步」语义天然成立，research #1 / data-model §3）
-- [ ] T016 [US4] web/src/views/workflow/WorkflowCreate.vue 重构为第一步纯表单：表单初始值从草稿 store 读（hasForm 时回填——「上一步内容保留」的第一步侧，FR-014）；保留名称 / 描述 / 类型单选；task 型两个 SchemaFieldsEditor 取代 JSON 文本域（chat 型不显示，FR-013 第一步侧）；**删除**画布 / 模式切换 / onModeChange / currentGraph / PREFILL 引用与 JsonConfigEditor / CanvasEditor import；graph.ts `parseSchemaFields` 退役删除（唯一调用方消失，data-model §2）；「创建工作流」= name 必填 + task 型 `schemaFieldsError` 校验（拦截不发请求）→ `saveForm` → `router.push('/workflows/create/orchestrate')`
-- [ ] T017 [US4] web/src/views/workflow/WorkflowOrchestrate.vue 新建（第二步整页）：挂载判定 `hasForm`（false → 回 /workflows/create，FR-013 直访语义）；初始图 = `store.graph ?? PREFILL 深拷贝`（T005 辅助；Clarifications 预填智能客服分类示例图）；fullBleed 工具栏：「上一步」（回写 store + 回第一步，不弹确认）+ 名称 / 类型只读展示（修改走上一步，research #9）+「保存并创建」；`GraphModeEditor(:initial, defaultMode: 'canvas', fill)`（画布默认可切 JSON，quickstart A.2）；保存 = `getGraph()`（null 拦）→ `buildCreatePayload`（既有——**POST 带 type**，与 PUT 双轨隔离，data-model 不变量 5）→ `createWorkflow` → 成功 notifySuccess + `store.clear()` + 跳 /workflows（失败留第二步内容不丢）；`onBeforeRouteLeave` 把 `getGraph()` 回写 store（JSON 非法跳过、保留上一份合法图——侧边栏误点不丢图，research #9）
-- [ ] T018 [US4] web/src/router/index.ts 新增 `/workflows/create/orchestrate`（name workflow-create-orchestrate，meta { title: '编排工作流', fullBleed: true }；挂 /workflows/create 之后、:id 系列之前——静态段优先与声明顺序无关，按可读性排列，research #5）
+- [x] T015 [US4] web/src/stores/workflowCreateDraft.ts 新建：Pinia options API（对齐 stores/auth.ts 惯例）——state { name, description, type, inputSchema, outputSchema, graph: GraphConfig | null }；actions `saveForm(partial)` / `saveGraph(g)` / `clear()`；getter `hasForm`（name !== ''——直访 / 刷新判定；内存态刷新即清零 = 「回第一步」语义天然成立，research #1 / data-model §3）
+- [x] T016 [US4] web/src/views/workflow/WorkflowCreate.vue 重构为第一步纯表单：表单初始值从草稿 store 读（hasForm 时回填——「上一步内容保留」的第一步侧，FR-014）；保留名称 / 描述 / 类型单选；task 型两个 SchemaFieldsEditor 取代 JSON 文本域（chat 型不显示，FR-013 第一步侧）；**删除**画布 / 模式切换 / onModeChange / currentGraph / PREFILL 引用与 JsonConfigEditor / CanvasEditor import；graph.ts `parseSchemaFields` 退役删除（唯一调用方消失，data-model §2）；「创建工作流」= name 必填 + task 型 `schemaFieldsError` 校验（拦截不发请求）→ `saveForm` → `router.push('/workflows/create/orchestrate')`
+- [x] T017 [US4] web/src/views/workflow/WorkflowOrchestrate.vue 新建（第二步整页）：挂载判定 `hasForm`（false → 回 /workflows/create，FR-013 直访语义）；初始图 = `store.graph ?? PREFILL 深拷贝`（T005 辅助；Clarifications 预填智能客服分类示例图）；fullBleed 工具栏：「上一步」（回写 store + 回第一步，不弹确认）+ 名称 / 类型只读展示（修改走上一步，research #9）+「保存并创建」；`GraphModeEditor(:initial, defaultMode: 'canvas', fill)`（画布默认可切 JSON，quickstart A.2）；保存 = `getGraph()`（null 拦）→ `buildCreatePayload`（既有——**POST 带 type**，与 PUT 双轨隔离，data-model 不变量 5）→ `createWorkflow` → 成功 notifySuccess + `store.clear()` + 跳 /workflows（失败留第二步内容不丢）；`onBeforeRouteLeave` 把 `getGraph()` 回写 store（JSON 非法跳过、保留上一份合法图——侧边栏误点不丢图，research #9）
+- [x] T018 [US4] web/src/router/index.ts 新增 `/workflows/create/orchestrate`（name workflow-create-orchestrate，meta { title: '编排工作流', fullBleed: true }；挂 /workflows/create 之后、:id 系列之前——静态段优先与声明顺序无关，按可读性排列，research #5）
 
 **Checkpoint**: 全四 Story 可用——门禁绿 + 手测 spec US4 五场景 + SC-005 全链路计时 + SC-002 三场景双模式一致性抽查。
 
@@ -101,9 +101,9 @@
 
 ## Phase 7: Polish & Cross-Cutting（文档同步与全量验收）
 
-- [ ] T019 [P] docs/testing/workflow-frontend-manual-test.md 增补 spec 010 场景节：quickstart.md 四场景（A 创建两步式 5 步 / B 详情只读 5 步 / C 编辑保存 8 步 / D 双模式一致性抽查）+ spec Edge Cases 12 项的走查步骤与预期（含 SC-004 拦截、脏态双通道、published 不降级、非法历史 type 标注）（FR-017①，SC-006）
-- [ ] T020 [P] web/README.md 目录结构补录：views/workflow/ 三新页（Detail / Edit / Orchestrate）+ GraphModeEditor / SchemaFieldsEditor 组件、stores/workflowCreateDraft.ts、api/workflow.ts 的 getWorkflowDetail / updateWorkflow 与四新类型（FR-017②）
-- [ ] T021 全量验收门（SC-001）：`cd web && npm run type-check && npm run build` 绿 + `go build ./... && go vet ./...` 回归绿 + `git status --short` 无 internal/ 与 migrations/ 路径 + 009 既有路径快速回归（列表 / 删除 / 发布停用链路不回归；WorkflowCreate 重构后创建链路整体重走）；人工项（SC-002~SC-006 冒烟走查）移交用户列入验收报告
+- [x] T019 [P] docs/testing/workflow-frontend-manual-test.md 增补 spec 010 场景节：quickstart.md 四场景（A 创建两步式 5 步 / B 详情只读 5 步 / C 编辑保存 8 步 / D 双模式一致性抽查）+ spec Edge Cases 12 项的走查步骤与预期（含 SC-004 拦截、脏态双通道、published 不降级、非法历史 type 标注）（FR-017①，SC-006）
+- [x] T020 [P] web/README.md 目录结构补录：views/workflow/ 三新页（Detail / Edit / Orchestrate）+ GraphModeEditor / SchemaFieldsEditor 组件、stores/workflowCreateDraft.ts、api/workflow.ts 的 getWorkflowDetail / updateWorkflow 与四新类型（FR-017②）
+- [x] T021 全量验收门（SC-001）：`cd web && npm run type-check && npm run build` 绿 + `go build ./... && go vet ./...` 回归绿 + `git status --short` 无 internal/ 与 migrations/ 路径 + 009 既有路径快速回归（列表 / 删除 / 发布停用链路不回归；WorkflowCreate 重构后创建链路整体重走）；人工项（SC-002~SC-006 冒烟走查）移交用户列入验收报告
 
 ---
 
