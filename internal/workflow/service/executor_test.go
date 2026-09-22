@@ -158,6 +158,110 @@ func TestRunNodeLLMMissingVar(t *testing.T) {
 	assert.Contains(t, err.Error(), "node classify:")
 }
 
+// ---- llm 节点 system_prompt（spec 011 加法修订：FR-001~FR-006）----
+
+// TestRunNodeLLMSystemPrompt 带 system_prompt 执行（SC-001/FR-002/FR-003/FR-005）：
+// 非空 → strict 渲染 → Generate 收到恰 [system, user] 两条消息，内容为各自模板
+// 渲染后文本（{{base.field}} 一级下钻语义与 prompt 一致）；node_in 摘要与
+// executions 行 Input 一并记录渲染后的 system_prompt。
+func TestRunNodeLLMSystemPrompt(t *testing.T) {
+	e, _, _, fs, execs, _ := newTestExecutor(okGen("ORDER_QUERY"))
+	c := newExecContext(`{"question":"查订单"}`)
+
+	out, err := e.runNode(context.Background(), "classify",
+		&workflowapi.LLMConfig{ModelID: 3,
+			SystemPrompt: "你是客服路由分类器：{{input.question}}",
+			Prompt:       "判断意图：{{input.question}}"}, c)
+	require.NoError(t, err)
+	assert.Equal(t, "ORDER_QUERY", out)
+
+	msgs := fs.lastMsgs()
+	require.Len(t, msgs, 2, "带 system_prompt：恰两条消息")
+	assert.Equal(t, schema.System, msgs[0].Role)
+	assert.Equal(t, "你是客服路由分类器：查订单", msgs[0].Content, "system 模板一级下钻渲染（FR-002）")
+	assert.Equal(t, schema.User, msgs[1].Role)
+	assert.Equal(t, "判断意图：查订单", msgs[1].Content)
+
+	assert.Equal(t, "你是客服路由分类器：查订单", c.pendingIn["system_prompt"], "node_in 摘要含渲染后 system（FR-005）")
+	assert.Equal(t, "判断意图：查订单", c.pendingIn["prompt"])
+
+	require.Len(t, execs.rows, 1)
+	assert.Equal(t, "你是客服路由分类器：查订单", execs.rows[0].Input["system_prompt"], "executions Input 含渲染后 system（FR-005）")
+	assert.Equal(t, "判断意图：查订单", execs.rows[0].Input["prompt"])
+}
+
+// TestRunNodeLLMSystemPromptMissingVar system_prompt 缺失变量 fail-fast（SC-003/FR-004）：
+// 与 prompt 同语义——ErrValidationFailed、文案含变量名与节点 key；发生在
+// ResolveLLMConfig 之前：零上游调用、executions 零落（图缺陷不浪费供应商额度）。
+func TestRunNodeLLMSystemPromptMissingVar(t *testing.T) {
+	e, r, factory, fs, execs, _ := newTestExecutor(okGen("x"))
+
+	_, err := e.runNode(context.Background(), "classify",
+		&workflowapi.LLMConfig{ModelID: 3,
+			SystemPrompt: "你是{{typo_role}}",
+			Prompt:       "判断意图：{{input}}"}, newExecContext("in"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed, "system_prompt 缺失变量 → 图缺陷 400")
+	assert.Contains(t, err.Error(), "typo_role")
+	assert.Contains(t, err.Error(), "node classify:")
+	assert.Equal(t, 0, r.calls, "fail-fast 于 resolve 之前")
+	assert.Empty(t, factory.gotKey, "零上游调用")
+	assert.Nil(t, fs.lastMsgs(), "Generate 未被调")
+	assert.Empty(t, execs.rows, "executions 零落")
+}
+
+// TestRunNodeLLMSystemPromptEmptyEqualsAbsent 空串等价缺省（Edge Cases）：
+// SystemPrompt="" 与不携带行为一致——单 user 消息、记录不新增 system_prompt 键。
+func TestRunNodeLLMSystemPromptEmptyEqualsAbsent(t *testing.T) {
+	e, _, _, fs, execs, _ := newTestExecutor(okGen("x"))
+	c := newExecContext("in")
+
+	_, err := e.runNode(context.Background(), "classify",
+		&workflowapi.LLMConfig{ModelID: 3, SystemPrompt: "", Prompt: "判断意图：{{input}}"}, c)
+	require.NoError(t, err)
+
+	msgs := fs.lastMsgs()
+	require.Len(t, msgs, 1, "空串 = 缺省：仍单条 user 消息")
+	assert.Equal(t, schema.User, msgs[0].Role)
+	assert.Equal(t, "判断意图：in", msgs[0].Content)
+
+	assert.NotContains(t, c.pendingIn, "system_prompt", "空串不新增记录键（旧形态不变）")
+	require.Len(t, execs.rows, 1)
+	assert.NotContains(t, execs.rows[0].Input, "system_prompt")
+	assert.Equal(t, "判断意图：in", execs.rows[0].Input["prompt"])
+}
+
+// TestExecuteNestedChildSystemPrompt 嵌套子图内 LLM 节点同样生效（US1-4）：
+// 子图 c_work 带 system_prompt → 子池渲染（{{input.query}}）→ 恰 [system, user]，
+// 子 executions 行 Input 同步携带渲染后 system_prompt。
+func TestExecuteNestedChildSystemPrompt(t *testing.T) {
+	child := childTaskGraph(5, "published",
+		`[{"name":"query","type":"string","required":true}]`, "",
+		`检索：{{input.query}}`, `{{c_work}}`)
+	for i, n := range child.nodes {
+		if n.NodeKey == "c_work" {
+			child.nodes[i].Config = `{"model_id":"3","system_prompt":"子任务角色：{{input.query}}","prompt":"检索：{{input.query}}"}`
+		}
+	}
+	parent := parentNestedGraph(3, "chat", "published", 5, `{"query":"{{classify}}"}`, `{{sub.answer}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{3: parent, 5: child},
+		twoGen("ORDER_QUERY", `{"answer":"子答案"}`))
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 3, Input: "查订单"})
+	require.NoError(t, err)
+	assert.Equal(t, "子答案", res.Output, "父 end 经 {{sub.answer}} 取子终稿字段，行为不受影响")
+
+	msgs := env.streamer.lastMsgs()
+	require.Len(t, msgs, 2, "子图 LLM 节点带 system_prompt：恰 [system, user]")
+	assert.Equal(t, schema.System, msgs[0].Role)
+	assert.Equal(t, "子任务角色：ORDER_QUERY", msgs[0].Content, "子池 {{input.query}} 渲染")
+	assert.Equal(t, schema.User, msgs[1].Role)
+	assert.Equal(t, "检索：ORDER_QUERY", msgs[1].Content)
+
+	require.Len(t, env.execs.rows, 2, "父 classify + 子 c_work 两行")
+	assert.Equal(t, "子任务角色：ORDER_QUERY", env.execs.rows[1].Input["system_prompt"], "子行 Input 携带渲染后 system")
+}
+
 // ---- condition 节点：纯内存求值，零外部调用 ----
 
 func TestRunNodeCondition(t *testing.T) {

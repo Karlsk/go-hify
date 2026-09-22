@@ -23,7 +23,7 @@ Go 模块根 = 仓库根（`github.com/Karlsk/go-hify`）；改动全部收敛 `
 
 **Purpose**: 开工门禁——不在脏基线上动手
 
-- [ ] T001 基线门禁核实：`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿；`make migrate-status` applied 恰 20 条（本篇零迁移，无编号冲突）；`grep eino go.mod` 确认依赖既有（零新增）
+- [x] T001 基线门禁核实：`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿；`make migrate-status` applied 恰 20 条（本篇零迁移，无编号冲突）；`grep eino go.mod` 确认依赖既有（零新增）
 
 ---
 
@@ -31,8 +31,8 @@ Go 模块根 = 仓库根（`github.com/Karlsk/go-hify`）；改动全部收敛 `
 
 **Purpose**: LLMConfig 加可选 SystemPrompt 字段（FR-001/FR-006），行为面未动
 
-- [ ] T002 [P] RED：`internal/workflow/api/schema_test.go` 增 LLMConfig 序列化往返用例——①带值 marshal 出 `"system_prompt"` 键且 round-trip 保值 ②空串与缺省 marshal 均不出键（FR-006/SC 对应 quickstart 用例 8）；跑 `go test ./internal/workflow/api/` 确认红（新断言失败或编译红）
-- [ ] T003 GREEN：`internal/workflow/api/schema.go` LLMConfig 加 `SystemPrompt string \`json:"system_prompt,omitempty"\``（置于 Prompt 字段之前，与 data-model.md 字段序一致）；Validate 零改动（system_prompt 可选、prompt 仍必填，FR-001）；`go test ./internal/workflow/api/ -race` 绿
+- [x] T002 [P] RED：`internal/workflow/api/schema_test.go` 增 LLMConfig 序列化往返用例——①带值 marshal 出 `"system_prompt"` 键且 round-trip 保值 ②空串与缺省 marshal 均不出键（FR-006/SC 对应 quickstart 用例 8）；跑 `go test ./internal/workflow/api/` 确认红（新断言失败或编译红）
+- [x] T003 GREEN：`internal/workflow/api/schema.go` LLMConfig 加 `SystemPrompt string \`json:"system_prompt,omitempty"\``（置于 Prompt 字段之前，与 data-model.md 字段序一致）；Validate 零改动（system_prompt 可选、prompt 仍必填，FR-001）；`go test ./internal/workflow/api/ -race` 绿
 
 ---
 
@@ -42,9 +42,9 @@ Go 模块根 = 仓库根（`github.com/Karlsk/go-hify`）；改动全部收敛 `
 
 **Independent test criteria**: stub 模型 client 的单 LLM 节点图执行，断言消息条数/顺序/内容 + 记录形态（quickstart 用例 1-7）。
 
-- [ ] T004 [US1] RED：`internal/workflow/service/executor_test.go` 增用例组（stub client + stub store，零真实网络/LLM）——①带 system_prompt 执行：Generate 收到恰 2 条消息 [system, user]、内容为各自模板渲染后文本（SC-001/FR-003）②system_prompt 含 `{{input.question}}` 合法引用被渲染替换（FR-002）③system_prompt 缺失变量：返回 ErrValidationFailed 且文案含变量名与节点 key、Generate 零调用、executions 零落（SC-003/FR-004）④node_in 摘要与 executions 行 Input 含渲染后 system_prompt 值（FR-005）⑤嵌套子图内 LLM 节点同样生效（US1-4）⑥system_prompt 空串等价缺省：单 user 消息、记录无新键（Edge Cases）；跑 `go test ./internal/workflow/service/ -race` 确认红
-- [ ] T005 [US1] GREEN：`internal/workflow/service/executor.go` callLLM 最小实现——system_prompt 非空时先 `c.render(cfg.SystemPrompt)`（失败走既有 ErrValidationFailed 路径，fail-fast 于 ResolveLLMConfig 之前）→ msgs 组装 `[{Role: System, ...}?, {Role: User, ...}]`；`setNodeIn` 与 `recordExecution` 的 Input map 有值才加 `system_prompt` 键（research 决策 3；recordExecution 传参按最小 diff 扩展携带渲染后双值）；空串/缺省路径与现状逐字节一致
-- [ ] T006 [US1] REFACTOR + 局部门禁：测试保护下对齐邻近代码风格（不扩范围）；`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿后勾本任务
+- [x] T004 [US1] RED：`internal/workflow/service/executor_test.go` 增用例组（stub client + stub store，零真实网络/LLM）——①带 system_prompt 执行：Generate 收到恰 2 条消息 [system, user]、内容为各自模板渲染后文本（SC-001/FR-003）②system_prompt 含 `{{input.question}}` 合法引用被渲染替换（FR-002）③system_prompt 缺失变量：返回 ErrValidationFailed 且文案含变量名与节点 key、Generate 零调用、executions 零落（SC-003/FR-004）④node_in 摘要与 executions 行 Input 含渲染后 system_prompt 值（FR-005）⑤嵌套子图内 LLM 节点同样生效（US1-4）⑥system_prompt 空串等价缺省：单 user 消息、记录无新键（Edge Cases）；跑 `go test ./internal/workflow/service/ -race` 确认红
+- [x] T005 [US1] GREEN：`internal/workflow/service/executor.go` callLLM 最小实现——system_prompt 非空时先 `c.render(cfg.SystemPrompt)`（失败走既有 ErrValidationFailed 路径，fail-fast 于 ResolveLLMConfig 之前）→ msgs 组装 `[{Role: System, ...}?, {Role: User, ...}]`；`setNodeIn` 与 `recordExecution` 的 Input map 有值才加 `system_prompt` 键（research 决策 3；recordExecution 传参按最小 diff 扩展携带渲染后双值）；空串/缺省路径与现状逐字节一致
+- [x] T006 [US1] REFACTOR + 局部门禁：测试保护下对齐邻近代码风格（不扩范围）；`go build ./... && go vet ./... && go test ./... -race -count=1` 全绿后勾本任务
 
 ---
 
@@ -54,14 +54,14 @@ Go 模块根 = 仓库根（`github.com/Karlsk/go-hify`）；改动全部收敛 `
 
 **Independent test criteria**: 既有断言零改动 + 全量回归绿 + 覆盖率维持。
 
-- [ ] T007 [US2] 存量回归验证：`git diff` 确认既有测试断言行零触碰（只增不改）；`go test ./internal/workflow/... -race -cover` 覆盖率 ≥80% 维持；核对既有 executions.Input 恰 `{"prompt":...}` 断言仍绿（无 system_prompt 键混入）；`git grep -n 'system_prompt' internal/workflow` 确认新键只在有值路径出现
+- [x] T007 [US2] 存量回归验证：`git diff` 确认既有测试断言行零触碰（只增不改）；`go test ./internal/workflow/... -race -cover` 覆盖率 ≥80% 维持；核对既有 executions.Input 恰 `{"prompt":...}` 断言仍绿（无 system_prompt 键混入）；`git grep -n 'system_prompt' internal/workflow` 确认新键只在有值路径出现
 
 ---
 
 ## Phase 5: Polish（文档同步与验收收尾）
 
-- [ ] T008 [P] 冻结契约文档补录（加法修订注记，注明 2026-09-22 用户批准）：`docs/changelog/workflow/api_contract.md` LLM 节点 config 示例与字段表补 `system_prompt`（约 L131/L137 节）；`docs/changelog/workflow/impl_spec_06_execution_engine.md` callLLM 行为节补消息序与记录形态修订注记
-- [ ] T009 验收收尾：按 quickstart.md 用例对号表逐项核对落地；交付物存在性核对（git status 仅 4 个 internal 文件 + 文档 + specs/）；产出验收报告（含可选人工项：dev 栈冒烟）
+- [x] T008 [P] 冻结契约文档补录（加法修订注记，注明 2026-09-22 用户批准）：`docs/changelog/workflow/api_contract.md` LLM 节点 config 示例与字段表补 `system_prompt`（约 L131/L137 节）；`docs/changelog/workflow/impl_spec_06_execution_engine.md` callLLM 行为节补消息序与记录形态修订注记
+- [x] T009 验收收尾：按 quickstart.md 用例对号表逐项核对落地；交付物存在性核对（git status 仅 4 个 internal 文件 + 文档 + specs/）；产出验收报告（含可选人工项：dev 栈冒烟）
 
 ---
 

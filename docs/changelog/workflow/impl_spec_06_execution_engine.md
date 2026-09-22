@@ -228,6 +228,11 @@ temperature 透传；executions 落库**执行器自记**——callLLM 内经 ex
 〔2026-09-18 用户拍板更正：本注记原写「executions 落库由 platform/llm 自动完成，执行器不另记」，
 经代码现状核对系事实性错误——platform/llm 只管调用不落库，executions 由调用方服务层写入；更正不改变
 任何行为语义（workflow LLM 调用进 executions 的要求不变），仅修正责任层表述。〕
+〔2026-09-22 追加（spec 011，用户批准·加法修订）：`LLMConfig` 增可选 `system_prompt`（`omitempty`）。
+非空时**先于 `prompt`** strict 渲染（fail-fast 语义同 `prompt`：缺失变量报 `errs.ErrValidationFailed`、
+发生于 ResolveLLMConfig 之前，零上游调用零落库），消息序组装为 `[system, user]`；空串 / 缺省保持单
+user 消息现状（存量路径逐字节不变）。记录形态：`node_in` 摘要与 executions 行 `Input` 在有值时多记
+一个 `system_prompt` 键（渲染后文本），无值不引入新键。〕
 
 配套增注：`api/schema.go` 增 `ExecuteWorkflowReq` / `RunResultSchema`（已冻结，见
 api_contract.md §5）；`store.go` 增 `CreateRun`（一事务 run 1 行 +

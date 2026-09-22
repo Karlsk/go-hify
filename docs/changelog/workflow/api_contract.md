@@ -128,7 +128,7 @@ POST /api/v1/workflows
   "start_node_key": "classify",
   "nodes": [
     { "key": "classify", "type": "llm", "name": "意图识别",
-      "config": { "model_id": "3", "prompt": "判断用户意图，只输出 ORDER_QUERY 或 POLICY_QUERY：{{input}}", "temperature": 0 } },
+      "config": { "model_id": "3", "system_prompt": "你是客服路由分类器，只输出类别码", "prompt": "判断用户意图，只输出 ORDER_QUERY 或 POLICY_QUERY：{{input}}", "temperature": 0 } },
     { "key": "router", "type": "condition", "name": "意图分流",
       "config": { "expression": "{{classify}} == 'ORDER_QUERY'" } },
     { "key": "order_api", "type": "tool", "name": "查询订单",
@@ -144,6 +144,8 @@ POST /api/v1/workflows
   ]
 }
 ```
+
+> 〔2026-09-22 追加（spec 011，用户批准·加法修订）：llm 节点 config 增可选 `system_prompt`（string，`omitempty`——空串 / 缺省 / null 均合法且行为一致）。非空时执行发 `[system, user]` 两条消息，内容为各自模板 strict 渲染结果（`{{var}}` 与 `{{base.field}}` 一级下钻语义与 `prompt` 完全一致，缺失变量 fail-fast 报 `VALIDATION_FAILED`）；为空保持单 user 消息现状。保存期校验不变（`prompt` 仍必填、`system_prompt` 可选，`Validate` 无新增拒绝路径）；既有图（无该字段）的消息序列、executions 记录形态与保存往返零影响。执行语义细节见 [impl_spec_06_execution_engine.md](./impl_spec_06_execution_engine.md) callLLM 节。〕
 
 详情响应（201 / 200，结构与创建入参一致，另含服务端字段）：
 

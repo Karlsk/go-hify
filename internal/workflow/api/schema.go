@@ -25,7 +25,7 @@ const (
 
 // WorkflowType 工作流分型（spec 08 §4.1，2026-09-18 拍板）：chat = 对话管道终答 /
 // task = string→string 可组合任务函数（可被 sub-workflow 节点引用）。类型不可变
-//（Update 携带即拒，换型 = 删了重建）；存量回填 chat。
+// （Update 携带即拒，换型 = 删了重建）；存量回填 chat。
 type WorkflowType string
 
 const (
@@ -55,9 +55,10 @@ type NodeConfig interface{ isNodeConfig() }
 
 // LLMConfig 单轮 LLM 调用（无多轮上下文；执行走 platform/llm，不经 chat）。
 type LLMConfig struct {
-	ModelID     uint64  `json:"model_id,string"`       // models.id；存在性 service 经 provider api 预检
-	Prompt      string  `json:"prompt"`                // 支持 {{var}} 模板
-	Temperature float64 `json:"temperature,omitempty"` // 0 = 跟随模型默认
+	ModelID      uint64  `json:"model_id,string"`         // models.id；存在性 service 经 provider api 预检
+	SystemPrompt string  `json:"system_prompt,omitempty"` // 可选 system 消息模板（spec 011 加法修订）：空串=不发；{{var}} 渲染语义同 prompt
+	Prompt       string  `json:"prompt"`                  // 支持 {{var}} 模板
+	Temperature  float64 `json:"temperature,omitempty"`   // 0 = 跟随模型默认
 }
 
 func (LLMConfig) isNodeConfig() {}
@@ -277,14 +278,14 @@ func ValidateSchemaFields(fields []SchemaField) error {
 // UpdateWorkflowReq），binding tag 会误伤嵌入空值，故不打。数量界（节点 1-50 /
 // 边 0-100）由 binding tag 管，Validate 只管跨字段图规则，两层不重复。
 type UpsertReq struct {
-	Name         string         `json:"name" binding:"required,max=128"`
-	Description  string         `json:"description"`
-	Type         WorkflowType   `json:"type"` // chat / task（spec 08）；Create 必填，Update 不携带
-	InputSchema  []SchemaField  `json:"input_schema"`  // 仅 task 型；chat 型携带非空由 service 强不变量拒
-	OutputSchema []SchemaField  `json:"output_schema"` // 仅 task 型
-	StartNodeKey string         `json:"start_node_key" binding:"required"`
-	Nodes        []NodeReq      `json:"nodes" binding:"required,min=1,max=50"`
-	Edges        []EdgeReq      `json:"edges" binding:"required,max=100"` // 纯线性可传 []
+	Name         string        `json:"name" binding:"required,max=128"`
+	Description  string        `json:"description"`
+	Type         WorkflowType  `json:"type"`          // chat / task（spec 08）；Create 必填，Update 不携带
+	InputSchema  []SchemaField `json:"input_schema"`  // 仅 task 型；chat 型携带非空由 service 强不变量拒
+	OutputSchema []SchemaField `json:"output_schema"` // 仅 task 型
+	StartNodeKey string        `json:"start_node_key" binding:"required"`
+	Nodes        []NodeReq     `json:"nodes" binding:"required,min=1,max=50"`
+	Edges        []EdgeReq     `json:"edges" binding:"required,max=100"` // 纯线性可传 []
 }
 
 // NodeReq 节点：config 保持 RawMessage 延迟解析——绑定阶段还不知道类型，
@@ -495,15 +496,15 @@ func (r ExecuteWorkflowReq) Validate() error {
 // WorkflowSummarySchema 摘要（列表用，不带图）。Type / schema 字段 spec 08 起
 // 暴露：schema 未声明（含 chat 型恒空）序列化为 null。
 type WorkflowSummarySchema struct {
-	ID          string        `json:"id"` //〔2026-09-16 修订〕原 `json:"id,string"` 系笔误：,string 只用于数字字段，挂在 string 字段上会双重编码
-	Name        string        `json:"name"`
-	Description string        `json:"description"`
-	Type        string        `json:"type"` // chat/task（spec 08；存量回填 chat）
-	Status      string        `json:"status"` // draft/published/disabled
+	ID           string        `json:"id"` //〔2026-09-16 修订〕原 `json:"id,string"` 系笔误：,string 只用于数字字段，挂在 string 字段上会双重编码
+	Name         string        `json:"name"`
+	Description  string        `json:"description"`
+	Type         string        `json:"type"`          // chat/task（spec 08；存量回填 chat）
+	Status       string        `json:"status"`        // draft/published/disabled
 	InputSchema  []SchemaField `json:"input_schema"`  // task 型入参契约；null = 未声明
 	OutputSchema []SchemaField `json:"output_schema"` // task 型出参契约；null = 未声明
-	CreatedAt   time.Time     `json:"created_at"`
-	UpdatedAt   time.Time     `json:"updated_at"`
+	CreatedAt    time.Time     `json:"created_at"`
+	UpdatedAt    time.Time     `json:"updated_at"`
 }
 
 // WorkflowDetailSchema 详情（创建/更新/详情接口返回）；结构与创建入参一致
@@ -544,9 +545,9 @@ type WorkflowListResult struct {
 // RunResultSchema 一次执行的结果（非流式）：同步返回，呈现归调用方（控制台 respond
 // 信封一次返回；chat 拿到返回值自行决定推送粒度）。
 type RunResultSchema struct {
-	RunID      string           `json:"run_id"`     // workflow_runs.id（字符串化）；轨迹写入降级时置空（O7 ④：结果照返）
-	Status     string           `json:"status"`     // succeeded / failed
-	Output     string           `json:"output"`     // 终稿（end.output 渲染或末节点输出）
+	RunID      string           `json:"run_id"` // workflow_runs.id（字符串化）；轨迹写入降级时置空（O7 ④：结果照返）
+	Status     string           `json:"status"` // succeeded / failed
+	Output     string           `json:"output"` // 终稿（end.output 渲染或末节点输出）
 	DurationMs int              `json:"duration_ms"`
 	NodeTrace  []NodeRunSummary `json:"node_trace"` // 节点轨迹摘要（key/type/status/耗时），明细查轨迹表
 }

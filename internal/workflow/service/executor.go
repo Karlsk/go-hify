@@ -111,15 +111,29 @@ func (e *executor) evalCondition(cfg *workflowapi.ConditionConfig, c *execContex
 	return out, nil
 }
 
-// callLLM llm 节点全链：strict 渲染（先于下游调用——图缺陷不浪费供应商额度）→
-// ResolveLLMConfig（明文 key 只在调用链瞬间存在）→ llm client → Generate 非流式
-// （单轮、无 SSE，不经 chat）→ 自记 executions（失败也记，pre-attempt 除外）。
+// callLLM llm 节点全链：strict 渲染（先于下游调用——图缺陷不浪费供应商额度；
+// system_prompt 先于 prompt，spec 011）→ ResolveLLMConfig（明文 key 只在调用链
+// 瞬间存在）→ llm client → Generate 非流式（单轮、无 SSE，不经 chat）→ 自记
+// executions（失败也记，pre-attempt 除外）。system_prompt 非空发 [system, user]，
+// 空串/缺省保持单 user 消息现状（加法兼容）。
 func (e *executor) callLLM(ctx context.Context, key string, cfg *workflowapi.LLMConfig, c *execContext) (string, error) {
+	system := ""
+	if cfg.SystemPrompt != "" {
+		var err error
+		system, err = c.render(cfg.SystemPrompt)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", errs.ErrValidationFailed, err)
+		}
+	}
 	prompt, err := c.render(cfg.Prompt)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", errs.ErrValidationFailed, err)
 	}
-	c.setNodeIn(map[string]string{"prompt": prompt}) // 渲染成功即记：下游失败时入参仍可读
+	nodeIn := map[string]string{"prompt": prompt} // 渲染成功即记：下游失败时入参仍可读
+	if system != "" {
+		nodeIn["system_prompt"] = system
+	}
+	c.setNodeIn(nodeIn)
 	resolved, err := e.resolveLLM.ResolveLLMConfig(ctx, providerapi.ResolveLLMConfigReq{ModelID: cfg.ModelID})
 	if err != nil {
 		return "", err // 下游哨兵透传（MODEL_NOT_FOUND 等）
@@ -133,7 +147,11 @@ func (e *executor) callLLM(ctx context.Context, key string, cfg *workflowapi.LLM
 	if err != nil {
 		return "", err // pre-attempt（busy / breaker / kind）：未打上游，不落 executions
 	}
-	msgs := []*schema.Message{{Role: schema.User, Content: prompt}}
+	msgs := make([]*schema.Message, 0, 2)
+	if system != "" {
+		msgs = append(msgs, &schema.Message{Role: schema.System, Content: system})
+	}
+	msgs = append(msgs, &schema.Message{Role: schema.User, Content: prompt})
 	opts := &llm.CallOptions{}
 	if cfg.Temperature != 0 { // 0 = 跟随模型默认（不设字段）
 		t := float32(cfg.Temperature)
@@ -142,7 +160,7 @@ func (e *executor) callLLM(ctx context.Context, key string, cfg *workflowapi.LLM
 	start := time.Now()
 	reply, genErr := client.Generate(ctx, msgs, opts)
 	if !isPreAttemptErr(genErr) {
-		e.recordExecution(ctx, key, resolved, cfg.ModelID, prompt, start, reply, genErr)
+		e.recordExecution(ctx, key, resolved, cfg.ModelID, prompt, system, start, reply, genErr)
 	}
 	if genErr != nil {
 		return "", genErr
@@ -152,13 +170,17 @@ func (e *executor) callLLM(ctx context.Context, key string, cfg *workflowapi.LLM
 
 // recordExecution llm 节点自记 executions（chat recordExecution 同款）：ConversationID
 // =nil 即 workflow 调用标识；失败也记（ErrorClass 兜底 Network）；落库失败只 WARN
-// 不阻断执行。
+// 不阻断执行。system 非空时 Input 多记一个 system_prompt 键（spec 011，有值才加）。
 func (e *executor) recordExecution(ctx context.Context, nodeKey string, resolved *providerapi.LLMConfig,
-	modelID uint64, prompt string, start time.Time, reply *schema.Message, callErr error) {
+	modelID uint64, prompt, system string, start time.Time, reply *schema.Message, callErr error) {
+	input := map[string]any{"prompt": prompt}
+	if system != "" {
+		input["system_prompt"] = system
+	}
 	row := &logging.Execution{
 		ModelID:    &modelID,
 		ModelName:  resolved.ModelID, // 冗余快照：模型删除后记录仍可读
-		Input:      map[string]any{"prompt": prompt},
+		Input:      input,
 		DurationMs: int32(time.Since(start).Milliseconds()),
 	}
 	if callErr != nil {

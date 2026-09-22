@@ -90,6 +90,31 @@ func TestConfigValidate(t *testing.T) {
 	})
 }
 
+// TestLLMConfigSystemPromptSerialization system_prompt 序列化契约（spec 011 FR-006）：
+// 有值出键且往返保值；空串与缺省均不出键——既有配置保存读回不引入新键。
+func TestLLMConfigSystemPromptSerialization(t *testing.T) {
+	t.Run("有值 marshal 出键且往返保值", func(t *testing.T) {
+		b, err := json.Marshal(LLMConfig{ModelID: 3, SystemPrompt: "你是分类器", Prompt: "{{input}}"})
+		assert.NoError(t, err)
+		assert.Contains(t, string(b), `"system_prompt":"你是分类器"`)
+		var c LLMConfig
+		assert.NoError(t, json.Unmarshal(b, &c))
+		assert.Equal(t, "你是分类器", c.SystemPrompt)
+	})
+	t.Run("空串 marshal 不出键", func(t *testing.T) {
+		b, err := json.Marshal(LLMConfig{ModelID: 3, Prompt: "p"})
+		assert.NoError(t, err)
+		assert.NotContains(t, string(b), "system_prompt")
+	})
+	t.Run("ParseNodeConfig 带 system_prompt 解析", func(t *testing.T) {
+		cfg, err := ParseNodeConfig(NodeLLM, json.RawMessage(`{"model_id":"3","system_prompt":"你是分类器：{{input.style}}","prompt":"{{input.q}}"}`))
+		assert.NoError(t, err)
+		c, ok := cfg.(*LLMConfig)
+		assert.True(t, ok)
+		assert.Equal(t, "你是分类器：{{input.style}}", c.SystemPrompt)
+	})
+}
+
 func TestParseNodeConfig(t *testing.T) {
 	t.Run("llm happy", func(t *testing.T) {
 		cfg, err := ParseNodeConfig(NodeLLM, json.RawMessage(`{"model_id":"3","prompt":"判断意图：{{input}}","temperature":0}`))
