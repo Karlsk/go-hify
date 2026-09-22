@@ -1193,9 +1193,10 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/011-workflow-llm-system-prompt/plan.md](specs/011-workflow-llm-system-prompt/plan.md)
-(feature: 工作流 LLM 节点 system_prompt 支持——LLMConfig 加可选 system_prompt 字段，
-执行期作为 system 消息先于 user 消息发出；spec 见
-specs/011-workflow-llm-system-prompt/spec.md；impl_spec_06 冻结契约的加法修订（用户
-2026-09-22 批准），纯加法零迁移零跨模块，是 spec 012 前端 LLM 检查器两输入框的后端前提)
+[specs/012-workflow-editor-enhancements/plan.md](specs/012-workflow-editor-enhancements/plan.md)
+(feature: 工作流拖拽编辑器八项增强——spec 012，纯前端（web/）补齐 spec 009/010 编辑器
+的删除入口/伪开始节点/节点 key 改名/LLM 双输入框（消费 spec 011 system_prompt，commit
+3c82c3f）/API headers+auth+body/子工作流入参渲染/变量引用下拉（新组件 TemplateField）；
+后端零改动，config 键集对齐 api_contract.md §3 既有键，图主体序列化形态不变；spec 见
+specs/012-workflow-editor-enhancements/spec.md)
 <!-- SPECKIT END -->
