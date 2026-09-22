@@ -1193,7 +1193,8 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/009-workflow-frontend/plan.md](specs/009-workflow-frontend/plan.md)
-(feature: 工作流管理前端——列表页 + 创建页 JSON/拖拽双模式；spec 见
-specs/009-workflow-frontend/spec.md；后端 workflow API spec 01~08 已冻结，纯前端交付；新依赖 @vue-flow/*)
+[specs/010-workflow-frontend-detail-edit/plan.md](specs/010-workflow-frontend-detail-edit/plan.md)
+(feature: 工作流详情/编辑前端——只读详情页 + 整页编辑 + 创建两步式 + Schema 表单化；spec 见
+specs/010-workflow-frontend-detail-edit/spec.md；后端 GET/PUT 已冻结纯前端交付，零新增依赖，
+复用 spec 009 画布/检查器/graph.ts 改造)
 <!-- SPECKIT END -->
