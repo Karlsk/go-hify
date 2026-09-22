@@ -4,9 +4,11 @@
        出口经 getGraph() 转回图配置——画布节点的 data.config 与配置节点共享引用，
        检查器（T014）改 config 即改配置单源；节点位置存 positions Map（父组件
        会话级持有，往返保留，不序列化进配置）。起始节点：首个放入默认起始，
-       双击节点切换（hf-wf-node--start class 标识）。 -->
-  <div class="canvas-editor">
-    <aside class="canvas-editor__palette">
+       双击节点切换（hf-wf-node--start class 标识）。
+       只读态（readonly，spec 010）：面板 / 检查器不渲染、编辑交互全禁，
+       平移缩放保留（FR-005）；fill = 高度铺满父容器（编辑 / 编排整页形态）。 -->
+  <div class="canvas-editor" :class="{ 'canvas-editor--fill': fill }">
+    <aside v-if="!readonly" class="canvas-editor__palette">
       <div
         v-for="t in PALETTE_NODE_TYPES"
         :key="t"
@@ -21,14 +23,22 @@
     </aside>
 
     <div class="canvas-editor__flow" @dragover.prevent @drop="onDrop">
-      <VueFlow v-model:nodes="flowNodes" v-model:edges="flowEdges" fit-view-on-init>
+      <VueFlow
+        v-model:nodes="flowNodes"
+        v-model:edges="flowEdges"
+        fit-view-on-init
+        :nodes-draggable="!readonly"
+        :nodes-connectable="!readonly"
+        :nodes-selectable="!readonly"
+        :edges-selectable="!readonly"
+      >
         <Background />
         <Controls />
       </VueFlow>
     </div>
 
-    <!-- 右侧检查器（FR-010）：选中 node/edge 由下方 click hooks 维护，对象直传（引用共享） -->
-    <NodeInspector :node="selectedNode" :edge="selectedEdge" />
+    <!-- 右侧检查器（FR-010）：选中 node/edge 由下方 click hooks 维护，对象直传（引用共享）；只读态不渲染 -->
+    <NodeInspector v-if="!readonly" :node="selectedNode" :edge="selectedEdge" />
   </div>
 </template>
 
@@ -66,6 +76,10 @@ const props = defineProps<{
   config: GraphConfig
   /** 会话级位置 Map（父组件持有）：拖入/拖动写入、往返保留、不序列化 */
   positions: NodePositions
+  /** 只读态（详情页）：藏面板/检查器、禁拖动/连线/选中删除，drop 与双击起始短路；平移缩放保留（FR-005） */
+  readonly?: boolean
+  /** 高度铺满父容器（编辑页/编排页整页形态）；缺省 420px 保持 009 表单内嵌形态 */
+  fill?: boolean
 }>()
 
 const {
@@ -127,6 +141,7 @@ function onDragStart(event: DragEvent, type: PaletteNodeType): void {
 }
 
 function onDrop(event: DragEvent): void {
+  if (props.readonly) return
   const type = event.dataTransfer?.getData(NODE_TYPE_MIME) ?? ''
   if (!isPaletteNodeType(type)) return
   const position = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
@@ -148,6 +163,7 @@ function onDrop(event: DragEvent): void {
 // ---- 连线：connect 事件 → addEdges（重复 source→target 静默忽略） ----
 
 onConnect((connection) => {
+  if (props.readonly) return
   const duplicated = flowEdges.value.some(
     (e) => e.source === connection.source && e.target === connection.target,
   )
@@ -201,6 +217,7 @@ onNodeDragStop(({ node }) => {
 // ---- 起始切换：双击节点 ----
 
 onNodeDoubleClick(({ node }) => {
+  if (props.readonly) return
   startKey.value = node.id
   refreshStartClasses()
 })
@@ -280,6 +297,16 @@ defineExpose({ getGraph })
   border: 1px solid var(--hf-border-1);
   border-radius: var(--hf-radius-md);
   overflow: hidden;
+}
+
+/* 整页形态（fill）：高度铺满父容器，画布交由 flex 拉伸；缺省 420px 保持 009 表单内嵌 */
+.canvas-editor--fill {
+  height: 100%;
+  min-height: 0;
+}
+
+.canvas-editor--fill .canvas-editor__flow {
+  height: auto;
 }
 
 /* 面板节点色点：与画布节点类型色一致 */

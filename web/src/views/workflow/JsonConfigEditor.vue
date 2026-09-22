@@ -2,7 +2,8 @@
   <!-- JSON 配置编辑器：textarea（等宽字体）+ 下方「格式化」按钮（用户原始需求：
        编辑器下方放格式化按钮，点击美化缩进）。校验态经 defineExpose 暴露，
        供父组件在提交与切换模式前判定；错误提示走 notifyError（本地校验场景，
-       请求类错误才归拦截器）。 -->
+       请求类错误才归拦截器）。只读态（readonly，spec 010）：textarea 禁用 +
+       藏「格式化」，validate 行为不变（详情 JSON 模式）。 -->
   <div class="json-config-editor">
     <el-input
       :model-value="modelValue"
@@ -11,9 +12,10 @@
       :placeholder="placeholder"
       class="json-config-editor__textarea"
       spellcheck="false"
+      :disabled="readonly"
       @update:model-value="onInput"
     />
-    <div class="json-config-editor__footer">
+    <div v-if="!readonly" class="json-config-editor__footer">
       <el-button size="small" @click="format">格式化</el-button>
     </div>
   </div>
@@ -28,6 +30,8 @@ const props = withDefaults(
     modelValue: string
     rows?: number
     placeholder?: string
+    /** 只读态（详情 JSON 模式）：textarea 禁用 + 藏「格式化」；validate 行为不变 */
+    readonly?: boolean
   }>(),
   { rows: 12 },
 )

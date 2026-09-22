@@ -1,7 +1,8 @@
 <template>
   <!-- 工作流列表页：HifyTable + useConfirm 删除 + 发布/停用生命周期操作。
        类型/状态三态映射与按钮矩阵（删除恒显 + 发布非 published + 停用 published）
-       按 data-model §4；错误提示一律由 request.ts 拦截器承担，页面只管成功后的刷新。 -->
+       按 data-model §4；spec 010 操作列加 查看 / 编辑 入口（FR-001/002，四链接
+       平铺不收纳）；错误提示一律由 request.ts 拦截器承担，页面只管成功后的刷新。 -->
   <div>
     <PageHeader
       title="工作流管理"
@@ -30,6 +31,16 @@
         {{ formatDateTime(row.created_at) }}
       </template>
       <template #actions="{ row }">
+        <el-button link type="primary" @click="router.push(`/workflows/${row.id}`)">
+          查看
+        </el-button>
+        <el-button
+          link
+          type="primary"
+          @click="router.push(`/workflows/${row.id}/edit`)"
+        >
+          编辑
+        </el-button>
         <el-button
           v-if="row.status !== 'published'"
           link
@@ -90,7 +101,7 @@ const columns: HifyTableColumn[] = [
   { label: '状态', slot: 'status', width: 90 },
   // 次要列：窄屏（≤992）隐藏，保留 名称 / 类型 / 状态 / 操作 关键信息
   { label: '创建时间', slot: 'createdAt', width: 150, hideBelow: BREAKPOINTS.md },
-  { label: '操作', slot: 'actions', width: 180, align: 'right' },
+  { label: '操作', slot: 'actions', width: 220, align: 'right' },
 ]
 
 // ---- 删除（FR-004）：useConfirm 一行全流程；409 WORKFLOW_IN_USE 由拦截器弹 ----

@@ -1,7 +1,9 @@
 /**
  * 工作流图配置的纯逻辑收敛（无 Vue 依赖，本篇全部业务规则的家）：
  * 类型与节点类型常量、预填示例、key 生成、起始节点迁移、
- * JSON 文本 ↔ GraphConfig 解析/序列化（结构校验）、提交组装。
+ * JSON 文本 ↔ GraphConfig 解析/序列化（结构校验）、提交组装；
+ * spec 010 增量：详情转换（detailToGraphConfig）、Schema 行表单校验
+ * （schemaFieldsError）、更新组装（buildUpdatePayload，PUT 不带 type）。
  *
  * 数据源边界（spec FR-007 / analyze F1 定读 b）：JSON 编辑器文本只序列化
  * start_node_key/nodes/edges；type/name/description 与 input_schema/output_schema
@@ -16,6 +18,8 @@
 import type {
   CreateWorkflowData,
   SchemaField,
+  UpdateWorkflowData,
+  WorkflowDetail,
   WorkflowEdgeData,
   WorkflowNodeData,
   WorkflowType,
@@ -39,10 +43,6 @@ export type GraphEdge = WorkflowEdgeData
 
 export type GraphParseResult =
   | { ok: true; config: GraphConfig }
-  | { ok: false; error: string }
-
-export type SchemaParseResult =
-  | { ok: true; fields: SchemaField[] }
   | { ok: false; error: string }
 
 // ---- 节点类型常量（画布面板五类；后端全集 7 类，其余手写 JSON 可携带、透传） ----
@@ -91,6 +91,14 @@ export const PREFILL_GRAPH: GraphConfig = {
     { key: 'end', type: 'end', name: '结束', config: {} },
   ],
   edges: [{ source_node_key: 'classify', target_node_key: 'end' }],
+}
+
+/** 预填示例深拷贝（创建第二步初始图）：serialize→parse 往返产生全新对象树——
+ *  画布 / 检查器编辑的是 config 引用，直传模块级常量会被污染（research #7） */
+export function prefillGraphCopy(): GraphConfig {
+  const r = parseGraphConfig(serializeGraphConfig(PREFILL_GRAPH))
+  if (!r.ok) throw new Error(`PREFILL_GRAPH 非法：${r.error}`) // 模块内常量恒合法，防御性兜底
+  return r.config
 }
 
 // ---- 节点 key 生成：`${type}_${n}`，n 从 1 递增至画布内唯一 ----
@@ -200,43 +208,6 @@ export function serializeGraphConfig(config: GraphConfig): string {
   )
 }
 
-// ---- task 型 schema 解析（data-model §5：数组 + 元素形状 + type 合法；空文本 = 空） ----
-
-export function parseSchemaFields(text: string): SchemaParseResult {
-  if (!text.trim()) return { ok: true, fields: [] }
-  let raw: unknown
-  try {
-    raw = JSON.parse(text)
-  } catch (e) {
-    return { ok: false, error: syntaxErrorMessage(e) }
-  }
-  if (!Array.isArray(raw)) return { ok: false, error: 'schema 必须是 JSON 数组' }
-  const fields: SchemaField[] = []
-  for (let i = 0; i < raw.length; i++) {
-    const f = raw[i]
-    if (!isRecord(f)) return { ok: false, error: `schema[${i}] 必须是对象` }
-    if (typeof f.name !== 'string' || !f.name) {
-      return { ok: false, error: `schema[${i}] 缺少非空字符串字段 name` }
-    }
-    if (
-      f.type !== 'string' &&
-      f.type !== 'number' &&
-      f.type !== 'boolean'
-    ) {
-      return { ok: false, error: `schema[${i}].type 必须是 string/number/boolean` }
-    }
-    if (typeof f.required !== 'boolean') {
-      return { ok: false, error: `schema[${i}] 缺少布尔字段 required` }
-    }
-    const field: SchemaField = { name: f.name, type: f.type, required: f.required }
-    if (typeof f.description === 'string' && f.description) {
-      field.description = f.description
-    }
-    fields.push(field)
-  }
-  return { ok: true, fields }
-}
-
 // ---- 提交前校验（空图 / 起始节点；后端图校验 R3/R1 的前端预检） ----
 
 export function graphSubmitError(config: GraphConfig): string | null {
@@ -270,8 +241,86 @@ export function buildCreatePayload(a: CreateAssembly): CreateWorkflowData {
   }
   if (a.description.trim()) data.description = a.description.trim()
   if (a.type === 'task') {
-    if (a.inputSchema) data.input_schema = a.inputSchema
-    if (a.outputSchema) data.output_schema = a.outputSchema
+    if (a.inputSchema?.length) data.input_schema = a.inputSchema
+    if (a.outputSchema?.length) data.output_schema = a.outputSchema
+  }
+  return data
+}
+
+// ---- 详情 → 图配置（spec 010：GET 回填唯一入口；data-model §2/§4） ----
+
+/**
+ * WorkflowDetail → GraphConfig：name 空串省略键（不变量 4：与后端零值 "" 序列化
+ * 等价）、condition null 省略键（不变量 2）、config 整对象引用直传（不变量 1：
+ * 未知键透传的根基）；schema 不进 GraphConfig（表单 / 详情表单独持有）。
+ */
+export function detailToGraphConfig(d: WorkflowDetail): GraphConfig {
+  return {
+    start_node_key: d.start_node_key,
+    nodes: d.nodes.map((n) => {
+      const node: GraphNode = { key: n.key, type: n.type, config: n.config }
+      if (n.name) node.name = n.name
+      return node
+    }),
+    edges: d.edges.map((e) => {
+      const edge: GraphEdge = {
+        source_node_key: e.source_node_key,
+        target_node_key: e.target_node_key,
+      }
+      if (e.condition) edge.condition = e.condition
+      return edge
+    }),
+  }
+}
+
+// ---- Schema 行表单校验（spec 010：对齐后端 ValidateSchemaFields 三规则，SC-004） ----
+
+const SCHEMA_FIELD_TYPES: readonly string[] = ['string', 'number', 'boolean']
+
+/** 行表单校验：name trim 非空、不重名、type 限三值；错误文案带行号（1 起）。
+ *  type 运行时可能越界（非法历史数据回填——TS 类型不设防，axios 不校验）。 */
+export function schemaFieldsError(fields: SchemaField[]): string | null {
+  const seen = new Set<string>()
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i]
+    const name = f.name.trim()
+    if (!name) return `第 ${i + 1} 行字段：name 不能为空`
+    if (seen.has(name)) return `第 ${i + 1} 行字段：name 重复（${name}）`
+    seen.add(name)
+    if (!SCHEMA_FIELD_TYPES.includes(f.type)) {
+      return `第 ${i + 1} 行字段：type 必须是 string/number/boolean（当前值：${String(f.type)}）`
+    }
+  }
+  return null
+}
+
+// ---- 编辑提交组装（spec 010：PUT 整图替换；data-model 不变量 5） ----
+
+export interface UpdateAssembly {
+  name: string
+  description: string
+  /** 仅作 task/chat 分支判定，不组装进 payload（后端 Type *string 携带即拒，同值也拒） */
+  type: WorkflowType
+  graph: GraphConfig
+  /** 仅 task 型传入 */
+  inputSchema?: SchemaField[]
+  outputSchema?: SchemaField[]
+}
+
+/** PUT 组装：请求体不出现 type 键（组装层闸，与 UpdateWorkflowData 类型层双闸）；
+ *  task 型带 schema（空数组 = 清空）、chat 型不带；config 引用直传（外键字符串
+ *  保形零转换）。description 恒携带（可清空——区别于创建侧的空省略）。 */
+export function buildUpdatePayload(a: UpdateAssembly): UpdateWorkflowData {
+  const data: UpdateWorkflowData = {
+    name: a.name.trim(),
+    description: a.description.trim(),
+    start_node_key: a.graph.start_node_key,
+    nodes: a.graph.nodes,
+    edges: a.graph.edges,
+  }
+  if (a.type === 'task') {
+    data.input_schema = a.inputSchema ?? []
+    data.output_schema = a.outputSchema ?? []
   }
   return data
 }
