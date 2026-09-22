@@ -46,15 +46,15 @@
 - **Rationale**: 五类节点配置面板才是差异化主体，画布节点本身用默认形状 + class 着色已满足辨识需求；自定义节点组件是画布高级能力（spec 明确不做的范围精神）。
 - **Alternatives**: CustomNode 组件每类型一个（工作量 ×5，收益边际）。
 
-## 8. 外键数值化时点：提交组装统一转换
+## 8. 外键形态：全链路字符串保形（2026-09-22 实现期修正）
 
-- **Decision**: 画布编辑与 JSON 文本中 `config.model_id` / `config.workflow_id` 保持字符串形态（与后端响应一致）；仅在提交组装请求体时 deep-walk nodes 统一 `Number()` 转数值（FR-011）。
-- **Rationale**: 单一转换点避免模式切换时来回转换的精度/状态问题；字符串↔数值边界只出现在 api 层组装处。
-- **Alternatives**: 选择即转数值（双模式共享模型里 JSON 序列化会出现数字，与后端 GET 返回的字符串形态不一致，往返比对困惑）。
+- **Decision**: `config.model_id` / `config.workflow_id` 从 JSON 文本、画布编辑到提交请求体**全程字符串**，零转换（后端 NodeConfig 带 `,string` tag 要字符串，数值形 400——schema.go 与两份手测文档三源一致；原「提交时 Number() 数值化」系对后端契约的误读，已在实现期停点向用户报告并拍板修正）。
+- **Rationale**: 三源一致的冻结契约是唯一事实；字符串保形同时消除转换边界与精度问题，往返一致性（SC-006）天然成立。
+- **Alternatives**: 提交时数值化（已被否决：与 `,string` tag 相反，含 llm/workflow 节点的创建必 400）。
 
 ## 9. 图配置纯逻辑收敛：graph.ts
 
-- **Decision**: [web/src/views/workflow/graph.ts](../../../web/src/views/workflow/graph.ts) 收敛全部纯逻辑（无 Vue 依赖）：`GraphConfig` 类型、预填示例常量、节点 key 生成（`${type}_${n}` 计数器保证唯一）、起始节点迁移规则（删起始节点 → 迁移到剩余首节点；清空 → 置空）、JSON↔画布模型双向转换、自动布局坐标计算、提交组装（含外键数值化）。
+- **Decision**: [web/src/views/workflow/graph.ts](../../../web/src/views/workflow/graph.ts) 收敛全部纯逻辑（无 Vue 依赖）：`GraphConfig` 类型、预填示例常量、节点 key 生成（`${type}_${n}` 计数器保证唯一）、起始节点迁移规则（删起始节点 → 迁移到剩余首节点；清空 → 置空）、JSON↔画布模型双向转换、自动布局坐标计算、提交组装（外键字符串保形，#8）。
 - **Rationale**: 解析/序列化/规则是本篇全部业务逻辑，与渲染解耦后组件只剩交互绑定；未来若引入前端测试，此文件是天然单测面。
 - **Alternatives**: 逻辑散在组件里（双向转换逻辑重复、无法集中审查往返一致性 SC-006）。
 

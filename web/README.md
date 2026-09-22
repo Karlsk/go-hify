@@ -15,8 +15,13 @@
 | Vue Router | ^5.2 | 路由 |
 | Pinia | ^4.0 | 状态管理 |
 | axios | ^1.19 | REST 请求（**SSE 不走 axios**） |
+| @vue-flow/core | ^1.48 | 工作流拖拽画布（仅 spec 009 编排页使用） |
+| @vue-flow/background | ^1.3 | 画布网格背景 |
+| @vue-flow/controls | ^1.1 | 画布缩放 / 居中控件 |
 
 > Element Plus 选全量引入而非 unplugin 按需：内部工具不抠 bundle 体积，省掉 auto-imports.d.ts / components.d.ts 的配置与噪音，一人维护下最省心。前端构建产物由 nginx 长缓存托管，体积不进运行时关键路径。
+
+> Vue Flow 只服务工作流拖拽编排（spec 009 双模式之一）：选久经考验的现成画布而非手写（宪法「现成方案优先」）；样式在 `main.ts` 全局引入（core style/theme-default + controls）。
 
 ## 目录结构
 
@@ -57,7 +62,8 @@ web/
     │   └── index.ts        # Result 信封 / PageQuery / PageResult 等公共类型
     ├── api/
     │   ├── auth.ts          # Auth 模块 API 层：登录/注册/注销/me（cookie 会话，token 不经前端）
-    │   └── provider.ts     # Provider 模块 API 层：类型 + 请求方法（对齐后端 api 契约，唯一事实源）
+    │   ├── provider.ts      # Provider 模块 API 层：类型 + 请求方法（对齐后端 api 契约，唯一事实源）
+    │   └── workflow.ts      # Workflow 模块 API 层：类型 + 列表/创建/删除/发布/停用
     └── views/
         ├── auth/
         │   ├── LoginView.vue     # 登录页（bare：无 chrome 分栏布局，回跳 redirect）
@@ -65,6 +71,13 @@ web/
         ├── provider/ProviderList.vue
         ├── agent/AgentList.vue
         ├── chat/ChatView.vue
+        ├── workflow/
+        │   ├── WorkflowList.vue       # 工作流列表：三态 tag / 删除 / 发布停用（HifyTable 偏移分页）
+        │   ├── WorkflowCreate.vue     # 创建页：表单 + JSON/拖拽双模式配置区
+        │   ├── graph.ts               # 图配置纯逻辑（无 Vue 依赖）：类型 / 解析序列化 / 画布双向转换 / 提交组装
+        │   ├── JsonConfigEditor.vue   # JSON 编辑器：textarea + 格式化 + 校验态（供提交与切模式判定）
+        │   ├── CanvasEditor.vue       # 拖拽画布：Vue Flow + 左侧五类节点面板（DnD / 连线 / 删除 / 起始标识）
+        │   └── NodeInspector.vue      # 右侧检查器：按节点类型分化表单 + 连线 condition 标签编辑
         └── design/
             ├── DesignTokens.vue      # 设计 token 预览页（/design，不进菜单）
             └── ComponentsDemo.vue    # 公共组件演示区（mock 数据，/design 末节）

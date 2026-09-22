@@ -27,7 +27,7 @@
   "type": "chat",                     // 表单，chat|task 必填
   "start_node_key": "llm_1",          // 图配置
   "nodes": [                          // 图配置；config 外键数值化见下
-    { "key": "llm_1", "type": "llm", "name": "分类", "config": { "model_id": 1, "prompt": "…" } }
+    { "key": "llm_1", "type": "llm", "name": "分类", "config": { "model_id": "1", "prompt": "…" } }
   ],
   "edges": [
     { "source_node_key": "llm_1", "target_node_key": "end_1", "condition": "ORDER_QUERY" }
@@ -40,7 +40,7 @@
 组装规则：
 
 - 图配置（start_node_key/nodes/edges[/schema]）与表单字段（name/description/type）合并——双模式共享单一图配置数据源（FR-007），JSON 模式不含 type/name/description。
-- **外键数值化**：组装时对每个 node 的 `config.model_id` / `config.workflow_id` 字符串 → `Number()`（后端 uint64 无 `,string` tag，字符串 400）。编辑态/JSON 态保持字符串（与后端响应一致）。
+- **外键字符串保形**（2026-09-22 实现期修正，原文「数值化」系误读）：node 的 `config.model_id` / `config.workflow_id` 原样传字符串（后端 NodeConfig 带 `,string` tag，数值形 400——schema.go 与两份手测文档一致）；JSON 态/画布态/提交态同形，零转换。
 - schema 键：task 型携带（可为空数组或省略）；chat 型**整体不带**（强不变量，带上非空即 400）。
 
 ## 3. 响应消费（既有信封）

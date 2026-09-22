@@ -36,7 +36,7 @@ interface CreateWorkflowData {
 }
 ```
 
-**外键数值化**（FR-011）：`nodes[].config.model_id` / `nodes[].config.workflow_id` 在此形态必须为 `number`（后端 Go uint64 无 `,string` tag，字符串 400）——组装时转换，见 §3。
+**外键字符串保形**（FR-011，2026-09-22 实现期修正）：`nodes[].config.model_id` / `nodes[].config.workflow_id` 在请求体保持**字符串**（后端 NodeConfig 带 `,string` tag，数值形 400——[internal/workflow/api/schema.go](../../../internal/workflow/api/schema.go) 与两份手测文档一致）；JSON 编辑器与画布下拉本就持字符串，组装零转换。
 
 ### SchemaField（task 型 input/output schema 元素）
 

@@ -115,7 +115,7 @@
 - **FR-008**: JSON 模式：textarea 类编辑器预填智能客服分类工作流示例（对齐 workflow-manual-test.md §4：llm→end 线性图、chat 型）；「格式化」按钮美化缩进（非法 JSON 提示错误且原文不变）；提交前合法性校验，非法阻断提交并提示。
 - **FR-009**: 拖拽模式画布：左侧节点面板五类（llm/end/condition/api/workflow，对齐后端 NodeType 全集）；拖入画布、拖拽连线、删除节点/删除连线、节点可移动；起始节点可视化标识（默认第一个放入的节点，可改），对应后端必填 start_node_key。
 - **FR-010**: 节点配置面板（点击节点展开，按类型分化）：llm = 模型下拉（数据源：模型列表接口，capability=chat）+ prompt 文本域；end = output 文本域；condition = expression 文本域；api = url + method；workflow = 子工作流下拉（数据源：workflow 列表接口，仅 task 型）+ inputs 键值映射编辑；选中连线时右侧面板可编辑该边的 condition 标签（condition 节点出边用）。
-- **FR-011**: 提交组装：请求体 {name, description?, type, start_node_key, nodes, edges, [input_schema, output_schema]}；外键数值化（节点 config.model_id / config.workflow_id 转数值——后端 Go uint64 无 `,string` tag，传字符串 400）；成功 notifySuccess + 跳回 /workflows；失败留在当前页（拦截器弹错）。
+- **FR-011**: 提交组装：请求体 {name, description?, type, start_node_key, nodes, edges, [input_schema, output_schema]}；节点 config 外键（model_id / workflow_id）**保持字符串形态**（后端 NodeConfig 字段带 `,string` tag，值须为字符串——〔2026-09-22 实现期修正〕原「数值化 Number()」系对后端契约的误读，schema.go 与两份手测文档三源一致均为字符串形如 `"model_id":"1"`，数值形反而 400）；成功 notifySuccess + 跳回 /workflows；失败留在当前页（拦截器弹错）。
 - **FR-012**: 视觉纪律与空值约定：业务代码只引用 --hf-* 语义 token，禁硬编码色值/圆角/阴影；列表空 []、字符串空 ""（web/README.md 设计系统与字段命名节）。
 - **FR-013**: 文档同步：① CLAUDE.md《不做什么》修订「不做可视化工作流拖拽编排」条目（改为：可视化拖拽编排已交付 spec 009 双模式；用户 2026-09-21 已批准）；② 宪法 Principle I 同条目随动同步（宪法治理条款：先 CLAUDE.md 后宪法，版本升 MINOR——范围调整非原则删除）；③ web/README.md 目录结构补 workflow 页与画布组件；④ docs/testing/ 新增 workflow-frontend-manual-test.md 冒烟文档。
 - **FR-014**: 列表行生命周期操作：发布（draft/disabled → published）与停用（published → disabled），各带确认框（停用文案提示绑定 agent 的会话将不可用），调用 POST /workflows/{id}/publish 与 /disable（后端幂等）；成功后刷新表格、状态 tag 即时更新。

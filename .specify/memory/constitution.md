@@ -1,21 +1,17 @@
 <!--
 Sync Impact Report
 ==================
-- Version change: 0.0.0（未批准的空模板） → 1.0.0（首次批准）
-  理由：初始版本；模板默认 5 条原则，按 CLAUDE.md 内容扩充为 7 条（属首次定稿，非修订）。
-- Modified principles: 无（首次生成，以下全部为新增）
-- Added sections:
-  - Core Principles（I~VII，共 7 条）
-  - 技术与架构约束
-  - 开发工作流与质量门
-  - Governance
+- Version change: 1.0.0 → 1.1.0
+  理由：Principle I「明确不做」清单移除「可视化工作流拖拽编排」——范围调整
+  （非原则删除），随 CLAUDE.md《不做什么》同条目先行修订而随动同步（治理条款：
+  先 CLAUDE.md 后宪法）。触发源：用户 2026-09-21 批准 spec 009 交付 JSON / 拖拽
+  双模式前端（FR-013②）。
+- Modified principles: I（Simplicity First）——「明确不做」清单范围调整；
+  拖拽编排以久经考验的 Vue Flow 落地，仍符合「现成方案优先」。
+- Added sections: 无
 - Removed sections: 无
-- Templates requiring updates:
-  - .specify/templates/plan-template.md — ✅ 无需更新（"Constitution Check" 由 /speckit-plan 按本文件动态生成）
-  - .specify/templates/spec-template.md — ✅ 无需更新（通用占位模板，逐特性填充）
-  - .specify/templates/tasks-template.md — ✅ 无需更新（通用占位模板，逐特性填充）
-  - .specify/templates/commands/*.md — ✅ 目录不存在，跳过
-- Follow-up TODOs: 无（全部占位符已填充；RATIFICATION_DATE 取首次生成日）
+- Templates requiring updates: 无（七条原则与治理条款未动，仅清单项调整）
+- Follow-up TODOs: 无（受影响文档 CLAUDE.md 已先行修订；web/README.md 随 spec 009 补录）
 -->
 
 # Hify Constitution
@@ -31,8 +27,10 @@ Hify 是简化版 Dify 的 AI Agent 开发平台：一人开发、本地 Docker 
 一切决策的前提：一个人开发，好维护优先，不追求大厂级架构。
 
 - 规模匹配：20-50 人、峰值 3-5 QPS、单实例 2C4G 足够；禁止为想象中的规模过度设计。
-- 明确不做：可视化工作流拖拽编排、多租户/权限体系、插件市场、计费系统、微调、
-  标注、WebApp 发布/嵌入组件、多种部署形态。
+- 明确不做：多租户/权限体系、插件市场、计费系统、微调、标注、
+  WebApp 发布/嵌入组件、多种部署形态。
+  （可视化工作流拖拽编排原列「不做」，经用户 2026-09-21 批准后由 spec 009
+  交付 JSON / 拖拽双模式，已移出本清单——后端配置契约仍为 JSON 不变。）
 - 降级做：RAG 一期只支持 TXT/MD 纯文本（递归分割三级降级 + MD 围栏原子保护）；
   工作流仅 JSON 配置、线性 + 条件分支。
 - 任何偏离本原则的复杂度（引入第 4 个项目、非必要抽象层）MUST 在 plan.md 的
@@ -189,4 +187,4 @@ mcp / auth 各一个模块，共享基建下沉 platform。业务代码全部放
 - 原则 MUST 可测试、可判定：凡以「禁止清单」形式表达的规则一律作为 review
   checklist 项，禁止含糊表述（"应该" → MUST / SHOULD 并给出理由）。
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-17
+**Version**: 1.1.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-22

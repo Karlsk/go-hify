@@ -27,6 +27,10 @@
           <el-icon><User /></el-icon>
           <template #title>Agent 管理</template>
         </el-menu-item>
+        <el-menu-item index="/workflows">
+          <el-icon><Connection /></el-icon>
+          <template #title>工作流管理</template>
+        </el-menu-item>
         <el-menu-item index="/knowledge-bases">
           <el-icon><Document /></el-icon>
           <template #title>知识库管理</template>
@@ -96,6 +100,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDown,
   ChatDotRound,
+  Connection,
   Document,
   Expand,
   Fold,
