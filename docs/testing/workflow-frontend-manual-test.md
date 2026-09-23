@@ -1,8 +1,8 @@
 # Workflow 前端人工冒烟测试
 
-验证对象：`web/` 工作流管理前端——`/workflows` 列表与创建流程（spec 009，JSON/拖拽双模式）+ 详情 / 编辑 / 两步式创建（spec 010 增补，见 §7）。
+验证对象：`web/` 工作流管理前端——`/workflows` 列表与创建流程（spec 009，JSON/拖拽双模式）+ 详情 / 编辑 / 两步式创建（spec 010 增补，见 §7）+ 拖拽编辑器八项增强（spec 012 增补，见 §8）。
 全部为手工浏览器步骤；自动化门槛为 `cd web && npm run type-check && npm run build`（SC-001）。
-行为依据：[specs/009-workflow-frontend/spec.md](../../specs/009-workflow-frontend/spec.md)（FR-001~FR-014、SC-004/SC-006、Edge Cases 11 项）与 [specs/010-workflow-frontend-detail-edit/spec.md](../../specs/010-workflow-frontend-detail-edit/spec.md)（FR-001~FR-017、Edge Cases 12 项）。
+行为依据：[specs/009-workflow-frontend/spec.md](../../specs/009-workflow-frontend/spec.md)（FR-001~FR-014、SC-004/SC-006、Edge Cases 11 项）与 [specs/010-workflow-frontend-detail-edit/spec.md](../../specs/010-workflow-frontend-detail-edit/spec.md)（FR-001~FR-017、Edge Cases 12 项）与 [specs/012-workflow-editor-enhancements/spec.md](../../specs/012-workflow-editor-enhancements/spec.md)（FR-001~FR-009、SC-001~SC-005）。
 
 - 页面入口：侧边栏「工作流管理」（登录后可见；未登录访问跳登录见 §5 EC-11）
 - 后端：workflow spec 01~08 已交付（8 端点）；接口层冒烟见 [workflow-manual-test.md](workflow-manual-test.md)
@@ -171,7 +171,7 @@
 
 1. 列表行点「查看」→ `/workflows/:id`：基础信息齐全（名称 / 描述 / 类型 / 状态 / 创建时间），**默认画布**渲染图编排
 2. task 型：入参 / 出参 Schema 只读表正确展示；chat 型：无 Schema 区（FR-003）
-3. 画布上拖节点 / 拖入 / 连线 / 双击设起始 → 均无效；平移缩放可用；切 JSON → 美化只读文本与画布一致（FR-004/005）
+3. 画布上拖节点 / 拖入 / 连线 → 均无效；平移缩放可用；切 JSON → 美化只读文本与画布一致（FR-004/005）
 4. 访问不存在 id（如 `/workflows/999999`）→ 错误提示 + 回列表
 5. 点「编辑」→ 进入编辑页（FR-006）
 
@@ -202,7 +202,7 @@
 | EC-17 | 第二步直访 / 刷新 | §7.1 步骤 5 | 回第一步 |
 | EC-18 | 已发布编辑不降级 | §7.3 步骤 8 | status 保持 published |
 | EC-19 | 脏态守卫条件性 | §7.3 步骤 6（无修改不弹）+ 步骤 7（有修改拦）+ 步骤 2（保存成功跳转不弹） | 仅编辑内容有变化时拦 |
-| EC-20 | 画布只读禁用集 | §7.2 步骤 3 | 拖入 / 删除 / 连线 / 双击 / 检查器全禁，平移缩放可用 |
+| EC-20 | 画布只读禁用集 | §7.2 步骤 3 | 拖入 / 删除 / 连线 / 检查器全禁，平移缩放可用 |
 | EC-21 | 并发编辑整图覆盖 | 两个标签开同一工作流编辑页 → 各改一处 → 依次保存 | 后保存者整图覆盖（前端不做冲突检测，后端整图替换语义） |
 | EC-22 | 编辑页加载失败 | 停后端（或断网）后进编辑页 | loading 态 → 错误提示 + 回列表 |
 | EC-23 | 操作列不过载 | 列表页查看操作列 | 查看 / 编辑 / 发布或停用 / 删除四链接平铺，列宽 220 不换行 |
@@ -215,3 +215,90 @@
 - [ ] 脏态守卫双通道（§7.3 步骤 6~7）
 - [ ] 双模式三处一致性抽查（§7.4）
 - [ ] Edge Cases 12 项全过（§7.5）
+
+## 8. spec 012 增补：拖拽编辑器八项增强（六场景 + 八项缺口逐项 + 载荷回读 + 既有 EC 全数复测）
+
+交付面：纯前端 `web/src/views/workflow/`——`graph.ts` / `CanvasEditor.vue` / `NodeInspector.vue` / **`TemplateField.vue`（新增）** / `GraphModeEditor.vue` / `WorkflowEdit.vue` / `WorkflowOrchestrate.vue`；后端零改动，提交载荷形态不变（SC-003）。
+行为依据：[specs/012-workflow-editor-enhancements/spec.md](../../specs/012-workflow-editor-enhancements/spec.md)（FR-001~FR-009、SC-001~SC-005）与 [quickstart.md](../../specs/012-workflow-editor-enhancements/quickstart.md) 场景 1~6（本节即其正式人工用例）。
+前置同 §0，追加造数：
+
+1. task 型工作流 T1，`input_schema` 带字段 `q`（type=string）
+2. 三个 task 型子工作流候选：S1 `input_schema = [question, top_k]`、S2 `input_schema = [question, lang]`（同名保留验证）、S3 无 schema（提示验证）
+3. 一个 chat 型工作流（§8.5 步骤 4 入参出参面板核对）
+4. 一张上游含 workflow 节点并绑定 S1 的图（§8.2 步骤 5 子流程出参分组）
+
+### 8.1 场景 A（US1）：可见删除入口 + 节点 Key 改名（缺口 ①③）
+
+1. 拖入 3 节点 A→B→C 并连线 → 选中 B → 检查器点「删除节点」→ 预期：B 与其两条连线消失、A/C 间无悬挂边；切 JSON 图主体无 B（FR-001）
+2. 选中起始节点 A →「删除节点」→ 预期：起始迁移到剩余**首个**节点（「起始节点」下拉与强调边框随动）
+3. 选中连线 → 检查器连线表单 →「删除连线」→ 预期：连线消失
+4. 选中 `llm_1` → Key 改为 `classify` → 预期：节点 / 连线端点 / 起始指向 / 位置随动；切 JSON 旧 key 零残留（含 `edges`）；切回拖拽位置不变（positions 不泄入配置）（FR-003）
+5. 与现存 key 冲突（把另一节点改为 `classify`）、或清空 Key → 预期：前端拦截提示、图不变
+6. Key 与原值相同 → 预期：无变化（幂等）
+
+### 8.2 场景 B（US2）：变量引用下拉 + 手写混排（缺口 ⑦⑧）
+
+1. T1 图（task 型、`input_schema` 含 q）上游已有节点 → LLM Prompt 点变量下拉 → 预期分组：入参（`{{input}}`、`{{input.q}}`）/ 上游节点（祖先 key）/ 子流程出参（上游 workflow 节点绑定后为 `{{key.field}}`）（FR-007）
+2. 文本中间放光标、手写前后缀 → 下拉选 `{{input.q}}` → 预期：插入在**光标处**，前后文本不动
+3. 纯手写 `{{任意}}` → 预期：不被清洗 / 校验拦截（手写零干预）
+4. chat 型图（无 input_schema）→ 预期：下拉只有 `{{input}}` 与上游引用，无入参展开组
+5. 上游 workflow 节点绑定子流程后重开下拉 → 预期：出参分组出现（首次拉取短暂 loading，再次打开缓存命中）
+6. 全部模板字段逐一打开下拉核对行为一致（FR-008）：LLM System Prompt / Prompt、end Output、condition Expression、API URL / Body / Header 值、子流程入参值
+
+### 8.3 场景 C（US3）：LLM 双输入框 + API 全要素（缺口 ④⑤）
+
+1. LLM 节点填 System Prompt「你是分类器」+ Prompt「分类：{{input.q}}」→ 切 JSON → 预期 `config` 含 `system_prompt` / `prompt` 两键（FR-004）
+2. 清空 System Prompt → 切 JSON → 预期：**不携带** `system_prompt` 键（空 = 缺省，对齐后端 omitempty）
+3. API 节点 Method 切 POST → Body 域出现；填 Body 模板 + 加 Header 行 `Content-Type=application/json` + Auth 选 Bearer 填 token → 切 JSON → 预期：`config.headers` 含两行（Authorization 值为 `Bearer <token>`）、`config.body` 为模板文本（FR-005）
+4. Auth 切 Basic 填账密 → 预期：headers 仅一条新 Authorization 行（`Basic base64(...)`），旧 Bearer 行无残留；再切「无」→ Authorization 行消失
+5. 保存后详情 / 重新编辑回读 → 预期：Auth 预设正确推导为 Basic、Header 行回显（SC-003 回读项见 §8.6）
+
+### 8.4 场景 D（US4）：子工作流入参自动渲染（缺口 ⑥）
+
+1. 父图 workflow 节点选 S1（`[question, top_k]`）→ 预期：渲染两行入参，字段名只读、值域为模板（可下拉填变量）（FR-006）
+2. question 填 `{{input.q}}` → 切换到 S2（`[question, lang]`）→ 预期：question 行保留已填值，top_k 行消失、lang 行新建（同名保留）
+3. 切到 S3（无 schema）→ 预期：显示提示而非空表单
+4. 编辑工作流 W 自身 → 预期：子工作流下拉**不含 W**；创建态（未落库）→ 不排除（无自身可引用）
+
+### 8.5 场景 E（US5）：起始节点下拉与画布内 Schema 配置（缺口 ②）
+
+1. task 型画布：左面板「起始节点」下拉列出全部节点 key → 选择另一节点 → 预期：主色强调边框迁移到该节点、切 JSON `start_node_key` 随动（entry 由下拉直接指定，画布无伪「开始」节点）
+2. 面板「入参 / 出参」按钮 → 检查器显示入参 / 出参两段行表单（FR-002）
+3. 面板加字段 q → 切两步式第一步（或编辑页 I/O Schema 抽屉）→ 预期：表单已同步出现 q；反向在第一步删 q → 面板同步消失（schema 单源）
+4. chat 型画布 → 点「入参 / 出参」→ 预期：显示单一 `{{input}}` 说明，无编辑控件
+5. readonly 详情态 → 预期：左面板与检查器不渲染、仅起始节点强调边框可见（SC-004）
+
+### 8.6 载荷回读核对（SC-003：Network 面板看提交体 / 保存后详情回读逐键）
+
+- [ ] 图主体 = `{start_node_key, nodes[], edges[]}`，**无伪节点痕迹**（无 `__start__` / `type: "start"` 节点；`start_node_key` 指向真实节点 key）
+- [ ] `config` 键集不越界：llm = `model_id` / `prompt` / `system_prompt`（空则缺省）；api = `method` / `url` / `headers` / `body`（JSON 手写的 `timeout_sec` / `ssl_verify` 等未知键透传保留）；workflow = `workflow_id` / `inputs`；end = `output`；condition = `expression`——**无独立 auth 字段**（Auth 预设落 `headers.Authorization`）
+- [ ] task 型携带 `input_schema` / `output_schema`（与面板 / 第一步表单一致）；chat 型二者均不携带
+- [ ] POST 带 `type`、PUT 不带 `type`（既有双轨隔离不变）
+- [ ] 未知 config 键（手写 `timeout_sec`）拖拽 ↔ JSON 往返 + 保存回读**不丢**
+
+### 8.7 场景 F（US6）：存量回归（EC-1~23 全数复测引用）
+
+1. 按 §5 EC-1~11、§7 EC-12~23 **逐项复测**（编号、步骤、预期以原表为准，此处不复制）：双模式往返一致、未知 config 键透传、脏态守卫双通道、两步式创建、编辑保存链路、只读禁用集（SC-002）
+2. 重点往返：含未知 config 键（如手写 `timeout_sec`）的工作流拖拽 ↔ JSON 切换 → 键不丢
+3. readonly 详情走一遍**全部新增交互入口**——删除节点 / 删除连线 / 改名与 Key 编辑 / 入参出参面板 / 起始节点下拉 / Auth 与 Headers 行 / 子流程下拉与入参行 / 变量下拉 → 零可点、零可改（SC-004）
+
+### 8.8 八项缺口对号（用户 2026-09-22 反馈 ↔ FR ↔ 用例）
+
+| 缺口 | FR | 用例 |
+|---|---|---|
+| ① 节点删除只有 Backspace | FR-001 | §8.1 步骤 1~3 |
+| ② 需 startnode/endnode 配置入参出参 | FR-002 | §8.5 全节 |
+| ③ 节点 key 拖拽界面无法配置 | FR-003 | §8.1 步骤 4~6 |
+| ④ LLM 需 system_prompt / user_prompt 两输入 | FR-004 | §8.3 步骤 1~2 |
+| ⑤ API 节点无 header / auth 配置表单 | FR-005 | §8.3 步骤 3~5 |
+| ⑥ 子工作流选完应自动渲染 input 表单 | FR-006 | §8.4 全节 |
+| ⑦ 引用其他 node 字段需手写 `{{var}}` 难用 | FR-007 | §8.2 步骤 1~5 |
+| ⑧ 需下拉选字段引用 + 可直接手写表单 | FR-007/008 | §8.2 步骤 2~3、6 |
+
+### 8.9 通过标准增补（SC-001~SC-005）
+
+- [ ] 八项缺口均可在画布 / 检查器完成（SC-001）（§8.1~§8.5）
+- [ ] 既有零回归：EC-1~23 全数复测通过（SC-002）（§8.7）
+- [ ] 载荷回读逐键核对通过（SC-003）（§8.6）
+- [ ] readonly 零新增交互（SC-004）（§8.5 步骤 4、§8.7 步骤 3）
+- [ ] 双门禁全绿（SC-005）：`cd web && npm run type-check && npm run build`
