@@ -9,6 +9,8 @@
           <el-icon><ArrowLeft /></el-icon>
           返回列表
         </el-button>
+        <!-- 试运行（spec 013）：只读页无脏态，直接打开；trial=true 放开 draft/disabled -->
+        <el-button v-if="detail" @click="trialVisible = true">试运行</el-button>
         <el-button v-if="detail" type="primary" @click="goEdit">
           <el-icon><Edit /></el-icon>
           编辑
@@ -75,6 +77,9 @@
         <template #header>图编排</template>
         <GraphModeEditor v-if="graph" :initial="graph" default-mode="canvas" readonly />
       </el-card>
+
+      <!-- 试运行对话框（spec 013）：detail 为 GET 已落库版本 -->
+      <WorkflowTrialDialog v-model="trialVisible" :workflow="detail" />
     </template>
   </div>
 </template>
@@ -85,6 +90,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Edit } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import GraphModeEditor from './GraphModeEditor.vue'
+import WorkflowTrialDialog from './WorkflowTrialDialog.vue'
 import { getWorkflowDetail, type WorkflowDetail } from '@/api/workflow'
 import { detailToGraphConfig, type GraphConfig } from './graph'
 
@@ -95,6 +101,9 @@ const loading = ref(true)
 const detail = ref<WorkflowDetail | null>(null)
 /** 图配置初始（detail 加载后一次性转换；GraphModeEditor 挂载一次性消费） */
 const graph = ref<GraphConfig | null>(null)
+
+/** 试运行对话框开关（spec 013） */
+const trialVisible = ref(false)
 
 // 状态三态映射（沿用列表页形态）
 const STATUS_TEXT: Record<string, string> = {

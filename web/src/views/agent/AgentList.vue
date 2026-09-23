@@ -86,6 +86,31 @@
                 </el-option-group>
               </el-select>
             </el-form-item>
+            <!-- 绑定工作流（spec 013 US1）：仅列 chat 型（前端过滤，research D5——
+                 task 型入参是 JSON 对象、聊天纯文本语义对不上）；清空 = ''（不绑定 /
+                 PUT 解绑全量语义）；无 required 规则（绑定恒可选，FR-008） -->
+            <el-form-item label="绑定工作流">
+              <el-select
+                v-model="form.workflowId"
+                clearable
+                :loading="workflowLoading"
+                placeholder="选择对话型工作流（可选）"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="w in workflowOptions"
+                  :key="w.value"
+                  :label="w.label"
+                  :value="w.value"
+                />
+              </el-select>
+              <span class="field-hint">
+                绑定后该 Agent 的对话将直接由工作流处理（不绑定为普通模型对话）
+              </span>
+              <el-text v-if="workflowOptions.length === 0" size="small" type="info">
+                暂无对话型工作流；可先到工作流管理创建
+              </el-text>
+            </el-form-item>
             <el-form-item label="System Prompt" prop="systemPrompt">
               <el-input
                 v-model="form.systemPrompt"
@@ -220,6 +245,7 @@ import {
 } from '@/api/agent'
 import { getModelList, getProviderList, type ModelItem } from '@/api/provider'
 import { getKnowledgeBaseList } from '@/api/rag'
+import { getWorkflowList } from '@/api/workflow'
 
 // ---- 表格 ----
 
@@ -290,6 +316,25 @@ async function loadKbOptions(): Promise<void> {
 /** Temperature 刻度（el-slider marks）：0 / 0.5 / 1 三档参照 */
 const TEMP_MARKS: Record<number, string> = { 0: '0', 0.5: '0.5', 1: '1' }
 
+// ---- 工作流下拉数据源（spec 013：弹窗打开时现拉，只列 chat 型——前端过滤 D5） ----
+
+const workflowOptions = ref<Array<{ value: string; label: string }>>([])
+const workflowLoading = ref(false)
+
+async function loadWorkflowOptions(): Promise<void> {
+  workflowLoading.value = true
+  try {
+    const page = await getWorkflowList({ page: 1, page_size: 100 })
+    workflowOptions.value = page.list
+      .filter((w) => w.type === 'chat')
+      .map((w) => ({ value: w.id, label: w.name }))
+  } catch {
+    // 拦截器已提示；空选项即反馈
+  } finally {
+    workflowLoading.value = false
+  }
+}
+
 // ---- 新增 / 编辑弹窗 ----
 
 /** 表单模型：id='' 为新增；maxOutputTokens null = 跟随模型默认 */
@@ -298,6 +343,8 @@ interface AgentForm {
   name: string
   description: string
   modelId: string
+  /** 绑定工作流 id（'' = 不绑定；提交时转数值，spec 013） */
+  workflowId: string
   systemPrompt: string
   temperature: number
   maxOutputTokens: number | null
@@ -318,6 +365,7 @@ const emptyForm = (): AgentForm => ({
   name: '',
   description: '',
   modelId: '',
+  workflowId: '',
   systemPrompt: '',
   temperature: 0.7,
   maxOutputTokens: null,
@@ -337,8 +385,8 @@ const rules: FormRules = {
 
 function openCreate(): void {
   isEdit.value = false
-  // 先拉模型 / 知识库选项再开弹窗（量小可接受；保持选项新鲜）
-  void Promise.all([loadModelOptions(), loadKbOptions()]).then(() =>
+  // 先拉模型 / 知识库 / 工作流选项再开弹窗（量小可接受；保持选项新鲜）
+  void Promise.all([loadModelOptions(), loadKbOptions(), loadWorkflowOptions()]).then(() =>
     dialogRef.value?.open(),
   )
 }
@@ -346,8 +394,13 @@ function openCreate(): void {
 /** 编辑：列表行无 tool_ids / knowledge_base_ids，先取详情再回填 */
 function openEdit(row: AgentItem): void {
   isEdit.value = true
-  void Promise.all([loadModelOptions(), loadKbOptions(), getAgent(row.id)])
-    .then(([, , detail]) => {
+  void Promise.all([
+    loadModelOptions(),
+    loadKbOptions(),
+    loadWorkflowOptions(),
+    getAgent(row.id),
+  ])
+    .then(([, , , detail]) => {
       dialogRef.value?.open(toForm(detail))
     })
     .catch(() => {
@@ -361,6 +414,7 @@ function toForm(d: AgentDetail): AgentForm {
     name: d.name,
     description: d.description,
     modelId: d.model_id,
+    workflowId: d.workflow_id ?? '',
     systemPrompt: d.system_prompt,
     temperature: d.temperature,
     maxOutputTokens: d.max_output_tokens,
@@ -379,6 +433,8 @@ function onSubmit(form: AgentForm, done: (ok?: boolean) => void): void {
     name: form.name,
     description: form.description,
     model_id: Number(form.modelId),
+    // '' 省键 = 创建不绑定 / PUT 全量解绑；数值 = 绑定（后端 *uint64，踩坑 #8 同型）
+    workflow_id: form.workflowId === '' ? undefined : Number(form.workflowId),
     system_prompt: form.systemPrompt,
     temperature: form.temperature,
     max_output_tokens: form.maxOutputTokens ?? undefined,

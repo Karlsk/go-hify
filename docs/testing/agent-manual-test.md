@@ -254,3 +254,30 @@ jq -c '{code: .error.code}' /tmp/r.json   # → 409 WORKFLOW_IN_USE；解绑（�
 - 404 分发依据是约束名 `fk_agents_workflow`（00018 显式命名）；model 侧约束
   （`agents_model_id_fkey`）仍译 `MODEL_NOT_FOUND`——两者同是 23503，行为不同。
 - 409 `WORKFLOW_IN_USE` 先解绑（PUT agent 缺省 workflow_id）或删 agent，再删 workflow。
+
+## 13. 绑定工作流前端链路（spec 013，2026-09-23 落地，待人工走查）
+
+验证对象：`web/src/views/agent/AgentList.vue` 创建 / 编辑弹窗「基础配置」tab 的
+「绑定工作流」下拉（模型下拉之后，spec 013 US1）与 `web/src/api/agent.ts` 的
+`workflow_id` 类型面。后端契约零改动（接口侧冒烟 = §12）；本节为浏览器步骤。
+前置：§1 起服务 + §2 登录 + 至少一个 chat 型与一个 task 型工作流
+（[workflow-frontend-manual-test.md](workflow-frontend-manual-test.md) §2 / §3 造，
+或 §12 第 1 步 curl 造 chat 型）。对应 quickstart 场景 1 / 4（SC-001 / SC-004）。
+
+1. **chat-only 选项**（FR-001）：Agent 管理 →「创建 Agent」→「基础配置」tab → 模型下拉
+   之后出现「绑定工作流」下拉；展开 → **只出现 chat 型工作流**（task 型不出现，前端过滤）；
+   可清空（×）、非必填（不选可提交，其余字段校验不变）；下方说明文字
+   「绑定后该 Agent 的对话将直接由工作流处理（不绑定为普通模型对话）」
+2. **绑定 / 回显 / 解绑全链路**（FR-001）：选中一个 chat 型工作流 → 提交 → 重新打开
+   该行编辑 → 下拉**回显**绑定；清空（×）→ 提交 → 再开编辑无绑定（PUT 全量解绑）。
+   Network 核对（SC-003）：创建 / 编辑请求体 `workflow_id` 为**数值**；解绑提交该键
+   **缺省**；响应面 `workflow_id` 字符串（`"42"`）或 null——curl 侧等价断言见 §12 步骤 2~3
+3. **并发删除 404 留页**：双标签，A 页打开编辑弹窗、下拉选中工作流 W（尚未提交）；
+   B 页删除 W（此刻无 agent 绑定它，删除不被 409 挡）；回 A 页提交 → 错误提示
+   （WORKFLOW_NOT_FOUND，拦截器统一弹），**弹窗不关、表单内容不丢**
+4. **空态提示**：环境内无 chat 型工作流时打开弹窗 → 下拉下方灰字
+   「暂无对话型工作流；可先到工作流管理创建」；不阻断表单其余字段与提交
+5. **既有字段回归复测**（FR-008 / quickstart 场景 4）：名称 / 模型必填校验、
+   Temperature、最大输出 Token、上下文轮数、系统提示词、启用开关（编辑态）、
+   工具 / 知识库绑定 tab、RAG 参数——行为与提交载荷零变化；列表页分页 /
+   聚合列（model_name / tool_count）/ 删除二次确认照常

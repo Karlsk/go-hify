@@ -3,7 +3,7 @@
  *
  * 字段名直接用后端 JSON snake_case（对齐 api/provider.ts 先例）。
  * ID 序列化为字符串（防 JS 超 2^53 丢精度）——URL 路径参数原样传字符串；
- * 但请求 body 的 model_id / tool_ids 是数值（Go uint64 无 `,string` tag），
+ * 但请求 body 的 model_id / tool_ids / workflow_id 是数值（Go uint64 无 `,string` tag），
  * 提交处用 Number() 转换（踩坑 #8）。
  */
 import { del, get, getList, post, put } from '@/utils/request'
@@ -29,6 +29,8 @@ export interface AgentBase {
   rag_top_k: number
   /** RAG 检索注入相似度过滤阈值（0-1，默认 0.75） */
   rag_min_similarity: number
+  /** 绑定的工作流 id（后端 *string 字符串化；null = 未绑定，spec 05/013） */
+  workflow_id: string | null
   created_at: string
   updated_at: string
 }
@@ -54,6 +56,11 @@ export interface AgentSaveData {
   name: string
   description?: string
   model_id: number
+  /**
+   * 绑定工作流 id（数值——踩坑 #8 同型）。省键 / undefined = 创建不绑定 /
+   * PUT 全量解绑（清空下拉提交即解绑，spec 013）。
+   */
+  workflow_id?: number
   system_prompt?: string
   temperature?: number
   max_output_tokens?: number

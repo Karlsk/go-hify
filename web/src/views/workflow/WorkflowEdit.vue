@@ -30,6 +30,8 @@
         <el-button v-if="type === 'task'" @click="schemaDrawer = true">
           I/O Schema
         </el-button>
+        <!-- 试运行（spec 013）：脏态先阻断（跑的是已保存版本）；入口语义见 openTrial -->
+        <el-button @click="openTrial">试运行</el-button>
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </header>
 
@@ -60,6 +62,10 @@
           <SchemaFieldsEditor v-model="outputSchema" />
         </section>
       </el-drawer>
+
+      <!-- 试运行对话框（spec 013）：detail 为 GET 已落库版本，不随画布编辑变化——
+           「跑已保存版本」由数据源结构性保证（FR-003） -->
+      <WorkflowTrialDialog v-model="trialVisible" :workflow="detail" />
     </template>
   </div>
 </template>
@@ -71,6 +77,7 @@ import { ElMessageBox } from 'element-plus'
 import { ArrowLeft, InfoFilled } from '@element-plus/icons-vue'
 import GraphModeEditor from './GraphModeEditor.vue'
 import SchemaFieldsEditor from './SchemaFieldsEditor.vue'
+import WorkflowTrialDialog from './WorkflowTrialDialog.vue'
 import {
   getWorkflowDetail,
   updateWorkflow,
@@ -205,6 +212,28 @@ onUnmounted(() => {
 // ---- 保存链路（FR-009） ----
 
 const saving = ref(false)
+
+// ---- 试运行入口（spec 013，FR-003）：脏态先阻断——试运行跑的是已保存版本 ----
+
+const trialVisible = ref(false)
+
+async function openTrial(): Promise<void> {
+  if (!isDirty()) {
+    trialVisible.value = true
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      '当前有未保存改动，试运行执行的是已保存版本，请先保存。',
+      '试运行',
+      { type: 'warning', confirmButtonText: '去保存', cancelButtonText: '取消' },
+    )
+  } catch {
+    return // 取消：留页，对话框不开
+  }
+  // 去保存：成功自然跳详情页（可再从详情页试运行）；失败留页——两分支均不开对话框
+  await save()
+}
 
 async function save(): Promise<void> {
   if (saving.value || !detail.value) return

@@ -22,7 +22,7 @@
 
 **Purpose**: 干净基线确认（零项目初始化——既有前端工程、零新增依赖）
 
-- [ ] T001 基线门禁确认：`cd web && npm run type-check && npm run build` 全绿后再开工（不绿停下报告，不在脏基线上动工）
+- [x] T001 基线门禁确认：`cd web && npm run type-check && npm run build` 全绿后再开工（不绿停下报告，不在脏基线上动工）
 
 ---
 
@@ -30,7 +30,7 @@
 
 **Purpose**: US2 / US3 共用的执行 API 客户端（US1 的 agent.ts 类型增量只服务 US1，放 US1 相位）
 
-- [ ] T002 [P] web/src/api/workflow.ts：新增 `NodeRunSummary`（node_key / node_type / status / duration_ms / error_msg——json 键逐字对齐后端 `NodeRunSummary`，不自造）与 `WorkflowRunResult`（run_id / status / output / duration_ms / node_trace）类型；新增 `executeWorkflow(id, input)`：`POST /workflows/{id}/execute?trial=true`、body 单一 `{ input }` 键、`{ timeout: 300_000 }` 覆盖 axios 默认 30s（contracts/api-client.md §1 逐字对齐；research D1）
+- [x] T002 [P] web/src/api/workflow.ts：新增 `NodeRunSummary`（node_key / node_type / status / duration_ms / error_msg——json 键逐字对齐后端 `NodeRunSummary`，不自造）与 `WorkflowRunResult`（run_id / status / output / duration_ms / node_trace）类型；新增 `executeWorkflow(id, input)`：`POST /workflows/{id}/execute?trial=true`、body 单一 `{ input }` 键、`{ timeout: 300_000 }` 覆盖 axios 默认 30s（contracts/api-client.md §1 逐字对齐；research D1）
 
 **Checkpoint**: 执行客户端就绪，US2 / US3 可开工
 
@@ -44,9 +44,9 @@
 
 ### Implementation for User Story 1
 
-- [ ] T003 [P] [US1] web/src/api/agent.ts：`AgentBase` 增 `workflow_id: string | null`（响应面，后端 `AgentSchema.WorkflowID *string`）；`AgentSaveData` 增 `workflow_id?: number`（请求面数值——后端 `*uint64` 无 `,string` tag，同 model_id 踩坑 #8；contracts/api-client.md §2）
-- [ ] T004 [US1] web/src/views/agent/AgentList.vue：新增 `loadWorkflowOptions()`（`getWorkflowList({ page: 1, page_size: 100 })` → `.filter(w => w.type === 'chat')`，与 model / kb 选项同策略现拉）；「基础配置」tab 模型下拉后新增 `el-form-item label="绑定工作流"`——el-select clearable + 空态提示「暂无对话型工作流；可先到工作流管理创建」+ 说明文字「绑定后该 Agent 的对话将直接由工作流处理」；`AgentForm` 增 `workflowId: string`（`''` = 不绑定）、`emptyForm` 增 `workflowId: ''`；openCreate / openEdit 并列拉取（contracts/agent-bind-dropdown.md）
-- [ ] T005 [US1] web/src/views/agent/AgentList.vue：`toForm` 增 `workflowId: d.workflow_id ?? ''` 回显；`onSubmit` payload 增 `workflow_id: form.workflowId === '' ? undefined : Number(form.workflowId)`（省键 = 创建不绑定 / PUT 全量解绑；数值 = 绑定）；既有字段与校验零变化（FR-008）
+- [x] T003 [P] [US1] web/src/api/agent.ts：`AgentBase` 增 `workflow_id: string | null`（响应面，后端 `AgentSchema.WorkflowID *string`）；`AgentSaveData` 增 `workflow_id?: number`（请求面数值——后端 `*uint64` 无 `,string` tag，同 model_id 踩坑 #8；contracts/api-client.md §2）
+- [x] T004 [US1] web/src/views/agent/AgentList.vue：新增 `loadWorkflowOptions()`（`getWorkflowList({ page: 1, page_size: 100 })` → `.filter(w => w.type === 'chat')`，与 model / kb 选项同策略现拉）；「基础配置」tab 模型下拉后新增 `el-form-item label="绑定工作流"`——el-select clearable + 空态提示「暂无对话型工作流；可先到工作流管理创建」+ 说明文字「绑定后该 Agent 的对话将直接由工作流处理」；`AgentForm` 增 `workflowId: string`（`''` = 不绑定）、`emptyForm` 增 `workflowId: ''`；openCreate / openEdit 并列拉取（contracts/agent-bind-dropdown.md）
+- [x] T005 [US1] web/src/views/agent/AgentList.vue：`toForm` 增 `workflowId: d.workflow_id ?? ''` 回显；`onSubmit` payload 增 `workflow_id: form.workflowId === '' ? undefined : Number(form.workflowId)`（省键 = 创建不绑定 / PUT 全量解绑；数值 = 绑定）；既有字段与校验零变化（FR-008）
 
 **Checkpoint**: US1 独立可测——绑定 / 回显 / 解绑 / chat-only / 空态 / 404 留页（spec US1 场景 1-5）
 
@@ -60,9 +60,9 @@
 
 ### Implementation for User Story 2
 
-- [ ] T006 [P] [US2] web/src/views/workflow/WorkflowTrialDialog.vue（新组件）：props `modelValue` + `workflow: Pick<WorkflowDetail, 'id' | 'name' | 'type' | 'input_schema'> | null`、emits `update:modelValue`；`watch(modelValue)` 置 true 重置表单 / 结果态；入参三态（A chat 单 textarea 必填 maxlength 16384 + show-word-limit / B task 有 schema 按 SchemaField 行：string→el-input、number→el-input-number、boolean→el-switch，required 动态 rules + scroll-to-error / C task 无 schema 单 textarea 直传）；执行 `run()` 入口 `running` 短路防重复、调 `executeWorkflow`、成功渲染 output（pre-wrap）+ 轨迹表（node_key / node_type / status / duration_ms 执行序）；改参再执行结果刷新（contracts/workflow-trial-dialog.md §2-§4）
-- [ ] T007 [P] [US2] web/src/views/workflow/WorkflowDetail.vue：PageHeader actions「编辑」左侧增「试运行」按钮 + `trialVisible` ref + `<WorkflowTrialDialog v-model="trialVisible" :workflow="detail" />`（只读页无脏态，直接打开）
-- [ ] T008 [US2] web/src/views/workflow/WorkflowEdit.vue：工具栏「保存」左侧增「试运行」按钮；点击先 `isDirty()`（既有快照比对）——脏 → `ElMessageBox.confirm('当前有未保存改动，试运行执行的是已保存版本，请先保存。', { confirmButtonText: '去保存', cancelButtonText: '取消' })`，确认调既有 `save()`、取消留页（对话框不开）；不脏 → `trialVisible = true`；两步式创建第二步（WorkflowOrchestrate.vue）不加入口（FR-003 MUST NOT）
+- [x] T006 [P] [US2] web/src/views/workflow/WorkflowTrialDialog.vue（新组件）：props `modelValue` + `workflow: Pick<WorkflowDetail, 'id' | 'name' | 'type' | 'input_schema'> | null`、emits `update:modelValue`；`watch(modelValue)` 置 true 重置表单 / 结果态；入参三态（A chat 单 textarea 必填 maxlength 16384 + show-word-limit / B task 有 schema 按 SchemaField 行：string→el-input、number→el-input-number、boolean→el-switch，required 动态 rules + scroll-to-error / C task 无 schema 单 textarea 直传）；执行 `run()` 入口 `running` 短路防重复、调 `executeWorkflow`、成功渲染 output（pre-wrap）+ 轨迹表（node_key / node_type / status / duration_ms 执行序）；改参再执行结果刷新（contracts/workflow-trial-dialog.md §2-§4）
+- [x] T007 [P] [US2] web/src/views/workflow/WorkflowDetail.vue：PageHeader actions「编辑」左侧增「试运行」按钮 + `trialVisible` ref + `<WorkflowTrialDialog v-model="trialVisible" :workflow="detail" />`（只读页无脏态，直接打开）
+- [x] T008 [US2] web/src/views/workflow/WorkflowEdit.vue：工具栏「保存」左侧增「试运行」按钮；点击先 `isDirty()`（既有快照比对）——脏 → `ElMessageBox.confirm('当前有未保存改动，试运行执行的是已保存版本，请先保存。', { confirmButtonText: '去保存', cancelButtonText: '取消' })`，确认调既有 `save()`、取消留页（对话框不开）；不脏 → `trialVisible = true`；两步式创建第二步（WorkflowOrchestrate.vue）不加入口（FR-003 MUST NOT）
 
 **Checkpoint**: US2 独立可测——三态入参 / 脏态阻断 / 干净直开 / 两步式无入口（spec US2 场景 1-5）
 
@@ -76,7 +76,7 @@
 
 ### Implementation for User Story 3
 
-- [ ] T009 [US3] web/src/views/workflow/WorkflowTrialDialog.vue：结果呈现完整面——`status === 'failed'` 时 `el-alert type="error"` 文案取 `node_trace` 执行序最后一条非空 `error_msg`（无则「执行失败」）且轨迹表照常展示（中断点可见）；请求失败 catch 写 `errorMsg`（`e instanceof Error ? e.message : '执行失败'`）结果区 el-alert 持久展示（拦截器 toast 照常并存）；轨迹表失败行 `error_msg` 红字 + 总耗时（duration_ms）展示；无裸异常文本（contracts/workflow-trial-dialog.md §3.5）
+- [x] T009 [US3] web/src/views/workflow/WorkflowTrialDialog.vue：结果呈现完整面——`status === 'failed'` 时 `el-alert type="error"` 文案取 `node_trace` 执行序最后一条非空 `error_msg`（无则「执行失败」）且轨迹表照常展示（中断点可见）；请求失败 catch 写 `errorMsg`（`e instanceof Error ? e.message : '执行失败'`）结果区 el-alert 持久展示（拦截器 toast 照常并存）；轨迹表失败行 `error_msg` 红字 + 总耗时（duration_ms）展示；无裸异常文本（contracts/workflow-trial-dialog.md §3.5）
 
 **Checkpoint**: 全故事独立可测——loading 防重复（T006 run 短路）/ 输出 + 轨迹 / 可读错误 / 分支差异（spec US3 场景 1-4）
 
@@ -86,9 +86,9 @@
 
 **Purpose**: 人工验收文档增补 + 收官门禁
 
-- [ ] T010 [P] docs/testing/agent-manual-test.md：增补「绑定工作流」小节——chat-only 选项核对、绑定 / 回显 / 解绑全链路、并发删除 404 留页、空态提示、既有字段回归复测（quickstart 场景 1/4 映射）
-- [ ] T011 [P] docs/testing/workflow-frontend-manual-test.md：增补「试运行」小节——三态入参、载荷 Network 逐键核对（body 单一 input / query trial=true / workflow_id 数值与省键，SC-003）、loading 防重复、输出 + 轨迹、失败文案、分支差异、脏态阻断、两步式无入口（quickstart 场景 2/3 映射）
-- [ ] T012 收官门禁：`cd web && npm run type-check && npm run build` 全绿（SC-005）；对照 quickstart.md 场景 4 核对既有回归人工项清单完整性
+- [x] T010 [P] docs/testing/agent-manual-test.md：增补「绑定工作流」小节——chat-only 选项核对、绑定 / 回显 / 解绑全链路、并发删除 404 留页、空态提示、既有字段回归复测（quickstart 场景 1/4 映射）
+- [x] T011 [P] docs/testing/workflow-frontend-manual-test.md：增补「试运行」小节——三态入参、载荷 Network 逐键核对（body 单一 input / query trial=true / workflow_id 数值与省键，SC-003）、loading 防重复、输出 + 轨迹、失败文案、分支差异、脏态阻断、两步式无入口（quickstart 场景 2/3 映射）
+- [x] T012 收官门禁：`cd web && npm run type-check && npm run build` 全绿（SC-005）；对照 quickstart.md 场景 4 核对既有回归人工项清单完整性
 
 ---
 

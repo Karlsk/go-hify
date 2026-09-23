@@ -8,7 +8,7 @@
  *
  * spec 010 起接详情与更新：GET /workflows/{id}（详情渲染 / 编辑回填）、
  * PUT /workflows/{id}（整图替换；请求体不带 type——后端 Type *string 携带即拒，
- * 同值也拒）。仍未接 execute（执行入口与历史）。
+ * 同值也拒）。spec 013 接试运行执行 executeWorkflow（?trial=true；运行历史查询仍未接）。
  */
 import { del, get, getList, post, put } from '@/utils/request'
 import type { PageQuery } from '@/types'
@@ -126,6 +126,32 @@ export interface UpdateWorkflowData {
   output_schema?: SchemaField[]
 }
 
+// ---- 类型（spec 013：试运行执行结果，contracts/api-client.md §1 逐字对齐） ----
+
+/**
+ * 执行轨迹节点（后端 NodeRunSummary，json 键逐字对齐不自造）。
+ * 成功节点 error_msg 为空串。
+ */
+export interface NodeRunSummary {
+  node_key: string
+  node_type: string
+  status: string
+  duration_ms: number
+  error_msg: string
+}
+
+/**
+ * 单次执行结果（后端 RunResultSchema）。status "failed" = 运行级失败
+ * （HTTP 仍 200，错误在 node_trace 尾部 error_msg）；请求级失败走信封 reject。
+ */
+export interface WorkflowRunResult {
+  run_id: string
+  status: 'succeeded' | 'failed'
+  output: string
+  duration_ms: number
+  node_trace: NodeRunSummary[]
+}
+
 // ---- 请求方法 ----
 
 /** 工作流列表（偏移分页；HifyTable 数据源 / 子工作流下拉前端过滤 task 型） */
@@ -160,4 +186,21 @@ export function getWorkflowDetail(id: string) {
 /** 更新（PUT /workflows/{id}）：整图替换、后保存者覆盖；编辑不降级 status（spec 010） */
 export function updateWorkflow(id: string, data: UpdateWorkflowData) {
   return put<WorkflowDetail>(`/workflows/${id}`, data)
+}
+
+/**
+ * 单次执行工作流（POST /workflows/{id}/execute?trial=true，spec 06 冻结契约、
+ * spec 013 前端消费）。
+ * - 试运行模式：放开 draft / disabled 状态机限制（唯一例外）；run 落库 is_trial=true
+ * - 同步返回（非 SSE）；耗时上界 = 后端 overall 5min = nginx read timeout 300s
+ * - 双失败面：请求级（404 / 503 / 500）走信封 reject（拦截器已 toast）；
+ *   运行级失败返回 200 + status:"failed"（错误在 node_trace 尾部 error_msg）
+ * - timeout 覆盖为 300s：axios 实例默认 30s 会掐断慢工作流（research D1）
+ */
+export function executeWorkflow(id: string, input: string) {
+  return post<WorkflowRunResult>(
+    `/workflows/${id}/execute?trial=true`,
+    { input },
+    { timeout: 300_000 },
+  )
 }

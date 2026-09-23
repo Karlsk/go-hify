@@ -1,8 +1,8 @@
 # Workflow 前端人工冒烟测试
 
-验证对象：`web/` 工作流管理前端——`/workflows` 列表与创建流程（spec 009，JSON/拖拽双模式）+ 详情 / 编辑 / 两步式创建（spec 010 增补，见 §7）+ 拖拽编辑器八项增强（spec 012 增补，见 §8）。
+验证对象：`web/` 工作流管理前端——`/workflows` 列表与创建流程（spec 009，JSON/拖拽双模式）+ 详情 / 编辑 / 两步式创建（spec 010 增补，见 §7）+ 拖拽编辑器八项增强（spec 012 增补，见 §8）+ 试运行对话框与双入口（spec 013 增补，见 §9）。
 全部为手工浏览器步骤；自动化门槛为 `cd web && npm run type-check && npm run build`（SC-001）。
-行为依据：[specs/009-workflow-frontend/spec.md](../../specs/009-workflow-frontend/spec.md)（FR-001~FR-014、SC-004/SC-006、Edge Cases 11 项）与 [specs/010-workflow-frontend-detail-edit/spec.md](../../specs/010-workflow-frontend-detail-edit/spec.md)（FR-001~FR-017、Edge Cases 12 项）与 [specs/012-workflow-editor-enhancements/spec.md](../../specs/012-workflow-editor-enhancements/spec.md)（FR-001~FR-009、SC-001~SC-005）。
+行为依据：[specs/009-workflow-frontend/spec.md](../../specs/009-workflow-frontend/spec.md)（FR-001~FR-014、SC-004/SC-006、Edge Cases 11 项）与 [specs/010-workflow-frontend-detail-edit/spec.md](../../specs/010-workflow-frontend-detail-edit/spec.md)（FR-001~FR-017、Edge Cases 12 项）与 [specs/012-workflow-editor-enhancements/spec.md](../../specs/012-workflow-editor-enhancements/spec.md)（FR-001~FR-009、SC-001~SC-005）与 [specs/013-agent-bind-trial-run/spec.md](../../specs/013-agent-bind-trial-run/spec.md)（FR-001~FR-008、SC-001~SC-005）。
 
 - 页面入口：侧边栏「工作流管理」（登录后可见；未登录访问跳登录见 §5 EC-11）
 - 后端：workflow spec 01~08 已交付（8 端点）；接口层冒烟见 [workflow-manual-test.md](workflow-manual-test.md)
@@ -301,4 +301,78 @@
 - [ ] 既有零回归：EC-1~23 全数复测通过（SC-002）（§8.7）
 - [ ] 载荷回读逐键核对通过（SC-003）（§8.6）
 - [ ] readonly 零新增交互（SC-004）（§8.5 步骤 4、§8.7 步骤 3）
+- [ ] 双门禁全绿（SC-005）：`cd web && npm run type-check && npm run build`
+
+## 9. spec 013 增补：试运行对话框与双入口（详情 / 编辑 + 三态入参 + 载荷逐键 + 状态机例外）
+
+交付面：纯前端 `web/src/views/workflow/`——**`WorkflowTrialDialog.vue`（新增）** / `WorkflowDetail.vue` / `WorkflowEdit.vue`，`web/src/api/workflow.ts` 增 `executeWorkflow`（`?trial=true`、timeout 300s 覆盖 axios 默认 30s）；Agent 绑定下拉走 agent 域，见 [agent-manual-test.md](agent-manual-test.md) §13。后端零改动（execute 与 workflow_id 契约 spec 05/06 已冻结交付）。
+行为依据：[specs/013-agent-bind-trial-run/spec.md](../../specs/013-agent-bind-trial-run/spec.md)（FR-001~FR-008、SC-001~SC-005）与 [quickstart.md](../../specs/013-agent-bind-trial-run/quickstart.md) 场景 2 / 3 / 4。前置同 §0，追加造数：
+
+1. 一个 chat 型工作流（A 态）
+2. 一个 task 型工作流带 input_schema（B 态；建议混排 string / number / boolean 与 description，核对分型控件与行内提示）
+3. 一个无 Schema 的 task 型工作流（C 态直传）
+4. 一个含条件分支的 task 型工作流（§9.3 步骤 3 分支差异；§4.4 condition 连线即可）
+
+### 9.1 场景 A（US2）：详情页入口与三态入参（FR-004）
+
+1. 列表行「查看」进详情 → PageHeader 操作区「编辑」左侧出现「试运行」按钮 → 点击 → 对话框开、标题「试运行：<名称>」
+2. chat 型：单一文本框（placeholder「模拟用户消息」，右下角字数计数，上限 16384）
+3. task 型有 input_schema：按字段行渲染——string→文本框 / number→数字框 / boolean→开关；label=字段名、必填带 `*`、description 行内灰字提示
+4. task 型无 schema：单一文本框（placeholder「输入文本（无入参 Schema，原样传入）」）
+5. 填参执行一次 → 关闭再开 → 输入与结果**全部重置**（每次打开 = 全新试运行）
+
+### 9.2 场景 B（US2/US3）：执行、loading 防重复与校验拦截（FR-005）
+
+1. 填参点「执行」→ 按钮 loading；执行期间连点 → Network **只有一条 POST**（running 短路）；「关闭」按钮同时禁用
+2. A / C 态空输入（或纯空白）点执行 → 提示「请输入消息内容」，不发请求
+3. B 态必填字段缺失 → 表单校验滚动定位到首个缺失行，不发请求
+4. A / C 态文本框 maxlength 截断（计数到顶即止）；B 态字段值组装 JSON 合计超 16384 → 提示「输入超出 16384 字符上限」，不发请求（后端 binding 同值双拦的第二道）
+
+### 9.3 场景 C（US2/US3）：成功结果、轨迹与分支差异（FR-006）
+
+1. 成功执行 → 结果区「输出」多行文本（保留换行、限高滚动）+「执行轨迹」表五列（节点 / 类型 / 状态 / 耗时 / 错误，执行序）+ 标题行「总耗时 N ms」
+2. 不关对话框改参再执行 → 结果区整体刷新为新一次输出与轨迹（旧结果不留存）
+3. 条件分支工作流两次执行（入参分别命中不同分支）→ 两次轨迹表节点序列**可见差异**、输出不同（US3 独立判据）
+4. 轨迹表状态列 tag：succeeded 绿 / 失败红；错误列空值显 `—`
+
+### 9.4 场景 D（US3）：失败两面可读文案（FR-007）
+
+1. **运行失败面**（HTTP 200 + `status:"failed"`）：构造必失败工作流（如 api 节点指向不可达地址、llm 节点模型已被删）→ 执行 → 结果区红色 alert 文案 = 轨迹**执行序最后一条非空 error_msg**（无则「执行失败」）——可读、无裸异常堆栈；轨迹表照常展示（中断点可见、失败行错误列红字）
+2. **请求失败面**（信封 reject）：停后端或断网后点「执行」→ 拦截器 toast（瞬时）+ 结果区**持久**红色 alert 展示信封 message——两者并存不遮蔽
+
+### 9.5 载荷 Network 逐键核对（SC-003）
+
+- [ ] `POST /api/v1/workflows/{id}/execute?trial=true`——query 固定 `trial=true`
+- [ ] 请求体**仅一个** `input` 键：A / C 态 = 纯文本串；B 态 = JSON 对象文本（如 `{"q":"..."}`，未填的 number 键自然省略）
+- [ ] Agent 绑定载荷：创建 / 编辑 `workflow_id` 为数值、解绑缺省该键（详见 [agent-manual-test.md](agent-manual-test.md) §13 第 2 条）
+
+### 9.6 状态机例外：draft / disabled 放行（spec 013 Edge Cases）
+
+1. draft 态工作流（未发布）从详情页「试运行」执行成功——trial 放开状态机限制
+2. disabled 态工作流（列表页「停用」后进详情）同样可试运行 → 执行**不被** WORKFLOW_NOT_PUBLISHED 拒绝——trial 是状态机唯一例外，两态都要人工过
+
+### 9.7 场景 E（US2 场景 2/3/5）：编辑页脏态阻断与两步式无入口（FR-002/FR-003）
+
+1. 编辑页干净态（无修改）→ 工具栏「保存」左侧「试运行」→ **直接开对话框**（无确认框）
+2. 画布任意改动（拖节点 / 改名，制造脏态）→ 点「试运行」→ 确认框「当前有未保存改动，试运行执行的是已保存版本，请先保存。」：
+   - 「取消」→ 留编辑页，对话框不开
+   - 「去保存」→ 走既有保存链路：成功跳详情页（可再从详情页试运行）；失败（如重名 409）留页——两分支均不开试运行对话框
+3. 「去保存」成功后从详情页开试运行 → 执行的是**新保存版本**（两入口 detail 均来自 GET，「跑已落库版本」由数据源结构性保证）
+4. 两步式创建第二步（`/workflows/create/orchestrate`）→ 工具栏**无**「试运行」按钮（FR-003 MUST NOT：未落库无 id）
+
+### 9.8 存量回归引用（SC-004，quickstart 场景 4）
+
+1. 本文档 §5 EC-1~11、§7 EC-12~23、§8.7 按 §8 原步骤复测（编号、预期以原表为准）——试运行为纯增量入口，双模式编辑器 / 脏态守卫 / 两步式创建行为零变化
+2. Agent 表单既有字段回归见 [agent-manual-test.md](agent-manual-test.md) §13 第 5 条
+
+### 9.9 通过标准增补（SC-002~SC-005，对应 quickstart 场景 2 / 3 预期表）
+
+- [ ] 三态入参渲染正确 + 重开重置（SC-002）（§9.1）
+- [ ] loading 防重复 + 校验拦截不发请求（SC-002）（§9.2）
+- [ ] 输出 + 轨迹 + 分支差异（SC-002）（§9.3）
+- [ ] 失败两面文案可读、无裸异常（SC-002）（§9.4）
+- [ ] 载荷逐键核对（SC-003）（§9.5）
+- [ ] draft / disabled 试运行放行（Edge Cases）（§9.6）
+- [ ] 编辑页脏态阻断（去保存 / 取消）+ 两步式无入口（FR-002/FR-003）（§9.7）
+- [ ] 存量回归引用复测（SC-004）（§9.8）
 - [ ] 双门禁全绿（SC-005）：`cd web && npm run type-check && npm run build`
