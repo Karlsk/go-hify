@@ -452,8 +452,173 @@ export interface InspectorNode {
   data?: CanvasNodeData
 }
 
-/** 检查器选中连线的输入面（id 供删除时清选中；label 即 condition 编辑面） */
+/** 检查器选中连线的输入面（id 供删除时清选中；label 即 condition 编辑面；
+ *  source/target 供连线信息展示（spec 012 FR-001 删除入口）——FlowEdge 结构满足） */
 export interface InspectorEdge {
   id?: string
+  source?: string
+  target?: string
   label?: unknown
+}
+
+// ---- 伪「开始」节点标识（FR-002，data-model §1）：仅渲染层与点击判定用 ----
+
+/** 伪「开始」节点 id 常量：永不进 nodes 数组 / 不参与 onNodesChange / 不可序列化 */
+export const START_NODE_ID = '__start__'
+
+/** 伪节点 data.nodeType 占位（后端节点类型全集无 start，与真实节点类型天然互斥） */
+export const START_NODE_TYPE = 'start'
+
+/**
+ * 伪节点上下文判定（id + 占位 type 双条件）：真实节点即使 key 被改成 `__start__`
+ * （type ≠ start）也不会被误判成伪节点、误切检查器面板模式。
+ */
+export function isStartContextNode(node: InspectorNode | null | undefined): boolean {
+  return node?.id === START_NODE_ID && node?.data?.nodeType === START_NODE_TYPE
+}
+
+// ---- spec 012：key 改名级联 / 祖先计算（纯函数；getGraph・serialize 零触碰） ----
+
+/** renameNodeKey 输入的连线面（CanvasEdgeInput + 可选 id——改名后按 source/target 重生成） */
+export type RenameEdge = CanvasEdgeInput & { id?: string }
+
+/** renameNodeKey 的画布状态面（五级联点聚合，contracts §5；泛型保形具体节点/边类型） */
+export interface CanvasRenameState<N extends CanvasNodeInput, E extends RenameEdge> {
+  nodes: N[]
+  edges: E[]
+  startKey: string
+  positions: NodePositions
+  selectedKey: string | null
+}
+
+/**
+ * key 改名结构性级联（FR-003）：不可变更新，一次返回新画布状态——
+ * nodes 条目替换（key=id，config 等其余字段引用保留）、edges 端点与 id 替换、
+ * startKey 相等替换、positions 键迁移（坐标保留）、selected 指向新 key。
+ * 不改写模板文本 `{{old_key}}`（spec Assumptions：R10 保存期后端兜底）；
+ * 幂等（newKey==oldKey 原样返回）。校验（非空/≤64/不冲突）在 Inspector 编辑点拦截。
+ */
+export function renameNodeKey<N extends CanvasNodeInput, E extends RenameEdge>(
+  state: CanvasRenameState<N, E>,
+  oldKey: string,
+  newKey: string,
+): CanvasRenameState<N, E> {
+  if (oldKey === newKey) return state
+  const nodes = state.nodes.map((n) => (n.id === oldKey ? { ...n, id: newKey } : n))
+  const edges = state.edges.map((e) => {
+    const source = e.source === oldKey ? newKey : e.source
+    const target = e.target === oldKey ? newKey : e.target
+    if (source === e.source && target === e.target) return e
+    return { ...e, source, target, id: `${source}->${target}` }
+  })
+  const positions = new Map<string, XYPosition>()
+  state.positions.forEach((pos, key) => positions.set(key === oldKey ? newKey : key, pos))
+  return {
+    nodes,
+    edges,
+    startKey: state.startKey === oldKey ? newKey : state.startKey,
+    positions,
+    selectedKey: state.selectedKey === oldKey ? newKey : state.selectedKey,
+  }
+}
+
+/**
+ * 沿 edges 反向 BFS 求祖先节点 key 集合（不含自身；FR-007 变量源——非祖先引用
+ * 必被后端 R10 拒，提前收窄）。环安全（已访问即跳过）；指向未知节点的边忽略。
+ */
+export function ancestorsOf(
+  nodes: readonly CanvasNodeInput[],
+  edges: readonly CanvasEdgeInput[],
+  nodeKey: string,
+): Set<string> {
+  const known = new Set(nodes.map((n) => n.id))
+  if (!known.has(nodeKey)) return new Set()
+  const incoming = new Map<string, string[]>()
+  for (const e of edges) {
+    if (!known.has(e.source) || !known.has(e.target)) continue
+    const list = incoming.get(e.target)
+    if (list) list.push(e.source)
+    else incoming.set(e.target, [e.source])
+  }
+  const result = new Set<string>()
+  const queue = [nodeKey]
+  while (queue.length > 0) {
+    const cur = queue.shift()!
+    for (const src of incoming.get(cur) ?? []) {
+      if (src === nodeKey || result.has(src)) continue
+      result.add(src)
+      queue.push(src)
+    }
+  }
+  return result
+}
+
+/** 检查器图上下文（变量源计算 / key 冲突校验的最小输入面；画布直传数组引用） */
+export interface InspectorGraphContext {
+  nodes: readonly CanvasNodeInput[]
+  edges: readonly CanvasEdgeInput[]
+}
+
+// ---- spec 012：Authorization 预设编解码（FR-005，research 决策 6；纯函数） ----
+
+/** Auth 预设三态：无 / Bearer Token / Basic 用户名密码（无独立 config 键，归 headers 管） */
+export type AuthPreset = 'none' | 'bearer' | 'basic'
+
+/** Authorization 现值的推导结果（预设 + 凭据草稿；非 Bearer/Basic 前缀 → none，值留 KV 行） */
+export interface AuthDraft {
+  preset: AuthPreset
+  token: string
+  user: string
+  pass: string
+}
+
+/** Basic 凭据编码（UTF-8 安全：unicode → latin1 展开后 btoa，形态同 research 决策 6） */
+export function encodeBasicAuth(user: string, pass: string): string {
+  return btoa(unescape(encodeURIComponent(`${user}:${pass}`)))
+}
+
+/** Basic 凭据解码（encodeBasicAuth 逆变换；按首个冒号分隔账密；非法 base64 回空账密不抛错） */
+export function decodeBasicAuth(b64: string): { user: string; pass: string } {
+  try {
+    const raw = decodeURIComponent(escape(atob(b64)))
+    const i = raw.indexOf(':')
+    return i < 0
+      ? { user: raw, pass: '' }
+      : { user: raw.slice(0, i), pass: raw.slice(i + 1) }
+  } catch {
+    return { user: '', pass: '' }
+  }
+}
+
+/** Authorization 现值 → 预设与凭据草稿（scheme 大小写不敏感；裸 Bearer（空 token）也算 bearer） */
+export function parseAuthorization(raw: string): AuthDraft {
+  const v = raw.trim()
+  const sp = v.indexOf(' ')
+  const scheme = sp < 0 ? v : v.slice(0, sp)
+  const rest = sp < 0 ? '' : v.slice(sp + 1).trim()
+  if (/^bearer$/i.test(scheme)) {
+    return { preset: 'bearer', token: rest, user: '', pass: '' }
+  }
+  if (/^basic$/i.test(scheme)) {
+    const { user, pass } = decodeBasicAuth(rest)
+    return { preset: 'basic', token: '', user, pass }
+  }
+  return { preset: 'none', token: '', user: '', pass: '' }
+}
+
+/** 预设 + 凭据草稿 → Authorization 行值（none 由调用方删行，此处回空串） */
+export function formatAuthorization(draft: {
+  preset: AuthPreset
+  token?: string
+  user?: string
+  pass?: string
+}): string {
+  if (draft.preset === 'bearer') {
+    const token = draft.token ?? ''
+    return token ? `Bearer ${token}` : 'Bearer'
+  }
+  if (draft.preset === 'basic') {
+    return `Basic ${encodeBasicAuth(draft.user ?? '', draft.pass ?? '')}`
+  }
+  return ''
 }

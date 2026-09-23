@@ -4,7 +4,9 @@
        JSON（GraphModeEditor fill）。工具栏：上一步（离开即回写草稿 + 回第一步，
        不弹确认）+ 名称 / 类型只读展示（修改走上一步）+ 保存并创建（一次 POST
        带 type——与 PUT 双轨隔离，成功清草稿回列表，FR-012/015）。直访 / 刷新：
-       草稿内存态归零 → 挂载即回第一步（FR-013）。 -->
+       草稿内存态归零 → 挂载即回第一步（FR-013）。
+       I/O Schema 单源（FR-002）：伪节点面板直连第一步 store 字段（编辑即写回），
+       与图的离开时回写两条通道并行；创建无自身 id，不传 selfWorkflowId。 -->
   <div v-if="store.hasForm" class="workflow-orchestrate">
     <header class="workflow-orchestrate__toolbar">
       <el-button @click="router.push('/workflows/create')">
@@ -29,6 +31,11 @@
         :initial="initialGraph"
         default-mode="canvas"
         fill
+        :input-schema="store.inputSchema"
+        :output-schema="store.outputSchema"
+        :graph-kind="store.type"
+        @update:input-schema="onInputSchemaChange"
+        @update:output-schema="onOutputSchemaChange"
       />
     </main>
   </div>
@@ -39,12 +46,13 @@ import { ref } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import GraphModeEditor from './GraphModeEditor.vue'
-import { createWorkflow } from '@/api/workflow'
+import { createWorkflow, type SchemaField } from '@/api/workflow'
 import { notifyError, notifySuccess } from '@/utils/notify'
 import {
   buildCreatePayload,
   graphSubmitError,
   prefillGraphCopy,
+  schemaFieldsError,
   type GraphConfig,
 } from './graph'
 import { useWorkflowCreateDraftStore } from '@/stores/workflowCreateDraft'
@@ -64,6 +72,16 @@ const initialGraph: GraphConfig = store.graph ?? prefillGraphCopy()
 /** 图编排实例（getGraph 出口） */
 const graphRef = ref<{ getGraph: () => GraphConfig | null }>()
 
+/** 伪节点面板 schema 编辑写回草稿 store（FR-002）：第一步表单与面板共用同一单源
+ *  （编辑即写回，区别于图的离开时回写——上一步 / 误点不丢面板编辑） */
+function onInputSchemaChange(rows: SchemaField[]): void {
+  store.inputSchema = rows
+}
+
+function onOutputSchemaChange(rows: SchemaField[]): void {
+  store.outputSchema = rows
+}
+
 const saving = ref(false)
 
 /**
@@ -81,6 +99,16 @@ onBeforeRouteLeave(() => {
 
 async function save(): Promise<void> {
   if (saving.value) return
+  // task 型：Schema 字段行先本地校验（SC-004 前端拦截——伪节点面板是第二编辑入口，
+  // 与第一步 / 编辑页同一条校验，错误文案含行号，不发请求）
+  if (store.type === 'task') {
+    const err =
+      schemaFieldsError(store.inputSchema) ?? schemaFieldsError(store.outputSchema)
+    if (err) {
+      notifyError(err)
+      return
+    }
+  }
   const g = graphRef.value?.getGraph()
   if (!g) return // JSON 非法 / 画布未就绪——提示已由组件 notify
 

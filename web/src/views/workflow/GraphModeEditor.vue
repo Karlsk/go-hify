@@ -25,6 +25,12 @@
         :positions="positions"
         :readonly="readonly"
         :fill="fill"
+        :input-schema="inputSchema"
+        :output-schema="outputSchema"
+        :graph-kind="graphKind"
+        :self-workflow-id="selfWorkflowId"
+        @update:input-schema="onInputSchemaChange"
+        @update:output-schema="onOutputSchemaChange"
       />
     </div>
   </div>
@@ -35,6 +41,7 @@ import { ref, shallowRef } from 'vue'
 import JsonConfigEditor from './JsonConfigEditor.vue'
 import CanvasEditor from './CanvasEditor.vue'
 import { notifyError } from '@/utils/notify'
+import type { SchemaField } from '@/api/workflow'
 import {
   parseGraphConfig,
   serializeGraphConfig,
@@ -52,9 +59,30 @@ const props = withDefaults(
     readonly?: boolean
     /** 画布高度铺满父容器（编辑 / 编排整页形态）：透传 CanvasEditor */
     fill?: boolean
+    /** 伪节点面板同源 schema（FR-002，contracts §5）：宿主页单源，透传画布/检查器面板 */
+    inputSchema?: SchemaField[]
+    outputSchema?: SchemaField[]
+    /** 工作流型别：伪节点面板模式（chat = 只读 input 说明，FR-002） */
+    graphKind?: 'task' | 'chat'
+    /** 自身工作流 id（编辑态）：子工作流下拉排除自身（FR-006） */
+    selfWorkflowId?: string | null
   }>(),
   { defaultMode: 'json' },
 )
+
+const emit = defineEmits<{
+  /** 伪节点面板 schema 编辑上行（FR-002）：宿主页 ref 即单源 */
+  'update:inputSchema': [rows: SchemaField[]]
+  'update:outputSchema': [rows: SchemaField[]]
+}>()
+
+function onInputSchemaChange(rows: SchemaField[]): void {
+  emit('update:inputSchema', rows)
+}
+
+function onOutputSchemaChange(rows: SchemaField[]): void {
+  emit('update:outputSchema', rows)
+}
 
 // ---- 双模式状态（009 WorkflowCreate 语义原样收编） ----
 

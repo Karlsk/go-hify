@@ -4,7 +4,9 @@
        抽屉入口 FR-008）+ GraphModeEditor 整页编排（画布默认可切 JSON，fill
        铺满）。GET 回填（404 / 失败回列表）；脏态守卫双通道（路由离开确认 +
        浏览器刷新 / 关闭拦截，FR-011）；保存链路（schema 校验 → getGraph →
-       buildUpdatePayload 不带 type → PUT，成功回详情页，FR-009）。 -->
+       buildUpdatePayload 不带 type → PUT，成功回详情页，FR-009）。
+       I/O Schema 单源（FR-002）：抽屉表单与伪节点面板绑同一页面 ref，一处改另一处同步；
+       selfWorkflowId 透传 = 子工作流下拉排除自身（FR-006）。 -->
   <div v-loading="loading" class="workflow-edit">
     <template v-if="detail">
       <header class="workflow-edit__toolbar">
@@ -38,6 +40,12 @@
           :initial="graph"
           default-mode="canvas"
           fill
+          :input-schema="inputSchema"
+          :output-schema="outputSchema"
+          :graph-kind="type"
+          :self-workflow-id="String(route.params.id)"
+          @update:input-schema="onInputSchemaChange"
+          @update:output-schema="onOutputSchemaChange"
         />
       </main>
 
@@ -93,6 +101,16 @@ const description = ref('')
 const type = ref<WorkflowType>('chat')
 const inputSchema = ref<SchemaField[]>([])
 const outputSchema = ref<SchemaField[]>([])
+
+/** 伪节点面板 schema 编辑写回（FR-002）：面板与抽屉表单绑同一 ref（单源），
+ *  脏态守卫 snapshot() 读的就是这两个 ref——面板编辑自动纳入离开确认 */
+function onInputSchemaChange(rows: SchemaField[]): void {
+  inputSchema.value = rows
+}
+
+function onOutputSchemaChange(rows: SchemaField[]): void {
+  outputSchema.value = rows
+}
 
 /** task 型 I/O Schema 抽屉开关 */
 const schemaDrawer = ref(false)
