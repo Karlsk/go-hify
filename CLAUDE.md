@@ -1193,10 +1193,10 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/012-workflow-editor-enhancements/plan.md](specs/012-workflow-editor-enhancements/plan.md)
-(feature: 工作流拖拽编辑器八项增强——spec 012，纯前端（web/）补齐 spec 009/010 编辑器
-的删除入口/伪开始节点/节点 key 改名/LLM 双输入框（消费 spec 011 system_prompt，commit
-3c82c3f）/API headers+auth+body/子工作流入参渲染/变量引用下拉（新组件 TemplateField）；
-后端零改动，config 键集对齐 api_contract.md §3 既有键，图主体序列化形态不变；spec 见
-specs/012-workflow-editor-enhancements/spec.md)
+[specs/013-agent-bind-trial-run/plan.md](specs/013-agent-bind-trial-run/plan.md)
+(feature: 前端 agent 绑定工作流与工作流试运行——spec 013，纯前端（web/）补齐 spec 05
+workflow_id 绑定（下拉仅 chat 型、PUT 全量解绑）与 spec 06 execute?trial=true 试运行
+（编辑页 + 详情页双入口共用 WorkflowTrialDialog，RunResult node_trace 轨迹呈现）的
+消费面；后端零改动、零新增依赖、无迁移；spec 见
+specs/013-agent-bind-trial-run/spec.md)
 <!-- SPECKIT END -->
