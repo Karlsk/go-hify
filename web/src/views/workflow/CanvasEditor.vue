@@ -4,11 +4,12 @@
        出口经 getGraph() 转回图配置——画布节点的 data.config 与配置节点共享引用，
        检查器（T014）改 config 即改配置单源；节点位置存 positions Map（父组件
        会话级持有，往返保留，不序列化进配置）。起始节点 = entry（start_node_key）：
-       面板「起始节点」下拉直接指定（2026-09-23 裁定：取消画布伪「开始」节点），
-       首个拖入默认、删除迁移，hf-wf-node--start class 在画布上标识起始节点。
+       面板「起始节点」下拉直接指定（2026-09-23 裁定：取消画布伪「开始」节点；双击
+       节点与检查器「设为起始」按钮为等价入口），首个拖入默认、删除迁移，
+       hf-wf-node--start class 在画布上标识起始节点。
        只读态（readonly，spec 010）：面板 / 检查器不渲染、编辑交互全禁，
        平移缩放保留（FR-005）；fill = 高度铺满父容器（编辑 / 编排整页形态）。 -->
-  <div class="canvas-editor" :class="{ 'canvas-editor--fill': fill }">
+  <div class="canvas-editor" :class="{ 'canvas-editor--fill': fill, 'canvas-editor--readonly': readonly }">
     <aside v-if="!readonly" class="canvas-editor__palette">
       <div
         v-for="t in PALETTE_NODE_TYPES"
@@ -21,9 +22,10 @@
         <span>{{ NODE_TYPE_NAMES[t] }}</span>
       </div>
 
-      <!-- 起始节点（entry）下拉（2026-09-23 裁定：取消画布伪「开始」节点，entry 由
-           下拉直接指定）：选项 = 画布现存节点 key；首个拖入自动默认、删除起始经
-           migrateStartKey 迁移、检查器改 Key 随动——全部汇到 startKey 单源 -->
+      <!-- 起始节点（entry）下拉（2026-09-23 裁定：取消画布伪「开始」节点）：选项 =
+           画布现存节点 key（`key（类型名）`）；首个拖入自动默认、删除起始经
+           migrateStartKey 迁移、检查器改 Key 随动；双击节点与检查器「设为起始」
+           按钮为等价入口——全部汇到 startKey 单源 -->
       <div class="canvas-editor__palette-field">
         <span class="canvas-editor__palette-label">起始节点</span>
         <el-select
@@ -32,7 +34,7 @@
           placeholder="拖入首节点自动指定"
           @change="refreshStartClasses"
         >
-          <el-option v-for="n in flowNodes" :key="n.id" :label="n.id" :value="n.id" />
+          <el-option v-for="n in flowNodes" :key="n.id" :label="startOptionLabel(n)" :value="n.id" />
         </el-select>
       </div>
 
@@ -42,7 +44,7 @@
         入参 / 出参
       </button>
 
-      <p class="canvas-editor__palette-hint">拖入画布 · 下拉指定起始节点</p>
+      <p class="canvas-editor__palette-hint">拖入画布 · 下拉 / 双击节点 / 检查器按钮指定起始</p>
     </aside>
 
     <div class="canvas-editor__flow" @dragover.prevent @drop="onDrop">
@@ -77,6 +79,7 @@
       @delete-node="onDeleteNode"
       @delete-edge="onDeleteEdge"
       @rename-node-key="onRenameNodeKey"
+      @set-start="onSetStart"
       @update:input-schema="onInputSchemaChange"
       @update:output-schema="onOutputSchemaChange"
     />
@@ -148,6 +151,7 @@ const {
   onEdgeClick,
   onEdgesChange,
   onNodeClick,
+  onNodeDoubleClick,
   onNodeDragStop,
   onNodesChange,
   onPaneClick,
@@ -164,6 +168,13 @@ const flowEdges = shallowRef<FlowEdge[]>(initial.edges)
 
 /** 起始节点 key（画布内维护；首个放入默认，面板下拉切换，删除时迁移） */
 const startKey = ref(props.config.start_node_key)
+
+/** 起始下拉选项展示：`key（类型名）`（类型名取面板命名表；未知类型兜底空串仅显 key） */
+function startOptionLabel(node: FlowNode<CanvasNodeData>): string {
+  const type = node.data?.nodeType as PaletteNodeType | undefined
+  const typeName = type ? NODE_TYPE_NAMES[type] ?? '' : ''
+  return typeName ? `${node.id}（${typeName}）` : node.id
+}
 
 // ---- 选中态（FR-010）：点节点/连线切换检查器内容；点空白画布清空 ----
 
@@ -276,7 +287,7 @@ onNodesChange((changes) => {
   removedIds.forEach((id) => props.positions.delete(id)) // 位置 Map 同步清理
   const survivors = flowNodes.value.filter((n) => !removedIds.has(n.id)).map((n) => n.id)
   removedIds.forEach((id) => {
-    startKey.value = migrateStartKey(startKey.value, id, survivors) // 删起始 → 剩余首个
+    startKey.value = migrateStartKey(startKey.value, id, survivors, flowEdges.value) // 删起始 → 剩余首个无入边者
   })
   // 兜底：清理指向已删节点的悬挂边（Vue Flow 自动移除与否两态均幂等）
   flowEdges.value = flowEdges.value.filter(
@@ -310,6 +321,18 @@ function refreshStartClasses(): void {
     n.class = canvasNodeClass(n.data?.nodeType ?? '', n.id === startKey.value)
   })
 }
+
+/** 设为起始（下拉 / 双击 / 检查器按钮三入口共用）：改 startKey 单源 + 重刷起始 class */
+function onSetStart(key: string): void {
+  if (props.readonly || !key || key === startKey.value) return
+  startKey.value = key
+  refreshStartClasses()
+}
+
+/** 双击节点 = 设为起始（三入口之一；readonly 守卫在 onSetStart 内） */
+onNodeDoubleClick(({ node }) => {
+  onSetStart(node.id)
+})
 
 // ---- 检查器删除 / 改名事件接线（FR-001/FR-003） ----
 
@@ -518,5 +541,24 @@ defineExpose({ getGraph })
 .canvas-editor__flow :deep(.vue-flow__node.hf-wf-node--start .vue-flow__node-default) {
   border-color: var(--hf-primary-600);
   box-shadow: var(--hf-shadow-focus);
+}
+
+/* readonly 详情态起始角标：左面板 / 检查器不渲染，起始仅剩边框可见——加「起始」文字
+   角标补足辨识（挂在节点 wrapper 上随节点走；不改 label，防泄入 getGraph 序列化） */
+.canvas-editor--readonly
+  .canvas-editor__flow
+  :deep(.vue-flow__node.hf-wf-node--start::after) {
+  content: '起始';
+  position: absolute;
+  top: calc(var(--hf-space-1) * -1);
+  left: calc(var(--hf-space-1) * -1);
+  padding: 0 var(--hf-space-1);
+  border-radius: var(--hf-radius-sm);
+  background: var(--hf-primary-600);
+  color: var(--hf-bg-container);
+  font-size: var(--hf-font-size-xs);
+  line-height: var(--hf-leading-normal);
+  pointer-events: none;
+  z-index: 1;
 }
 </style>

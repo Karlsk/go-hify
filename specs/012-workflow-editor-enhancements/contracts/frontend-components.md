@@ -32,7 +32,7 @@
 ## 2. NodeInspector.vue（新增对外面）
 
 ```ts
-// 新增 Emits（既有 props——selectedNode/graph/readonly 等——不变）
+// 新增 Emits（既有 props——node/graph/readonly 等——不变）
 'delete-node': () => void                    // 删除节点按钮（FR-001），级联由 CanvasEditor 走既有 remove 链
 'delete-edge': (edgeId: string) => void      // 选中连线时的删除按钮（FR-001）
 
@@ -41,16 +41,21 @@
 // 通过才 emit；级联应用在 CanvasEditor
 
 // 新增 Props
-selectedEdge?: Edge | null                   // 连线选中态（连线信息 + 删除入口）
-startNodeKey: string | null                  // Key 改名时同步起始指向校验展示
-inputSchema: SchemaField[]                   // 伪节点面板同源（透传至面板）
-outputSchema: SchemaField[]
+edge?: InspectorEdge | null                  // 连线选中态（连线信息 + 删除入口）
+startNodeKey?: string | null                 // 起始指向（isStartKey 提示 / 「设为起始」按钮禁用）
+graphKind?: 'task' | 'chat'                  // schema 面板模式（task 两段行表单 / chat 只读说明）
+inputSchema?: SchemaField[]                  // schema 面板同源（透传至面板）
+outputSchema?: SchemaField[]
+selfWorkflowId?: string | null               // 子工作流下拉排除自身（编辑态）
 // 注：variables（VariableGroups）不是 props——变量条目在 Inspector 层内部计算
 //（其拥有图上下文与 getWorkflowDetail 访问，research 决策 4），经 computed 喂给 TemplateField
 
-// 新增 Emits（伪节点面板 schema 同源，FR-002）
+// 新增 Emits（schema 面板同源，FR-002）
 'update:inputSchema': (rows: SchemaField[]) => void
 'update:outputSchema': (rows: SchemaField[]) => void
+
+'set-start': (key: string) => void
+// 「设为起始」按钮（entry 三入口之一）：画布 onSetStart 改 startKey 单源（readonly 时按钮不渲染）
 ```
 
 **面板模式**（selectedNode === 伪节点上下文时）：task 型 = 两段 SchemaFieldsEditor（入参/出参）；chat 型 = 单一 input 说明（只读）。
@@ -81,7 +86,8 @@ graphKind: 'task' | 'chat'        // 伪节点面板模式
 ```
 
 **内部行为契约**：
-- 伪「开始」节点：画布左端独立渲染（不进 nodes 数组），装饰箭头指向 startKey 节点；点击 = 选中伪节点上下文 → Inspector 切面板模式；readonly 时可见但无交互（FR-002）。
+- entry 三入口（FR-002，2026-09-23 裁定后形态）：左面板「起始节点」下拉（选项 `key（类型名）`）/ 双击节点 / 检查器「设为起始」按钮，全部经画布 onSetStart 汇 startKey 单源；readonly 三入口均不可用，起始节点以主色强调边框 + 「起始」角标标识。
+- 「入参 / 出参」面板入口：左面板按钮置伪节点上下文（sentinel，不进 nodes 数组）→ Inspector 切 schema 面板模式。
 - 删除：接收 Inspector 的 delete-node → 构造与 Backspace 相同的 remove changes 走 `onNodesChange`（既有级联链零改动）；delete-edge 同理走 `onEdgesChange`。
 - key 改名：接收 rename-node-key → 调 graph.ts `renameNodeKey` 应用返回的新状态。
 - 选中连线：`onEdgeClick` 置 selectedEdge、`onPaneClick` 清空（节点选中互斥）。

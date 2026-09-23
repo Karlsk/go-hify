@@ -111,16 +111,20 @@ export function generateNodeKey(type: string, existingKeys: readonly string[]): 
   }
 }
 
-// ---- 起始节点迁移（spec Edge Cases：删起始 → 剩余首个；清空 → ''） ----
+// ---- 起始节点迁移（spec Edge Cases：删起始 → 剩余首个无入边者；清空 → ''） ----
 
-/** 纯函数：仅起始被删时迁移（start 未删原样返回；剩余空集 → ''）；入参 = 删除后幸存 key 序列 */
+/** 纯函数：仅起始被删时迁移（start 未删原样返回；剩余空集 → ''）——新起始 = 剩余中
+ *  首个无入边节点（图入口）；全有入边（成环）回退剩余首个；入参 = 删除后幸存 key 序列与现存边 */
 export function migrateStartKey(
   startKey: string,
   removedKey: string,
   remainingKeys: readonly string[],
+  remainingEdges: readonly CanvasEdgeInput[],
 ): string {
   if (startKey !== removedKey) return startKey
-  return remainingKeys[0] ?? ''
+  const survivors = new Set(remainingKeys)
+  remainingEdges.forEach((e) => survivors.delete(e.target)) // 有入边者排除（悬挂边 target 不在幸存集，无影响）
+  return remainingKeys.find((k) => survivors.has(k)) ?? remainingKeys[0] ?? ''
 }
 
 // ---- JSON 文本 ↔ GraphConfig ----

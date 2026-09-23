@@ -42,6 +42,14 @@ export const useWorkflowCreateDraftStore = defineStore('workflowCreateDraft', {
       this.inputSchema = form.inputSchema
       this.outputSchema = form.outputSchema
     },
+    /** 画布「入参 / 出参」面板编辑写回（FR-002 单源：与第一步表单同一字段，编辑即写回） */
+    saveInputSchema(rows: SchemaField[]) {
+      this.inputSchema = rows
+    },
+    /** 同上——出参 */
+    saveOutputSchema(rows: SchemaField[]) {
+      this.outputSchema = rows
+    },
     /** 第二步离开（上一步 / 侧边栏误点）：图编排回写 */
     saveGraph(graph: GraphConfig) {
       this.graph = graph

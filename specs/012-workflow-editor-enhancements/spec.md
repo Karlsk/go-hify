@@ -6,7 +6,9 @@
 
 **Status**: Draft
 
-**Input**: 用户 2026-09-22 反馈的拖拽编辑器八项可用性缺口（删除入口 / 伪开始节点入参出参配置 / 节点 key 改名 / LLM 双输入框 / API 节点 headers+auth+body 表单 / 子工作流入参自动渲染 / 变量引用下拉 / 模板字段可写），含三项已拍板契约分叉：开始节点 = 前端伪节点（后端零改动，schema 走既有 input_schema/output_schema 契约字段）；LLM 拆分 = 消费 spec 011 后端 system_prompt；API auth = headers + auth 预设纯前端（序列化进 config.headers，无独立 auth 字段）。
+**Revision**: 2026-09-23 裁定——取消画布伪「开始」节点，entry 改由左面板「起始节点」下拉直接指定，并与双击节点、检查器「设为起始」按钮三入口并存；画布内 schema 配置入口改挂左面板「入参 / 出参」按钮（US5 / FR-002 / Key Entities / SC-003 / Assumptions 已同步改写）。
+
+**Input**: 用户 2026-09-22 反馈的拖拽编辑器八项可用性缺口（删除入口 / 伪开始节点入参出参配置 / 节点 key 改名 / LLM 双输入框 / API 节点 headers+auth+body 表单 / 子工作流入参自动渲染 / 变量引用下拉 / 模板字段可写），含三项已拍板契约分叉：开始节点 = 左面板「起始节点」下拉直接指定 entry（2026-09-23 修订：取消伪节点方案，后端零改动，schema 走既有 input_schema/output_schema 契约字段）；LLM 拆分 = 消费 spec 011 后端 system_prompt；API auth = headers + auth 预设纯前端（序列化进 config.headers，无独立 auth 字段）。
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -20,7 +22,7 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 拖拽模式有节点 A 及其出边，**When** 选中 A 点「删除节点」，**Then** A 与关联连线消失，起始若是 A 则迁移到剩余首节点，画布选区清空
+1. **Given** 拖拽模式有节点 A 及其出边，**When** 选中 A 点「删除节点」，**Then** A 与关联连线消失，起始若是 A 则迁移到剩余首个无入边节点（图入口；全成环回退剩余首个），画布选区清空
 2. **Given** 节点 llm_1，**When** 检查器把 Key 改为 classify，**Then** 节点 id、连线端点、起始指向、位置随动更新，切 JSON 核对旧 key 零残留
 3. **Given** 已有 key classify，**When** 把另一节点 Key 改为 classify 或清空，**Then** 前端拦截（提示冲突/非空），图不变
 
@@ -75,20 +77,21 @@
 
 ---
 
-### User Story 5 - 伪开始节点与画布内 schema 配置 (Priority: P5)
+### User Story 5 - entry 下拉指定与画布内 schema 配置 (Priority: P5)
 
-画布渲染伪「开始」节点（不可拖入、不进图主体序列化、JSON 模式不出现），指向当前起始节点（起始切换随动）：点击进入其配置面板——task 型为入参/出参 Schema 行表单（复用既有行表单语义与校验），chat 型显示单一 input 说明；schema 编辑与宿主页既有表单状态同源，一处改动另一处同步。
+entry（start_node_key）由画布左面板「起始节点」下拉直接指定（2026-09-23 裁定：取消画布伪「开始」节点）——选项 = 画布现存节点 key（`key（类型名）` 形态），首个拖入自动默认、删除起始迁移；双击节点与检查器「设为起始」按钮为等价入口，三入口并存、全部汇到同一 startKey 单源。左面板「入参 / 出参」按钮打开检查器 schema 面板——task 型为入参/出参 Schema 行表单（复用既有行表单语义与校验），chat 型显示单一 input 说明；schema 编辑与宿主页既有表单状态同源，一处改动另一处同步。
 
-**Why this priority**: 第 2 条反馈——入参/出参配置散落在两步式第一步或编辑页抽屉，画布看不到流程入口；拍板为前端伪节点、后端零改动。非阻断（抽屉路径仍可用），排后。
+**Why this priority**: 第 2 条反馈——入参/出参配置散落在两步式第一步或编辑页抽屉，画布看不到流程入口；拍板为下拉指定 entry、面板按钮进 schema 配置，后端零改动。非阻断（抽屉路径仍可用），排后。
 
-**Independent Test**: task 型在两步式第二步与编辑页分别核对：伪节点面板改 schema → 第一步表单/抽屉同步（反向亦然）；保存载荷图主体无伪节点。
+**Independent Test**: task 型在两步式第二步与编辑页分别核对：面板改 schema → 第一步表单/抽屉同步（反向亦然）；下拉切换起始 → 主色强调边框迁移、start_node_key 随动。
 
 **Acceptance Scenarios**:
 
-1. **Given** task 型画布，**When** 点击伪「开始」节点，**Then** 检查器展示入参/出参两段行表单，与宿主页表单同源同步
-2. **Given** chat 型画布，**When** 点击伪节点，**Then** 面板显示单一 input 说明，无 schema 编辑
-3. **Given** 伪节点面板改过 schema，**When** 保存，**Then** 提交载荷含最新 input_schema/output_schema，且图主体（start_node_key/nodes/edges）无伪节点痕迹
-4. **Given** readonly 态，**When** 查看画布，**Then** 伪节点可见但无配置交互
+1. **Given** task 型画布，**When** 点左面板「入参 / 出参」按钮，**Then** 检查器展示入参/出参两段行表单，与宿主页表单同源同步
+2. **Given** chat 型画布，**When** 点「入参 / 出参」按钮，**Then** 面板显示单一 input 说明，无 schema 编辑
+3. **Given** 面板改过 schema，**When** 保存，**Then** 提交载荷含最新 input_schema/output_schema，start_node_key 指向下拉选定的真实节点 key
+4. **Given** 起始节点 A 与另一节点 B，**When** 双击 B / 在 B 的检查器点「设为起始」/ 下拉选 B，**Then** 主色强调边框迁移到 B、start_node_key 随动（三入口等价）
+5. **Given** readonly 态，**When** 查看画布，**Then** 左面板与检查器不渲染，仅起始节点强调边框与「起始」角标可见
 
 ---
 
@@ -108,14 +111,13 @@
 
 ### Edge Cases
 
-- 删除起始节点 → 起始迁移至剩余首节点（既有 migrateStartKey 语义）；删到空图 → startKey 置空，保存期前端预检照常拦截
+- 删除起始节点 → 起始迁移至剩余首个无入边节点（图入口；全成环回退剩余首个，migrateStartKey 语义）；删到空图 → startKey 置空，保存期前端预检照常拦截
 - key 改名后 positions 残留 → 改名迁移位置条目、删除清位置条目（会话级无泄漏）
 - key 改名为与原值相同 → 无变化（幂等）
 - LLM system_prompt 空串与缺省等价（config 不携带该键，对齐后端 omitempty）
 - API headers 重复键以后写覆盖（与后端 map 语义一致）；空键行不产出 config 条目
 - 子工作流切换后旧值无同名字段可保留 → 丢弃
 - 变量下拉不校验引用合法性（手写非祖先引用由保存期后端 R10 校验兜底，走既有错误提示通道）
-- 伪节点在空画布上仍常驻渲染（不随节点增删消失）
 - 子工作流下拉在创建态（工作流未落库无 id）无从排除自身 → 不排除（此时无自身可引用）
 
 ## Requirements *(mandatory)*
@@ -123,7 +125,7 @@
 ### Functional Requirements
 
 - **FR-001**: 检查器 MUST 提供节点/连线可见删除入口（按钮），删除节点 MUST 沿用既有级联语义（悬挂边清理、位置清理、起始迁移、选中态清空）。
-- **FR-002**: 画布 MUST 渲染伪「开始」节点（不可拖入、不进图主体序列化、JSON 模式不出现）：点击进入其配置面板——task 型为入参/出参 Schema 行表单（复用既有行表单语义与校验），chat 型显示单一 input 说明；schema 编辑 MUST 与宿主页既有表单状态同源（一处改动另一处同步）。
+- **FR-002**: entry MUST 由左面板「起始节点」下拉直接指定（选项 = 画布现存节点 key，`key（类型名）` 形态），双击节点与检查器「设为起始」按钮 MUST 为等价入口（三入口汇到同一 startKey 单源，readonly 均不可用）；左面板「入参 / 出参」按钮 MUST 打开检查器 schema 面板——task 型为入参/出参 Schema 行表单（复用既有行表单语义与校验），chat 型显示单一 input 说明；schema 编辑 MUST 与宿主页既有表单状态同源（一处改动另一处同步）。
 - **FR-003**: 检查器 MUST 支持编辑节点 Key：非空、不与画布内其他 key 冲突、不超后端 key 长度上限；保存 MUST 级联更新节点 id、连线端点、起始指向、位置 Map、选中态；非法输入 MUST 前端拦截。
 - **FR-004**: LLM 检查器 MUST 拆 System Prompt + Prompt 两文本域，读写 config.system_prompt / config.prompt；system_prompt 可选（空 = 不携带）。
 - **FR-005**: API 检查器 MUST 补全：Headers 键值行编辑 + Auth 预设（无 / Bearer Token / Basic 用户名密码，选择即向 headers 注入对应 Authorization 行，切预设清旧行）+ Body 模板文本域；全部 MUST 序列化进 config 既有键，无新增后端字段。
@@ -134,7 +136,7 @@
 
 ### Key Entities *(include if feature involves data)*
 
-- **伪开始节点**: canvas-only 装饰节点，代表工作流入口；常驻画布、不可拖入、不进序列化图主体；指向当前起始节点（随起始切换）；承载 schema 配置入口（task 型入参/出参）。
+- **起始节点指定（entry）**: start_node_key 的画布编辑面——左面板「起始节点」下拉（选项 `key（类型名）`）、双击节点、检查器「设为起始」按钮三入口等价，汇到同一 startKey 单源；起始节点以主色强调边框标识（readonly 态附「起始」角标）；左面板「入参 / 出参」按钮承载 schema 配置入口（task 型入参/出参）。
 - **变量引用条目**: 变量下拉的最小单元——插入文本（如 `{{input.q}}`、`{{classify}}`、`{{fetch.field}}`）+ 展示名 + 来源分组（入参 / 上游节点 / 子流程出参）。
 - **模板字段**: 支持变量引用的可写文本域（prompt/system_prompt/output/expression/url/body/header 值/子流程入参值），手写与下拉插入混排。
 - **Auth 预设**: API 节点的鉴权快捷配置（无 / Bearer Token / Basic），序列化表现为 config.headers 的 Authorization 行，无独立存储形态。
@@ -145,7 +147,7 @@
 
 - **SC-001**: 用户反馈的八项可用性缺口全部可经画布/检查器完成（删除走可见按钮、key 画布内改名、LLM 双输入框、API POST 全要素可配、子工作流入参自动渲染、变量经下拉插入、模板字段可写）——manual-test 增补小节逐项人工验证通过。
 - **SC-002**: 双模式往返一致性（含未知 config 键透传）与既有 EC-1~EC-23 人工用例全数复测通过（零回归）。
-- **SC-003**: 提交载荷形态与后端契约对齐——图主体无伪节点、config 键集不超出后端已交付契约（system_prompt/headers/body/inputs 等既有键），保存后详情回读逐键核对通过。
+- **SC-003**: 提交载荷形态与后端契约对齐——图主体节点均为真实节点、start_node_key 指向现存节点 key，config 键集不超出后端已交付契约（system_prompt/headers/body/inputs 等既有键），保存后详情回读逐键核对通过。
 - **SC-004**: readonly 态零新增可交互元素（新增交互全部禁用）。
 - **SC-005**: 前端质量门禁（类型检查 + 构建）全绿。
 
@@ -164,7 +166,7 @@
 
 - 后端前提已满足：spec 011 system_prompt 已合入（commit 3c82c3f）；工作流详情 GET 已返回 input_schema/output_schema（spec 008 交付），子工作流入参渲染与出参展开直接消费，无需后端配合。
 - 前端不引入新依赖（不新增组件库 / 测试框架）；验收面 = 质量门禁 + manual-test 人工项。
-- schema 单源：宿主页表单（两步式第一步 / 编辑页抽屉）是既有持有者，伪节点面板与其同源同步（具体绑定方式留 plan 决定）。
+- schema 单源：宿主页表单（两步式第一步 / 编辑页抽屉）是既有持有者，「入参 / 出参」面板与其同源同步（具体绑定方式留 plan 决定）。
 - key 长度上限对齐后端 key 契约（≤64）；非法字符集不额外收紧。
 - key 改名级联只覆盖结构性引用（节点 id、连线端点、起始指向、位置、选中态），不改写其他节点模板文本中的 `{{old_key}}` 引用——模板是自由文本，程序化改写有误伤风险；改名后旧引用由保存期 R10 后端校验暴露，走既有错误提示通道。
 - 变量下拉不校验引用合法性（保存期 R10 后端兜底，前端复用既有错误提示通道）。

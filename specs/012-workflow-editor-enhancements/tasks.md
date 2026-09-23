@@ -6,7 +6,7 @@
 
 **Tests**: 前端无单测基建且明确不引入测试框架（软门禁约束）——无测试任务。每个实现任务的 DoD = 类型检查通过（`cd web && npm run type-check`）；全篇完成定义 = 双门禁全绿（type-check + build）+ quickstart.md 人工场景（SC-001~005）。
 
-**Organization**: 按 user story 分组（P1 删除/key 改名 → P2 变量组件 → P3 LLM/API 表单 → P4 子工作流渲染 → P5 伪节点 → P6 回归收口）；graph.ts 纯函数为跨 story 前提置 Phase 2。
+**Organization**: 按 user story 分组（P1 删除/key 改名 → P2 变量组件 → P3 LLM/API 表单 → P4 子工作流渲染 → P5 entry 下拉与 schema 面板 → P6 回归收口）；graph.ts 纯函数为跨 story 前提置 Phase 2。
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -32,7 +32,7 @@
 **Purpose**: 跨 story 的纯逻辑层扩展，数据契约见 contracts/frontend-components.md §4
 
 - [X] T002 `web/src/views/workflow/graph.ts` 新增 `renameNodeKey(state, oldKey, newKey)` 纯函数：不可变更新，一次返回新画布状态——nodes 条目替换（key=id）、edges source/target 替换、startKey 相等替换、positions 键迁移、selected 指向新 key；不改写模板文本 `{{old_key}}`（spec Assumptions）；幂等（newKey==oldKey 返回等值状态）
-- [X] T003 `web/src/views/workflow/graph.ts` 新增 `ancestorsOf(nodes, edges, nodeKey)` 纯函数：沿 edges 反向 BFS 求祖先 key 集合（不含自身）；`getGraph`/`serialize` 零触碰（伪节点不泄入不变量由结构保证，research 决策 1）
+- [X] T003 `web/src/views/workflow/graph.ts` 新增 `ancestorsOf(nodes, edges, nodeKey)` 纯函数：沿 edges 反向 BFS 求祖先 key 集合（不含自身）；`getGraph`/`serialize` 零触碰（图主体只含真实节点由结构保证，research 决策 1）
 
 ---
 
@@ -43,7 +43,7 @@
 **Independent Test**: quickstart 场景 1——拖入 3 节点删除中间节点核对级联；改 key 切 JSON 核对旧 key 零残留；冲突/清空被拦截。
 
 - [X] T004 [US1] `web/src/views/workflow/CanvasEditor.vue` 新增选中连线态：`selectedEdge` ref（`onEdgeClick` 置值与节点选中互斥、`onPaneClick` 清空）、prop 透出至检查器容器；readonly 态连线不可选
-- [X] T005 [P] [US1] `web/src/views/workflow/NodeInspector.vue` 新增：①「删除节点」danger 按钮（emit `delete-node`，伪节点上下文/readonly 不显示）②选中连线模式：连线信息 + 「删除连线」按钮（emit `delete-edge`）③Key 编辑输入框——非空 / ≤64 / 不与画布现存 key 冲突前端拦截（对齐 JSON 模式既有校验），合法经 emit `rename-node-key` 提交；readonly 禁用
+- [X] T005 [P] [US1] `web/src/views/workflow/NodeInspector.vue` 新增：①「删除节点」danger 按钮（emit `delete-node`，schema 面板上下文/readonly 不显示）②选中连线模式：连线信息 + 「删除连线」按钮（emit `delete-edge`）③Key 编辑输入框——非空 / ≤64 / 不与画布现存 key 冲突前端拦截（对齐 JSON 模式既有校验），合法经 emit `rename-node-key` 提交；readonly 禁用
 - [X] T006 [US1] `web/src/views/workflow/CanvasEditor.vue` 事件接线：`delete-node` 构造与 Backspace 相同的 remove changes 走既有 `onNodesChange` 级联链（悬挂边/positions/migrateStartKey/选中清空零新逻辑）；`delete-edge` 走 `onEdgesChange` remove；`rename-node-key` 调 T002 `renameNodeKey` 应用返回状态
 
 **Checkpoint**: 删除与改名全链路可用，既有级联语义不变。
@@ -88,16 +88,16 @@
 
 ---
 
-## Phase 7: User Story 5 — 伪开始节点与画布内 schema 配置 (Priority: P5)
+## Phase 7: User Story 5 — entry 下拉指定与画布内 schema 配置 (Priority: P5)
 
-**Story goal**: 画布常驻伪「开始」节点（不入序列化），点击进 schema 面板，与宿主页表单同源同步。
+**Story goal**: 左面板「起始节点」下拉直接指定 entry（选项 `key（类型名）`），双击节点与检查器「设为起始」按钮等价入口；「入参 / 出参」按钮开检查器 schema 面板，与宿主页表单同源同步。（2026-09-23 裁定：取消画布伪「开始」节点，本相位按裁定后形态记录。）
 
-**Independent Test**: quickstart 场景 5——两宿主分别核对面板 ↔ 第一步/抽屉双向同步；保存载荷图主体无伪节点；chat 型说明态；readonly 无交互。
+**Independent Test**: quickstart 场景 5——两宿主分别核对面板 ↔ 第一步/抽屉双向同步；下拉/双击/按钮切换起始核对边框迁移与 start_node_key 随动；chat 型说明态；readonly 无交互。
 
-- [X] T012 [US5] `web/src/views/workflow/CanvasEditor.vue` 伪「开始」节点：独立渲染层（**不进 nodes 数组**，画布左端绝对定位常驻、空画布也在），装饰箭头指向 startKey 节点（随 migrateStartKey 随动）；点击置伪节点上下文并通知检查器；新增 inputSchema/outputSchema/graphKind props 与 update:inputSchema/update:outputSchema emits（contracts §3）；readonly 可见无交互
-- [X] T013 [US5] `web/src/views/workflow/NodeInspector.vue` 伪节点面板模式：伪节点上下文时——task 型渲染入参/出参两段 SchemaFieldsEditor（复用既有行组件语义与校验，emit 同源上行）；chat 型只读展示「仅暴露单一入参 `{{input}}`」说明；readonly 面板禁用
+- [X] T012 [US5] `web/src/views/workflow/CanvasEditor.vue` entry 指定与面板入口：左面板「起始节点」下拉（选项 = 画布现存节点 key，`key（类型名）` 形态）直改 startKey 单源并重刷起始 class；双击节点（onNodeDoubleClick）与检查器「设为起始」按钮为等价入口（readonly 守卫）；「入参 / 出参」按钮置伪节点上下文（sentinel，**不进 nodes 数组**）通知检查器切 schema 面板；新增 inputSchema/outputSchema/graphKind props 与 update:inputSchema/update:outputSchema emits（contracts §3）
+- [X] T013 [US5] `web/src/views/workflow/NodeInspector.vue` schema 面板模式：伪节点上下文（sentinel）时——task 型渲染入参/出参两段 SchemaFieldsEditor（复用既有行组件语义与校验，emit 同源上行）；chat 型只读展示「仅暴露单一入参 `{{input}}`」说明；readonly 面板禁用
 - [X] T014 [US5] `web/src/views/workflow/GraphModeEditor.vue` schema 同源透传：inputSchema/outputSchema props 下行至 CanvasEditor、update 事件上行至宿主（contracts §5 契约）
-- [X] T015 [US5] `web/src/views/workflow/WorkflowEdit.vue` 与 `web/src/views/workflow/WorkflowOrchestrate.vue` 两宿主接线：编辑页 inputSchema/outputSchema 既有页面 ref 即单源（抽屉表单与伪节点面板绑同一 ref，脏态守卫 snapshot 自动覆盖面板编辑）；两步式第一步 store 字段为单源、第二步画布同源接线并核对 store 回写
+- [X] T015 [US5] `web/src/views/workflow/WorkflowEdit.vue` 与 `web/src/views/workflow/WorkflowOrchestrate.vue` 两宿主接线：编辑页 inputSchema/outputSchema 既有页面 ref 即单源（抽屉表单与 schema 面板绑同一 ref，脏态守卫 snapshot 自动覆盖面板编辑）；两步式第一步 store 字段为单源（saveInputSchema/saveOutputSchema action 写回）、第二步画布同源接线并核对 store 回写
 
 **Checkpoint**: schema 画布内可配且单源不破；保存载荷形态不变（SC-003）。
 
@@ -107,7 +107,7 @@
 
 **Purpose**: 存量零回归证据链 + 文档同步 + 验收报告
 
-- [X] T016 [US6] readonly 全面核对：详情态逐一走查全部新增交互（删除/改名/Key 编辑/伪节点面板/Auth/Headers 行/子流程下拉与入参行/变量下拉）确认禁用或不可达（SC-004）；未知 config 键往返透传抽查（`timeout_sec` 手写键拖拽↔JSON 不丢）
+- [X] T016 [US6] readonly 全面核对：详情态逐一走查全部新增交互（删除/改名/Key 编辑/入参出参面板/Auth/Headers 行/子流程下拉与入参行/变量下拉/起始三入口）确认禁用或不可达（SC-004）；未知 config 键往返透传抽查（`timeout_sec` 手写键拖拽↔JSON 不丢）
 - [X] T017 [US6] `docs/testing/workflow-frontend-manual-test.md` 增补 spec 012 小节：quickstart.md 六组场景落为正式人工用例（八项缺口逐项 + EC-1~23 全数复测引用 + 载荷回读核对项）
 - [X] T018 验收收尾：`cd web && npm run type-check && npm run build` 双门禁全绿（SC-005）；`git status --short` 核对改动面 = web/src/views/workflow/ 7 文件 + docs/testing/ 1 文件（api/workflow.ts 预期零改动，若被动过停下核对）；产出验收报告（quickstart SC 对号 + 剩余人工项清单交用户）
 

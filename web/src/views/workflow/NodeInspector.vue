@@ -60,7 +60,7 @@
           @change="commitKey"
         />
         <p v-if="keyError" class="node-inspector__error">{{ keyError }}</p>
-        <p v-else-if="isStartKey" class="node-inspector__hint">起始节点 · 左侧面板下拉可切换</p>
+        <p v-else-if="isStartKey" class="node-inspector__hint">起始节点 · 左侧面板下拉 / 双击节点可切换</p>
       </div>
 
       <template v-if="nodeType === 'llm'">
@@ -68,6 +68,7 @@
           <span class="node-inspector__label">模型</span>
           <el-select
             v-model="modelId"
+            :disabled="readonly"
             :loading="modelLoading"
             placeholder="选择 chat 模型"
             filterable
@@ -135,7 +136,7 @@
       <template v-else-if="nodeType === 'api'">
         <div class="node-inspector__field">
           <span class="node-inspector__label">Method</span>
-          <el-select v-model="method">
+          <el-select v-model="method" :disabled="readonly">
             <el-option v-for="m in API_METHODS" :key="m" :label="m" :value="m" />
           </el-select>
         </div>
@@ -245,6 +246,7 @@
           <span class="node-inspector__label">子工作流</span>
           <el-select
             v-model="workflowId"
+            :disabled="readonly"
             :loading="workflowLoading"
             placeholder="选择任务型工作流"
             filterable
@@ -293,9 +295,13 @@
         </p>
       </template>
 
-      <!-- 动作区（FR-001）：删除节点的级联由画布走既有 remove 链；entry 指定 =
-           左侧面板「起始节点」下拉（2026-09-23 裁定，替代按钮/双击） -->
+      <!-- 动作区（FR-001）：删除节点的级联由画布走既有 remove 链；entry 指定三入口——
+           左侧面板「起始节点」下拉 / 双击节点 / 本按钮（2026-09-23 裁定后并存） -->
       <div v-if="!readonly" class="node-inspector__actions">
+        <el-button :disabled="isStartKey" @click="onSetStartClick">
+          <el-icon><Pointer /></el-icon>
+          设为起始
+        </el-button>
         <el-button type="danger" plain @click="emit('delete-node')">
           <el-icon><Delete /></el-icon>
           删除节点
@@ -336,7 +342,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Delete, Plus } from '@element-plus/icons-vue'
+import { Delete, Pointer, Plus } from '@element-plus/icons-vue'
 import { getModelList, getProviderList, type ModelItem } from '@/api/provider'
 import { getWorkflowDetail, getWorkflowList, type SchemaField } from '@/api/workflow'
 import TemplateField, {
@@ -384,6 +390,8 @@ const emit = defineEmits<{
   'delete-edge': [edgeId: string]
   /** Key 改名（FR-003）：校验通过才提交，级联应用在画布 */
   'rename-node-key': [oldKey: string, newKey: string]
+  /** 设为起始（entry 三入口之一）：画布 onSetStart 改 startKey 单源（readonly 时按钮不渲染） */
+  'set-start': [key: string]
   /** 伪节点面板 schema 同源上行（FR-002） */
   'update:inputSchema': [rows: SchemaField[]]
   'update:outputSchema': [rows: SchemaField[]]
@@ -474,7 +482,12 @@ const isStartKey = computed(
   () => !!props.node && props.node.id === props.startNodeKey,
 )
 
-/** Key 校验（对齐 JSON 模式既有校验）：非空 / ≤64 / 不与画布现存 key 冲突；空串 = 合法 */
+/** 「设为起始」按钮（三入口之一）：emit 由画布 onSetStart 改 startKey 单源 */
+function onSetStartClick(): void {
+  if (props.node && !isStartKey.value) emit('set-start', props.node.id)
+}
+
+/** Key 校验（对齐 JSON 模式既有校验）：非空 / ≤64 / 不与画布现存 key 冲突 */
 const keyError = computed(() => {
   const v = keyDraft.value.trim()
   if (!v) return 'Key 不能为空'
