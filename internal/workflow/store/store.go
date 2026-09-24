@@ -1,7 +1,7 @@
 // Package store 是 workflow 模块的数据层：实现 service.Store（GORM），只操作本模块
-// 声明的三张表（workflows / workflow_nodes / workflow_edges）。错误原样上抛（可用 %w
-// 加上下文），业务翻译（哨兵 / 23505）在 service 层；整图写入的原子单元在本层以
-// Transaction 包装（api_contract §6）。
+// 声明的五张表（workflows / workflow_nodes / workflow_edges / workflow_runs /
+// workflow_node_runs）。错误原样上抛（可用 %w 加上下文），业务翻译（哨兵 / 23505）
+// 在 service 层；整图写入的原子单元在本层以 Transaction 包装（api_contract §6）。
 package store
 
 import (
@@ -22,6 +22,15 @@ const (
 	selectWorkflow = "id, name, description, start_node_key, status, type, input_schema, output_schema, created_at, updated_at"
 	selectNode     = "id, workflow_id, node_key, type, name, config, created_at"
 	selectEdge     = "id, workflow_id, source_node_key, target_node_key, condition, created_at"
+	// selectRunSummary 运行列表摘要列（spec 015 D4 两档显式列之「列表档」）：不含
+	// input/output 大文本（FR-002，TOAST 不取零成本），也不取详情组装才需要的
+	// workflow_name / 关联 id / trace_id。
+	selectRunSummary = "id, workflow_id, status, trigger_source, is_trial, duration_ms, error_node, error_msg, started_at, created_at"
+	// selectRun 运行详情全列（spec 015 D4 两档显式列之「详情档」）：含 input/output
+	// 大文本与关联 id / trace_id / parent_run_id，仅单行详情查询使用。
+	selectRun = "id, workflow_id, workflow_name, trigger_source, is_trial, conversation_id, message_id, trace_id, status, input, output, error_node, error_msg, duration_ms, started_at, created_at, parent_run_id"
+	// selectNodeRun 节点轨迹列（spec 015 D5）：按 (run_id, seq) 索引回放序取全列。
+	selectNodeRun = "id, run_id, seq, node_key, node_type, status, input, output, error_msg, duration_ms, created_at"
 )
 
 // Store 实现 workflowsvc.Store。
@@ -253,4 +262,46 @@ func (s *Store) UpdateParentRunIDs(ctx context.Context, parentRunID uint64, chil
 		return fmt.Errorf("update parent_run_id for run %d: %w", parentRunID, res.Error)
 	}
 	return nil
+}
+
+// ListRuns 运行历史 keyset 列表（spec 015）：
+// WHERE workflow_id = $1 [AND (created_at, id) < ($2, $3)] ORDER BY created_at DESC,
+// id DESC LIMIT $n。行值比较走 idx_workflow_runs_wf_time 复合索引，无 OFFSET；
+// before 零值（首页）跳过行值比较子句；limit 由 service 以 FetchN()（n+1）传入、
+// has_more 判定归 service 切片。对齐 chat ListConversationsByCursor 先例。
+func (s *Store) ListRuns(ctx context.Context, workflowID uint64, beforeCreatedAt time.Time, beforeID uint64, limit int) ([]workflowsvc.WorkflowRun, error) {
+	q := s.db.WithContext(ctx).
+		Select(selectRunSummary).
+		Where("workflow_id = ?", workflowID)
+	if !beforeCreatedAt.IsZero() {
+		q = q.Where("(created_at, id) < (?, ?)", beforeCreatedAt, beforeID)
+	}
+	var runs []workflowsvc.WorkflowRun
+	err := q.Order("created_at DESC, id DESC").Limit(limit).Find(&runs).Error
+	return runs, err
+}
+
+// GetRunByID 运行详情（spec 015 D3）：workflow_id + id 双条件同判——run 不存在与
+// 属于其他工作流不可区分（不泄露存在性），未找到原样上抛 gorm.ErrRecordNotFound、
+// 哨兵翻译（ErrRunNotFound）归 service。
+func (s *Store) GetRunByID(ctx context.Context, workflowID, runID uint64) (*workflowsvc.WorkflowRun, error) {
+	var run workflowsvc.WorkflowRun
+	err := s.db.WithContext(ctx).
+		Select(selectRun).
+		Where("workflow_id = ?", workflowID).
+		Where("id = ?", runID).
+		First(&run).Error
+	return &run, err
+}
+
+// ListNodeRuns 节点轨迹（spec 015 D5）：按 run_id 取全行、seq 升序（执行序回放，
+// idx_run_seq 复合索引），空轨迹返回空切片（service 组装 make 兜底）。
+func (s *Store) ListNodeRuns(ctx context.Context, runID uint64) ([]workflowsvc.WorkflowNodeRun, error) {
+	var nodes []workflowsvc.WorkflowNodeRun
+	err := s.db.WithContext(ctx).
+		Select(selectNodeRun).
+		Where("run_id = ?", runID).
+		Order("seq ASC").
+		Find(&nodes).Error
+	return nodes, err
 }

@@ -16,6 +16,10 @@
 | POST | `/api/v1/workflows/{id}/publish` | 状态动作 → `published` | 200 |
 | POST | `/api/v1/workflows/{id}/disable` | 状态动作 → `disabled` | 200 |
 | POST | `/api/v1/workflows/{id}/execute` | 执行（仅 `published`，非流式 JSON） | 200 |
+| GET | `/api/v1/workflows/{id}/runs` | 运行历史列表（游标分页，摘要面） | 200 |
+| GET | `/api/v1/workflows/{id}/runs/{runId}` | 运行详情（全字段 + 节点轨迹） | 200 |
+
+> 〔2026-09-24 追加（spec 015）：上表后两行为运行历史只读查询端点（纯读、零迁移、执行引擎与落库零改动），行为明细见 §5「GET runs 运行历史查询」；既有 8 路由零变化。〕
 
 全部经 auth 中间件（`/api/v1/*` 通用登录门槛）。REST 动词命名：非 CRUD 动作用 `/动词` 子路径（publish / disable / execute），符合接口规范。
 
@@ -240,6 +244,14 @@ type RunResultSchema struct {
 - **错误上抛**：二分法原样延伸、带父 node 前缀链（`node a: node b: …` 可读定位）——子图缺陷 → `VALIDATION_FAILED` 400；子环境限制 → `WORKFLOW_EXECUTION_FAILED` 500；下游哨兵透传。父记失败 step、父 run 行 `error_node` 定位到父节点。子终稿 output schema 校验失败 → 图缺陷 400（子作者契约）。
 - **Execute 签名不动**（入参仍单一 string）：task 型入参 = 按 input_schema 组装的 JSON 文本；引擎侧检测入参为合法 JSON 对象且声明了 input_schema 时按对象解析入池，否则整串落 input（原行为）。
 
+### GET runs 运行历史查询（spec 015，2026-09-24 落地）
+
+> 〔2026-09-24 追加（spec 015）：两查询端点把 spec 07/08 已落库的 `workflow_runs` / `workflow_node_runs` 暴露给查询面——零迁移、纯只读、执行侧零改动；契约逐字对齐 [specs/015-workflow-run-history/contracts/api.md](../../../specs/015-workflow-run-history/contracts/api.md)。〕
+
+- **列表 `GET /workflows/{id}/runs`**：keyset 游标分页，排序键 `(created_at DESC, id DESC)` 双键（最新在前）；`limit` 缺省 20、归一 ≤0 → 20、>100 → 100（service 层 `page.NewCursor` 归一，D7）；响应 `respond.OKWithCursor` → `meta{limit, has_more, next_cursor}`（`has_more=false` 时 `next_cursor` 为 null）；cursor 不透明（base64 排序键），篡改 / 解码失败 → 400 `VALIDATION_FAILED`（`DecodeCursor` 失败路径，chat conversations 同款）。列表项为摘要面 9 字段（id / status / trigger_source / is_trial / duration_ms / error_node / error_msg / started_at / created_at），**不含 input / output 大文本**（store 显式列清单 `selectRunSummary`，FR-002）；空列表 `data.items == []` 非 null。
+- **详情 `GET /workflows/{id}/runs/{runId}`**：全字段 16 项（含 input / output 大文本原样透传——截断标记文本如实返回不加工、conversation_id / message_id / parent_run_id 三可空 id 字符串化）+ `nodes` 节点轨迹按执行序（`seq ASC`）；`runId` 非数字 → 400 `VALIDATION_FAILED`。**404 语义（D3）**：run 不存在与属于其他工作流同判 404 `RUN_NOT_FOUND`（store 双条件 `workflow_id = ? AND id = ?`，不泄露存在性）；空轨迹 `nodes == []` 非 null（D5）。节点级 `error_msg` 落库恒空为既有形态（错误定位走 run 级 `error_msg` + `error_node`）。
+- **数据窗口语义（FR-004）**：运行历史受保留期清理约束，旧记录可能已被清理——空列表 / 404 均为正常态非错误。
+
 ## 6. service / store 分层约定
 
 - handler 薄绑定：`respond.BindJSON`（`UpsertReq` 实现 `Validate()`）→ 调本模块 api 接口 → `errors.Is` 映射（§8 错误表）→ `respond.OK / Fail`；一个绑定函数只调一个接口方法。
@@ -274,6 +286,7 @@ type Store interface {
 | `WORKFLOW_NAME_CONFLICT` | 409 | `workflowapi.ErrWorkflowNameConflict` | POST / PUT 撞 `uq_workflows_name`（23505 翻译） |
 | `WORKFLOW_NOT_PUBLISHED` | 503 | `workflowapi.ErrWorkflowNotPublished` | execute 时 draft / disabled |
 | `WORKFLOW_EXECUTION_FAILED` | 500 | `workflowapi.ErrWorkflowExecutionFailed` | execute 引擎环境限制类错误：api 节点 SSRF 拦截 / 工作流总时长超限（O4 二分法，spec 06 冻结新增；图缺陷类走 `VALIDATION_FAILED` 既有行） |
+| `RUN_NOT_FOUND` | 404 | `workflowapi.ErrRunNotFound` | runs 详情：run 不存在或不属于所查工作流（同判 404 不泄露存在性，spec 015 新增） |
 | `VALIDATION_FAILED` | 400 | `errs.ErrValidationFailed` | 绑定 / 图校验失败，`details` 带节点 key 定位 |
 
 > execute 错误语义（O4 二分法，随 spec 06 冻结）：下游哨兵（`MODEL_NOT_FOUND` / `PROVIDER_BUSY` / `PROVIDER_UNAVAILABLE` / `RATE_LIMITED` …）透传，映射上表现有行；图缺陷类走 `VALIDATION_FAILED` 既有行。
@@ -283,5 +296,6 @@ type Store interface {
 - `status` 驱动操作位：draft → 「发布」；published → 「停用」+「执行」；disabled → 「发布」。
 - execute 按钮仅 published 可用；draft/disabled 点执行收到 503 后提示发布。
 - config 对象原样回显，前端一期用 JSON 文本编辑节点配置，不需理解各类型内部结构。
+- **runs 游标回传（spec 015）**：`GET /workflows/{id}/runs` 走游标分页（chat conversations 同款约定）——`meta.next_cursor` 原样回传作下一页 `?cursor=`（不透明、不解析）；`has_more=false` 时停止加载更多；点行开详情抽屉按需拉 `GET .../runs/{runId}`（404 `RUN_NOT_FOUND` 抽屉内空态「该运行记录已不存在」、不弹全局 toast）。
 - 分页用 `page / page_size / total`（Element Plus 原生适配）；创建 / 更新成功返回的 detail 直接刷新页面数据。
 - execute 响应（已冻结，随 spec 06）：`RunResultSchema`（run_id / status / output / duration_ms / node_trace）——`node_trace` 供执行测试页展示各节点耗时与失败定位；run_id 在轨迹写入降级时为空串（O7 ④）。

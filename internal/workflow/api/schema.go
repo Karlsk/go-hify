@@ -567,3 +567,85 @@ type NodeRunSummary struct {
 	DurationMs int    `json:"duration_ms"`
 	ErrorMsg   string `json:"error_msg"`
 }
+
+// ── 运行历史查询（spec 015，api_contract 冻结面）──
+
+// ListRunsReq 运行历史列表请求（游标分页 A 模式，keyset created_at DESC, id DESC，
+// 最新在前）。WorkflowID 由 handler 从路由参数 strconv 后注入（不参与 query 绑定）；
+// limit 归一（≤0→20、>100→100 不报错）与 cursor 解码在 service 层（page.NewCursor /
+// DecodeCursor，D7）。cursor 不透明（base64 排序键），前端原样回传是唯一合法用法。
+type ListRunsReq struct {
+	WorkflowID uint64 `form:"-"`
+	Limit      int    `form:"limit"`
+	Cursor     string `form:"cursor"`
+}
+
+// Validate 跨字段校验；当前无跨字段规则（limit 归一不拒请求）。
+func (r ListRunsReq) Validate() error { return nil }
+
+// GetRunReq 运行详情请求（两路由参数，handler strconv 注入；非法数字 400 兜底）。
+type GetRunReq struct {
+	WorkflowID uint64
+	RunID      uint64
+}
+
+// Validate 跨字段校验；当前无跨字段规则。
+func (r GetRunReq) Validate() error { return nil }
+
+// RunSummarySchema 运行列表摘要（恰好 9 字段，无 input/output 大文本——FR-002；
+// SQL 即取摘要列，非取后丢弃）。ID 为 string 挂 json:"id"（,string 只用于数字
+// 字段，挂 string 字段会双重编码——WorkflowSummarySchema 2026-09-16 修订同款）。
+type RunSummarySchema struct {
+	ID            string    `json:"id"` // 运行编号
+	Status        string    `json:"status"`
+	TriggerSource string    `json:"trigger_source"` // console / chat / workflow
+	IsTrial       bool      `json:"is_trial"`
+	DurationMs    int       `json:"duration_ms"`
+	ErrorNode     string    `json:"error_node"` // 失败节点 key，成功 = ""
+	ErrorMsg      string    `json:"error_msg"`  // 运行级错误摘要
+	StartedAt     time.Time `json:"started_at"` // 「调用时间」列 = 执行起点（D2）
+	CreatedAt     time.Time `json:"created_at"` // 落库时刻 = 排序键（D2）
+}
+
+// RunListResult 游标分页结果（api 层自定义、不 import platform/page——D1）；handler
+// 经 respond.OKWithCursor 拆封（Items → data.items，Limit/HasMore/NextCursor → meta）。
+type RunListResult struct {
+	Items      []RunSummarySchema
+	Limit      int
+	HasMore    bool
+	NextCursor string // has_more=false 时 "" → meta.next_cursor 序列化 null，前端停止翻页
+}
+
+// RunDetailSchema 单次运行详情（全字段 + 按执行序轨迹）。三可空关联 *string：
+// null = 非对话触发（conversation_id / message_id）或顶层运行（parent_run_id）。
+type RunDetailSchema struct {
+	ID             string          `json:"id"`
+	Status         string          `json:"status"`
+	TriggerSource  string          `json:"trigger_source"`
+	IsTrial        bool            `json:"is_trial"`
+	ConversationID *string         `json:"conversation_id"`
+	MessageID      *string         `json:"message_id"`
+	TraceID        string          `json:"trace_id"`
+	ParentRunID    *string         `json:"parent_run_id"`
+	Input          string          `json:"input"` // 截断保真文本（16KB 上限 + 截断标记）
+	Output         string          `json:"output"`
+	ErrorNode      string          `json:"error_node"`
+	ErrorMsg       string          `json:"error_msg"`
+	DurationMs     int             `json:"duration_ms"`
+	StartedAt      time.Time       `json:"started_at"`
+	CreatedAt      time.Time       `json:"created_at"`
+	Nodes          []NodeRunSchema `json:"nodes"` // 按执行序（seq ASC）；空轨迹 = []
+}
+
+// NodeRunSchema 轨迹行。ErrorMsg 落库恒空（nodeStep 无该字段，既有形态）——契约面
+// 保留字段位，错误定位走 run 级 ErrorMsg + ErrorNode 高亮。
+type NodeRunSchema struct {
+	Seq        int    `json:"seq"`
+	NodeKey    string `json:"node_key"`
+	NodeType   string `json:"node_type"`
+	Status     string `json:"status"` // succeeded / failed
+	Input      string `json:"input"`
+	Output     string `json:"output"`
+	ErrorMsg   string `json:"error_msg"`
+	DurationMs int    `json:"duration_ms"`
+}

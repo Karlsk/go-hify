@@ -10,6 +10,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
@@ -706,5 +707,178 @@ func TestUpdateParentRunIDsError(t *testing.T) {
 
 	err := s.UpdateParentRunIDs(context.Background(), 7, []uint64{11})
 	assert.ErrorIs(t, err, boom)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ---- ListRuns：运行历史 keyset 列表（spec 015，摘要面 D4——无 input/output 大文本）----
+
+// runSummaryCols 摘要列清单（与 store.go selectRunSummary 一致，10 列；input/output
+// 不取——FR-002 大文本 TOAST，不取零成本）。
+var runSummaryCols = []string{"id", "workflow_id", "status", "trigger_source", "is_trial", "duration_ms", "error_node", "error_msg", "started_at", "created_at"}
+
+// rvals 展开为 workflow_runs 摘要一行（列序 = runSummaryCols）。
+func rvals(id, wfID uint64, status, trigger string, isTrial bool, durMs int, errNode, errMsg string, startedAt, createdAt time.Time) []driver.Value {
+	return []driver.Value{id, wfID, status, trigger, isTrial, durMs, errNode, errMsg, startedAt, createdAt}
+}
+
+// 首页（before 零值）：无行值比较子句；LIMIT = FetchN()（n+1，has_more 判定归 service）。
+const listRunsFirstPageSQL = `SELECT id, workflow_id, status, trigger_source, is_trial, duration_ms, error_node, error_msg, started_at, created_at FROM "workflow_runs" WHERE workflow_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2`
+
+// 翻页：行值比较 (created_at, id) < ($2, $3)（keyset 双键最新在前，D2；chat
+// ListConversationsByCursor 同款形态）。
+const listRunsCursorPageSQL = `SELECT id, workflow_id, status, trigger_source, is_trial, duration_ms, error_node, error_msg, started_at, created_at FROM "workflow_runs" WHERE workflow_id = $1 AND (created_at, id) < ($2, $3) ORDER BY created_at DESC, id DESC LIMIT $4`
+
+func TestListRunsFirstPage(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	t0 := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	t1 := t0.Add(-time.Minute)
+	mock.ExpectQuery(regexp.QuoteMeta(listRunsFirstPageSQL)).
+		WithArgs(uint64(42), 21). // FetchN()：limit 20 → 取 21 判 has_more
+		WillReturnRows(sqlmock.NewRows(runSummaryCols).
+			AddRow(rvals(7, 42, "succeeded", "console", true, 120, "", "", t0, t0)...).
+			AddRow(rvals(6, 42, "failed", "chat", false, 3000, "order_api", "node order_api: connection refused", t1, t1)...))
+
+	runs, err := s.ListRuns(context.Background(), 42, time.Time{}, 0, 21)
+	assert.NoError(t, err)
+	assert.Len(t, runs, 2)
+	assert.Equal(t, uint64(7), runs[0].ID) // created_at DESC, id DESC：最新在前
+	assert.True(t, runs[0].IsTrial)
+	assert.Equal(t, "console", runs[0].TriggerSource)
+	assert.Equal(t, t0, runs[0].StartedAt, "调用时间 = 执行起点（D2）")
+	assert.Equal(t, "order_api", runs[1].ErrorNode)
+	assert.Empty(t, runs[0].ErrorMsg)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestListRunsCursorPage(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	before := time.Date(2026, 9, 24, 7, 59, 0, 0, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta(listRunsCursorPageSQL)).
+		WithArgs(uint64(42), before, uint64(6), 21).
+		WillReturnRows(sqlmock.NewRows(runSummaryCols).
+			AddRow(rvals(5, 42, "succeeded", "workflow", false, 50, "", "", before.Add(-time.Minute), before.Add(-time.Minute))...))
+
+	runs, err := s.ListRuns(context.Background(), 42, before, 6, 21)
+	assert.NoError(t, err)
+	assert.Len(t, runs, 1)
+	assert.Equal(t, "workflow", runs[0].TriggerSource) // 子工作流嵌套触发
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// SQL 失败：原样上抛不吞错。
+func TestListRunsError(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	boom := errors.New("q failed")
+	mock.ExpectQuery(regexp.QuoteMeta(listRunsFirstPageSQL)).
+		WithArgs(uint64(42), 21).
+		WillReturnError(boom)
+
+	_, err := s.ListRuns(context.Background(), 42, time.Time{}, 0, 21)
+	assert.ErrorIs(t, err, boom)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ---- GetRunByID / ListNodeRuns：运行详情与节点轨迹（spec 015 D3/D4/D5） ----
+
+// runCols 全列清单（与 store.go selectRun 一致，17 列——详情档才取 input/output
+// 大文本与关联 id / trace_id，D4 两档之「详情档」）。
+var runCols = []string{"id", "workflow_id", "workflow_name", "trigger_source", "is_trial", "conversation_id", "message_id", "trace_id", "status", "input", "output", "error_node", "error_msg", "duration_ms", "started_at", "created_at", "parent_run_id"}
+
+// runFullVals 展开为 workflow_runs 全列一行（列序 = runCols）；conv / msg / parent
+// 三可空 id 传 nil 或 *uint64 解引用值。
+func runFullVals(id, wfID uint64, convID, msgID, parentID *uint64, t0 time.Time) []driver.Value {
+	var cv, mv, pv driver.Value
+	if convID != nil {
+		cv = *convID
+	}
+	if msgID != nil {
+		mv = *msgID
+	}
+	if parentID != nil {
+		pv = *parentID
+	}
+	return []driver.Value{id, wfID, "智能客服分流", "chat", false, cv, mv, "tr-abc123", "failed",
+		`{"query":"查订单"}`, ``, "order_api", "node order_api: connection refused", 3000, t0, t0, pv}
+}
+
+// nodeRunCols 轨迹列清单（与 store.go selectNodeRun 一列不差，11 列）。
+var nodeRunCols = []string{"id", "run_id", "seq", "node_key", "node_type", "status", "input", "output", "error_msg", "duration_ms", "created_at"}
+
+// nrvals 展开为 workflow_node_runs 一行（列序 = nodeRunCols）；error_msg 落库恒空。
+func nrvals(id, runID uint64, seq int, key, ntype, status, in, out string, durMs int, t0 time.Time) []driver.Value {
+	return []driver.Value{id, runID, seq, key, ntype, status, in, out, "", durMs, t0}
+}
+
+// 双条件同判（D3）：不存在与跨工作流访问走同一条 WHERE，SQL 钉死两条件恒在。
+const getRunByIDSQL = `SELECT id, workflow_id, workflow_name, trigger_source, is_trial, conversation_id, message_id, trace_id, status, input, output, error_node, error_msg, duration_ms, started_at, created_at, parent_run_id FROM "workflow_runs" WHERE workflow_id = $1 AND id = $2 ORDER BY "workflow_runs"."id" LIMIT $3`
+
+const listNodeRunsSQL = `SELECT id, run_id, seq, node_key, node_type, status, input, output, error_msg, duration_ms, created_at FROM "workflow_node_runs" WHERE run_id = $1 ORDER BY seq ASC`
+
+func TestGetRunByID(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	t0 := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	convID, msgID := uint64(101), uint64(202)
+	mock.ExpectQuery(regexp.QuoteMeta(getRunByIDSQL)).
+		WithArgs(uint64(42), uint64(7), 1). // First 的 LIMIT 1
+		WillReturnRows(sqlmock.NewRows(runCols).
+			AddRow(runFullVals(7, 42, &convID, &msgID, nil, t0)...))
+
+	run, err := s.GetRunByID(context.Background(), 42, 7)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(7), run.ID)
+	assert.Equal(t, uint64(42), run.WorkflowID)
+	assert.Equal(t, "chat", run.TriggerSource)
+	require.NotNil(t, run.ConversationID)
+	assert.Equal(t, convID, *run.ConversationID)
+	require.NotNil(t, run.MessageID)
+	assert.Equal(t, msgID, *run.MessageID)
+	assert.Nil(t, run.ParentRunID, "纯 chat 触发无父 run")
+	assert.Equal(t, "tr-abc123", run.TraceID)
+	assert.Equal(t, "failed", run.Status)
+	assert.Equal(t, `{"query":"查订单"}`, run.Input, "详情档取大文本（D4）")
+	assert.Equal(t, "order_api", run.ErrorNode)
+	assert.Equal(t, "node order_api: connection refused", run.ErrorMsg)
+	assert.Equal(t, t0, run.StartedAt)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// 未找到（含跨工作流——同一条 SQL 双条件）：gorm.ErrRecordNotFound 原样上抛，
+// 哨兵翻译归 service（D3 不泄露存在性）。
+func TestGetRunByIDNotFound(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	mock.ExpectQuery(regexp.QuoteMeta(getRunByIDSQL)).
+		WithArgs(uint64(42), uint64(999), 1).
+		WillReturnError(gorm.ErrRecordNotFound)
+
+	_, err := s.GetRunByID(context.Background(), 42, 999)
+	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestListNodeRuns(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	t0 := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta(listNodeRunsSQL)).
+		WithArgs(uint64(7)).
+		WillReturnRows(sqlmock.NewRows(nodeRunCols).
+			AddRow(nrvals(1, 7, 1, "classify", "llm", "succeeded", `{"query":"查订单"}`, `{"intent":"order"}`, 80, t0)...).
+			AddRow(nrvals(2, 7, 2, "order_api", "api", "failed", `{"order_id":"A1"}`, "", 120, t0)...))
+
+	nodes, err := s.ListNodeRuns(context.Background(), 7)
+	assert.NoError(t, err)
+	require.Len(t, nodes, 2)
+	assert.Equal(t, 1, nodes[0].Seq, "执行序（D5 seq ASC，排序在 SQL）")
+	assert.Equal(t, "classify", nodes[0].NodeKey)
+	assert.Equal(t, "llm", nodes[0].NodeType)
+	assert.Equal(t, `{"intent":"order"}`, nodes[0].Output)
+	assert.Empty(t, nodes[0].ErrorMsg, "节点级 error_msg 落库恒空（既有形态）")
+	assert.Equal(t, "order_api", nodes[1].NodeKey)
+	assert.Equal(t, "failed", nodes[1].Status)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }

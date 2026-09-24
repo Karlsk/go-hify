@@ -20,6 +20,7 @@ import (
 
 	"github.com/Karlsk/go-hify/internal/platform/cache"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
+	"github.com/Karlsk/go-hify/internal/platform/page"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
@@ -56,6 +57,15 @@ type Store interface {
 	// UpdateParentRunIDs 父 run 落库后批量回填直接子 run 的 parent_run_id（spec 08
 	// O5——append-only 一次窄 UPDATE 例外）；childRunIDs 空 → 短路零 SQL。
 	UpdateParentRunIDs(ctx context.Context, parentRunID uint64, childRunIDs []uint64) error
+	// ListRuns 运行历史 keyset 列表（spec 015）：WHERE workflow_id + 行值比较
+	// (created_at, id) < (before) + ORDER BY created_at DESC, id DESC + LIMIT；
+	// before 零值跳过行值比较；limit 由 service 以 FetchN()（n+1）传入。
+	ListRuns(ctx context.Context, workflowID uint64, beforeCreatedAt time.Time, beforeID uint64, limit int) ([]WorkflowRun, error)
+	// GetRunByID 运行详情（spec 015 D3）：workflow_id + id 双条件——run 不存在与
+	// 属于其他工作流不可区分（不泄露存在性），未找到原样上抛 gorm.ErrRecordNotFound。
+	GetRunByID(ctx context.Context, workflowID, runID uint64) (*WorkflowRun, error)
+	// ListNodeRuns 节点轨迹（spec 015 D5）：按 run_id 取全行、seq 升序（执行序回放）。
+	ListNodeRuns(ctx context.Context, runID uint64) ([]WorkflowNodeRun, error)
 }
 
 // cacheManager 是 platform/cache 的窄接口：service 只用读 / 写 / 删三个动作
@@ -783,4 +793,131 @@ func (s *workflowService) changeStatus(ctx context.Context, id uint64, from []st
 		return nil, err
 	}
 	return &d.WorkflowSummarySchema, nil
+}
+
+// ---- 运行历史查询（spec 015，只读）----
+
+// runCursorKey 运行列表 keyset 复合排序键（created_at DESC, id DESC），经 page
+// 编码为不透明 cursor（对齐 chat convCursorKey）。
+type runCursorKey struct {
+	CreatedAt time.Time `json:"c"`
+	ID        uint64    `json:"i"`
+}
+
+// ListRuns 运行历史列表：page.NewCursor 归一 limit / 解码 cursor → store keyset
+// 查询（FetchN n+1）→ NewCursorResult 切片判 has_more → 摘要组装（make 兜底非
+// nil）。对齐 chat ListConversations 逐层先例；workflow 不存在不报错、返空列表。
+func (s *workflowService) ListRuns(ctx context.Context, req workflowapi.ListRunsReq) (*workflowapi.RunListResult, error) {
+	params := page.NewCursor(req.Limit, req.Cursor)
+	key, err := page.DecodeCursor[runCursorKey](params.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("%w: cursor: %v", errs.ErrValidationFailed, err) // 篡改 / 格式不对 → 400
+	}
+	runs, err := s.store.ListRuns(ctx, req.WorkflowID, key.CreatedAt, key.ID, params.FetchN())
+	if err != nil {
+		return nil, fmt.Errorf("list workflow %d runs: %w", req.WorkflowID, err)
+	}
+	res, err := page.NewCursorResult(runs, params.Limit, func(r WorkflowRun) runCursorKey {
+		return runCursorKey{CreatedAt: r.CreatedAt, ID: r.ID}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build runs cursor result: %w", err)
+	}
+	items := make([]workflowapi.RunSummarySchema, 0, len(res.Items))
+	for i := range res.Items {
+		items = append(items, toRunSummary(&res.Items[i]))
+	}
+	return &workflowapi.RunListResult{
+		Items:      items, // make 兜底非 nil（空值约定）
+		Limit:      res.Limit,
+		HasMore:    res.HasMore,
+		NextCursor: res.NextCursor,
+	}, nil
+}
+
+// toRunSummary model → 摘要 schema（9 字段；workflow_name / input / output /
+// 关联 id / trace_id 是详情面字段，此处不映射——FR-002 摘要无大文本）。
+func toRunSummary(r *WorkflowRun) workflowapi.RunSummarySchema {
+	return workflowapi.RunSummarySchema{
+		ID:            strconv.FormatUint(r.ID, 10),
+		Status:        r.Status,
+		TriggerSource: r.TriggerSource,
+		IsTrial:       r.IsTrial,
+		DurationMs:    r.DurationMs,
+		ErrorNode:     r.ErrorNode,
+		ErrorMsg:      r.ErrorMsg,
+		StartedAt:     r.StartedAt,
+		CreatedAt:     r.CreatedAt,
+	}
+}
+
+// GetRun 运行详情（spec 015）：run 双条件查询 → NotFound 翻译 ErrRunNotFound →
+// 轨迹分次查询（跨模块不 JOIN 同款：两查在 service 组装）→ 全字段转换。run 未命中
+// 短路不查轨迹；节点级错误信息落库恒空（既有形态），错误定位走 run 级 ErrorMsg。
+func (s *workflowService) GetRun(ctx context.Context, req workflowapi.GetRunReq) (*workflowapi.RunDetailSchema, error) {
+	run, err := s.store.GetRunByID(ctx, req.WorkflowID, req.RunID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, workflowapi.ErrRunNotFound // 不存在与跨工作流同判（D3，store 双条件保证）
+		}
+		return nil, fmt.Errorf("get workflow %d run %d: %w", req.WorkflowID, req.RunID, err)
+	}
+	nodeRuns, err := s.store.ListNodeRuns(ctx, req.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("list workflow %d run %d node runs: %w", req.WorkflowID, req.RunID, err)
+	}
+	return toRunDetail(run, nodeRuns), nil
+}
+
+// toRunDetail model → 详情 schema（16 字段）：三可空 id（conversation / message /
+// parent）有值转字符串指针、nil 保持 null；input / output 原样透传（截断标记文本
+// 如实到前端）；nodes 空时 make 兜底为 [] 非 nil（空值约定，D5）。
+func toRunDetail(r *WorkflowRun, nodeRuns []WorkflowNodeRun) *workflowapi.RunDetailSchema {
+	d := &workflowapi.RunDetailSchema{
+		ID:            strconv.FormatUint(r.ID, 10),
+		Status:        r.Status,
+		TriggerSource: r.TriggerSource,
+		IsTrial:       r.IsTrial,
+		ConversationID: idToStringPtr(r.ConversationID),
+		MessageID:     idToStringPtr(r.MessageID),
+		TraceID:       r.TraceID,
+		ParentRunID:   idToStringPtr(r.ParentRunID),
+		Input:         r.Input,
+		Output:        r.Output,
+		ErrorNode:     r.ErrorNode,
+		ErrorMsg:      r.ErrorMsg,
+		DurationMs:    r.DurationMs,
+		StartedAt:     r.StartedAt,
+		CreatedAt:     r.CreatedAt,
+		Nodes:         make([]workflowapi.NodeRunSchema, 0, len(nodeRuns)),
+	}
+	for i := range nodeRuns {
+		d.Nodes = append(d.Nodes, toNodeRun(nodeRuns[i]))
+	}
+	return d
+}
+
+// idToStringPtr 可空外键 id → 可空字符串（nil → nil 保持 JSON null；有值 → 字符串
+// 化，ID 序列化约定）。
+func idToStringPtr(id *uint64) *string {
+	if id == nil {
+		return nil
+	}
+	s := strconv.FormatUint(*id, 10)
+	return &s
+}
+
+// toNodeRun model → 轨迹 schema（8 字段）：执行序 / 输入输出摘要 / 恒空 ErrorMsg
+// 契约位原样映射。
+func toNodeRun(n WorkflowNodeRun) workflowapi.NodeRunSchema {
+	return workflowapi.NodeRunSchema{
+		Seq:        n.Seq,
+		NodeKey:    n.NodeKey,
+		NodeType:   n.NodeType,
+		Status:     n.Status,
+		Input:      n.Input,
+		Output:     n.Output,
+		ErrorMsg:   n.ErrorMsg,
+		DurationMs: n.DurationMs,
+	}
 }

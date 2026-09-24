@@ -1007,7 +1007,7 @@ Hify 后端所有 HTTP 接口的统一规范，与《代码组织规范》handle
 | agent | agents | `/agents`、`/agents/{id}/mcp-tools`、`/agents/{id}/knowledge-bases` |
 | rag | knowledge-bases、documents | `/knowledge-bases`、`/knowledge-bases/{id}/documents`、`/documents/{id}/reindex` |
 | chat | conversations、messages | `POST /conversations`（绑 agent 建会话）、`/conversations/{id}/messages`（发消息：`stream` 开关两模式 + 历史查询）、`DELETE /conversations/{id}` |
-| workflow | workflows | `/workflows`、`/workflows/{id}/execute` |
+| workflow | workflows | `/workflows`、`/workflows/{id}/execute`、`/workflows/{id}/runs`（运行历史列表）、`/workflows/{id}/runs/{runId}`（运行详情 + 节点轨迹，spec 015） |
 
 > `GET /health`（探 PG + Redis）在 `/api/v1` 之外、不需鉴权。
 
@@ -1125,6 +1125,7 @@ HTTP 状态映射：
 | `WORKFLOW_NOT_PUBLISHED` | 503 | `workflowapi.ErrWorkflowNotPublished`（workflow 未发布，执行被拒；spec 08 起嵌套执行时子图非 published 同拒，带父 node 前缀） |
 | `WORKFLOW_IN_USE` | 409 | `workflowapi.ErrWorkflowInUse`（被 agent 绑定，删除被 FK RESTRICT 挡，spec 05） |
 | `WORKFLOW_EXECUTION_FAILED` | 500 | `workflowapi.ErrWorkflowExecutionFailed`（执行引擎环境限制类：api 节点 SSRF 拦截 / 总时长超 5min，spec 06） |
+| `RUN_NOT_FOUND` | 404 | `workflowapi.ErrRunNotFound`（runs 详情：run 不存在或不属于所查工作流同判 404、不泄露存在性，spec 015） |
 | `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound`（KB 不存在）；`agentapi.ErrKnowledgeBaseNotFound`（agent 侧绑定写入同码哨兵，FK 23503 翻译——agent 不依赖 rag，FK 是 KB 存在性的唯一校验） |
 | `MCP_SERVER_NOT_FOUND` | 404 | `mcpapi.ErrMCPServerNotFound` |
 | `INTERNAL_ERROR` | 500 | `errs.ErrInternal`（兜底，不向前端泄露细节） |

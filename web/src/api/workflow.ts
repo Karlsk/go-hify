@@ -8,9 +8,11 @@
  *
  * spec 010 起接详情与更新：GET /workflows/{id}（详情渲染 / 编辑回填）、
  * PUT /workflows/{id}（整图替换；请求体不带 type——后端 Type *string 携带即拒，
- * 同值也拒）。spec 013 接试运行执行 executeWorkflow（?trial=true；运行历史查询仍未接）。
+ * 同值也拒）。spec 013 接试运行执行 executeWorkflow（?trial=true）。spec 015 接
+ * 运行历史查询（列表 + 详情，类型前缀 Run/NodeRunTrack 与当次同步执行结果区分）。
  */
-import { del, get, getList, post, put } from '@/utils/request'
+import { del, get, getCursorList, getList, post, put } from '@/utils/request'
+import type { AxiosRequestConfig } from 'axios'
 import type { PageQuery } from '@/types'
 
 // ---- 类型（对齐 workflow/api/schema.go） ----
@@ -168,6 +170,55 @@ export interface WorkflowRunResult {
   node_trace: NodeRunSummary[]
 }
 
+// ---- 类型（spec 015：运行历史查询，contracts/frontend.md §1 逐字对齐） ----
+// 与上方 NodeRunSummary / WorkflowRunResult 区分：那两个是 execute 当次同步返回，
+// 本组是落库历史查询（run 两态、无 pending）。
+
+/** 运行历史列表项（摘要面，无 input/output——FR-002） */
+export interface RunSummary {
+  id: string
+  status: 'succeeded' | 'failed'
+  trigger_source: 'console' | 'chat' | 'workflow'
+  is_trial: boolean
+  duration_ms: number
+  error_node: string
+  error_msg: string
+  started_at: string // 「调用时间」列
+  created_at: string
+}
+
+/** 轨迹行（按执行序 seq ASC） */
+export interface NodeRunTrack {
+  seq: number
+  node_key: string
+  node_type: string
+  status: 'succeeded' | 'failed'
+  input: string
+  output: string
+  error_msg: string // 落库恒空，契约面保留
+  duration_ms: number
+}
+
+/** 运行详情（全字段 + 轨迹） */
+export interface RunDetail {
+  id: string
+  status: 'succeeded' | 'failed'
+  trigger_source: 'console' | 'chat' | 'workflow'
+  is_trial: boolean
+  conversation_id: string | null
+  message_id: string | null
+  trace_id: string
+  parent_run_id: string | null
+  input: string
+  output: string
+  error_node: string
+  error_msg: string
+  duration_ms: number
+  started_at: string
+  created_at: string
+  nodes: NodeRunTrack[]
+}
+
 // ---- 请求方法 ----
 
 /** 工作流列表（偏移分页；HifyTable 数据源 / 子工作流下拉前端过滤 task 型） */
@@ -219,4 +270,15 @@ export function executeWorkflow(id: string, input: string) {
     { input },
     { timeout: 300_000 },
   )
+}
+
+/** 运行历史列表（keyset 游标，最新在前；触底/点击加载回传 cursor，spec 015） */
+export function listWorkflowRuns(id: string, params?: { limit?: number; cursor?: string }) {
+  return getCursorList<RunSummary>(`/workflows/${id}/runs`, params)
+}
+
+/** 单次运行详情（含节点轨迹，spec 015；run 不存在或跨工作流 404 RUN_NOT_FOUND）。
+ *  config 可选透传（抽屉按需拉取走 skipErrorToast——错误态在抽屉内展示，auth.ts 同款） */
+export function getWorkflowRun(id: string, runId: string, config?: AxiosRequestConfig) {
+  return get<RunDetail>(`/workflows/${id}/runs/${runId}`, config)
 }

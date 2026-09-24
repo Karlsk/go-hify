@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -572,4 +573,115 @@ func TestValidateSchemaFields(t *testing.T) {
 	}), "重名")
 	assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{{Name: "q", Type: "integer"}}), "type")
 	assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{{Name: "", Type: "string"}}), "name")
+}
+
+// ── 运行历史查询契约（spec 015，contracts/api.md 冻结面）──
+
+// TestErrRunNotFoundPinned 本篇唯一新增哨兵：code = Error() 字符串，与 CLAUDE.md
+// 错误码表命名空间一致（404——run 不存在或跨工作流同判，不泄露存在性，D3）。
+func TestErrRunNotFoundPinned(t *testing.T) {
+	assert.Equal(t, "RUN_NOT_FOUND", ErrRunNotFound.Error())
+}
+
+// TestRunsReqContract 请求形态：ListRunsReq 走 form tag（D1：api 层 cursor 只是
+// string，page 工具全在 service 层）；WorkflowID 由路由参数注入、不参与 query 绑定。
+// GetRunReq 两路由参数（handler strconv 注入，非法数字 400 兜底）。
+func TestRunsReqContract(t *testing.T) {
+	rt := reflect.TypeOf(ListRunsReq{})
+	f, ok := rt.FieldByName("Limit")
+	assert.True(t, ok)
+	assert.Equal(t, "limit", f.Tag.Get("form"))
+	f, ok = rt.FieldByName("Cursor")
+	assert.True(t, ok)
+	assert.Equal(t, "cursor", f.Tag.Get("form"))
+	f, ok = rt.FieldByName("WorkflowID")
+	assert.True(t, ok)
+	assert.Equal(t, "-", f.Tag.Get("form"), "WorkflowID 不参与 query 绑定（路由注入）")
+	assert.NoError(t, ListRunsReq{WorkflowID: 1, Limit: 20}.Validate())
+
+	var gr GetRunReq
+	gr.WorkflowID, gr.RunID = 1, 2
+	assert.IsType(t, uint64(0), gr.WorkflowID, "路由参数 uint64（strconv 注入）")
+	assert.IsType(t, uint64(0), gr.RunID)
+	assert.NoError(t, gr.Validate())
+}
+
+// TestRunSummarySchemaContract 摘要面恰好 9 字段、JSON 无 input/output 键（FR-002）、
+// id 字符串化不双重编码（对齐 WorkflowSummarySchema 2026-09-16 修订形态）。
+func TestRunSummarySchemaContract(t *testing.T) {
+	assert.Equal(t, 9, reflect.TypeOf(RunSummarySchema{}).NumField(),
+		"摘要面恰好 9 字段（contracts/api.md 冻结）")
+
+	s := RunSummarySchema{
+		ID: "42", Status: "failed", TriggerSource: "chat", IsTrial: true,
+		DurationMs: 1234, ErrorNode: "reply", ErrorMsg: "boom",
+		StartedAt: jsonTime, CreatedAt: jsonTime,
+	}
+	b, err := json.Marshal(s)
+	assert.NoError(t, err)
+	var m map[string]any
+	assert.NoError(t, json.Unmarshal(b, &m))
+	assert.NotContains(t, m, "input", "列表载荷禁 input 大文本（FR-002）")
+	assert.NotContains(t, m, "output", "列表载荷禁 output 大文本（FR-002）")
+	assert.Len(t, m, 9)
+	assert.Equal(t, "42", m["id"], "id 字符串化")
+	assert.Equal(t, "failed", m["status"])
+	assert.Equal(t, "chat", m["trigger_source"])
+	assert.Equal(t, true, m["is_trial"])
+	assert.Equal(t, float64(1234), m["duration_ms"])
+	assert.Equal(t, "reply", m["error_node"])
+	assert.Equal(t, "boom", m["error_msg"])
+	assert.Contains(t, m, "started_at", "「调用时间」列 = 执行起点")
+	assert.Contains(t, m, "created_at", "落库时刻 = 排序键（D2）")
+	assert.NotContains(t, string(b), `\"42\"`, "字符串 id 不得双重编码")
+}
+
+// TestRunDetailSchemaContract 详情全字段 16（含 nodes）；三可空外键 *string
+//（null = 非对话触发 / 顶层运行）；空轨迹 [] 非 null。
+func TestRunDetailSchemaContract(t *testing.T) {
+	rt := reflect.TypeOf(RunDetailSchema{})
+	assert.Equal(t, 16, rt.NumField(), "详情全字段 16（contracts/api.md 冻结）")
+	for _, name := range []string{"ConversationID", "MessageID", "ParentRunID"} {
+		f, ok := rt.FieldByName(name)
+		assert.True(t, ok, "%s 字段须存在", name)
+		assert.Equal(t, reflect.Ptr, f.Type.Kind(), "%s 须为指针（null 语义）", name)
+		assert.Equal(t, reflect.String, f.Type.Elem().Kind(), "%s 须为 *string", name)
+	}
+
+	conv, msg, parent := "7", "8", "9"
+	d := RunDetailSchema{
+		ID: "42", Status: "failed", TriggerSource: "workflow", IsTrial: false,
+		ConversationID: &conv, MessageID: &msg, TraceID: "trace-1", ParentRunID: &parent,
+		Input: "in", Output: "out", ErrorNode: "api1", ErrorMsg: "err", DurationMs: 99,
+		StartedAt: jsonTime, CreatedAt: jsonTime, Nodes: []NodeRunSchema{},
+	}
+	b, err := json.Marshal(d)
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"id":"42","status":"failed","trigger_source":"workflow","is_trial":false,`+
+		`"conversation_id":"7","message_id":"8","trace_id":"trace-1","parent_run_id":"9",`+
+		`"input":"in","output":"out","error_node":"api1","error_msg":"err","duration_ms":99,`+
+		`"started_at":"2026-09-16T08:00:00Z","created_at":"2026-09-16T08:00:00Z","nodes":[]}`, string(b))
+
+	// 空值面：三可空 nil → null（非对话触发 / 顶层运行）；空轨迹 [] 非 null。
+	d.ConversationID, d.MessageID, d.ParentRunID = nil, nil, nil
+	b2, err := json.Marshal(d)
+	assert.NoError(t, err)
+	assert.Contains(t, string(b2), `"conversation_id":null`)
+	assert.Contains(t, string(b2), `"message_id":null`)
+	assert.Contains(t, string(b2), `"parent_run_id":null`)
+	assert.Contains(t, string(b2), `"nodes":[]`)
+}
+
+// TestNodeRunSchemaContract 轨迹行 8 字段；error_msg 落库恒空但契约位保留
+//（既有形态：错误定位走 run 级 error_msg + error_node 高亮）。
+func TestNodeRunSchemaContract(t *testing.T) {
+	assert.Equal(t, 8, reflect.TypeOf(NodeRunSchema{}).NumField())
+	n := NodeRunSchema{
+		Seq: 1, NodeKey: "classify", NodeType: "llm", Status: "succeeded",
+		Input: "i", Output: "o", ErrorMsg: "", DurationMs: 5,
+	}
+	b, err := json.Marshal(n)
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"seq":1,"node_key":"classify","node_type":"llm","status":"succeeded",`+
+		`"input":"i","output":"o","error_msg":"","duration_ms":5}`, string(b))
 }

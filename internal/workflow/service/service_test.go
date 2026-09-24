@@ -21,6 +21,7 @@ import (
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
+	"github.com/Karlsk/go-hify/internal/platform/page"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
@@ -68,10 +69,24 @@ type stubStore struct {
 	createRunFn    func(run *WorkflowRun, nodeRuns []WorkflowNodeRun) error
 	deleteRunsFn   func(before time.Time, limit int) (int64, error)
 	updateParentRunIDsFn func(parentRunID uint64, childRunIDs []uint64) error
+	listRunsFn     func(workflowID uint64, beforeCreatedAt time.Time, beforeID uint64, limit int) ([]WorkflowRun, error)
+	getRunByIDFn   func(workflowID, runID uint64) (*WorkflowRun, error)
+	listNodeRunsFn func(runID uint64) ([]WorkflowNodeRun, error)
 
 	seq      []string // 调用序列（方法名）
 	lastFrom []string // UpdateStatus 最近一次 from
 	lastTo   string   // UpdateStatus 最近一次 to
+	// lastListRuns ListRuns 最近一次收到的参数（归一后 limit / 首页零值游标断言）。
+	lastListRuns struct {
+		workflowID uint64
+		before     time.Time
+		beforeID   uint64
+		limit      int
+	}
+	// lastGetRunByID / lastListNodeRuns GetRun 链路最近一次收到的参数（D3 双条件
+	// 透传与轨迹以 run 主键查询断言）。
+	lastGetRunByID   struct{ workflowID, runID uint64 }
+	lastListNodeRuns struct{ runID uint64 }
 }
 
 func (s *stubStore) GetByID(ctx context.Context, id uint64) (*Workflow, error) {
@@ -128,6 +143,28 @@ func (s *stubStore) DeleteRunsBefore(ctx context.Context, before time.Time, limi
 func (s *stubStore) UpdateParentRunIDs(ctx context.Context, parentRunID uint64, childRunIDs []uint64) error {
 	s.seq = append(s.seq, "updateParentRunIDs")
 	return s.updateParentRunIDsFn(parentRunID, childRunIDs)
+}
+
+func (s *stubStore) ListRuns(ctx context.Context, workflowID uint64, beforeCreatedAt time.Time, beforeID uint64, limit int) ([]WorkflowRun, error) {
+	s.seq = append(s.seq, "listRuns")
+	s.lastListRuns.workflowID = workflowID
+	s.lastListRuns.before = beforeCreatedAt
+	s.lastListRuns.beforeID = beforeID
+	s.lastListRuns.limit = limit
+	return s.listRunsFn(workflowID, beforeCreatedAt, beforeID, limit)
+}
+
+func (s *stubStore) GetRunByID(ctx context.Context, workflowID, runID uint64) (*WorkflowRun, error) {
+	s.seq = append(s.seq, "getRunByID")
+	s.lastGetRunByID.workflowID = workflowID
+	s.lastGetRunByID.runID = runID
+	return s.getRunByIDFn(workflowID, runID)
+}
+
+func (s *stubStore) ListNodeRuns(ctx context.Context, runID uint64) ([]WorkflowNodeRun, error) {
+	s.seq = append(s.seq, "listNodeRuns")
+	s.lastListNodeRuns.runID = runID
+	return s.listNodeRunsFn(runID)
 }
 
 // recordCache 记录式 cacheManager stub：Get 返回预设（getVal 经 JSON 往返写入 dst，
@@ -1260,4 +1297,330 @@ func TestR11IndirectCycleReject(t *testing.T) {
 	require.ErrorIs(t, err, errs.ErrValidationFailed)
 	assert.Contains(t, err.Error(), "环")
 	assert.NotContains(t, st.seq, "replaceGraph")
+}
+
+// ---- ListRuns：运行历史列表（spec 015，游标 keyset + limit 归一 + 摘要面）----
+
+// seedRuns 造 n 行 run（id 与 created_at 同步递减——最新行 id 最大，keyset 双键
+// 排序下「最新在前」）；started_at 各偏移 1 分钟做双时间区分。
+func seedRuns(n int, t0 time.Time) []WorkflowRun {
+	runs := make([]WorkflowRun, 0, n)
+	for i := 0; i < n; i++ { // i=0 最新（id=n），i=n-1 最旧（id=1）
+		r := WorkflowRun{
+			WorkflowID: 42, WorkflowName: "智能客服分流", TriggerSource: "console", IsTrial: true,
+			Status: "succeeded", DurationMs: 100 + i, ErrorNode: "", ErrorMsg: "",
+			StartedAt: t0.Add(-time.Duration(i) * time.Minute),
+		}
+		r.ID = uint64(n - i)
+		r.CreatedAt = t0.Add(-time.Duration(i) * time.Second)
+		runs = append(runs, r)
+	}
+	return runs
+}
+
+func TestListRunsFirstPageHasMore(t *testing.T) {
+	t0 := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	all := seedRuns(21, t0)
+	st := &stubStore{listRunsFn: func(uint64, time.Time, uint64, int) ([]WorkflowRun, error) {
+		return all[:21], nil // FetchN=21 全回（store 层不做切片）
+	}}
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	res, err := svc.ListRuns(context.Background(), workflowapi.ListRunsReq{WorkflowID: 42, Limit: 20})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(42), st.lastListRuns.workflowID)
+	assert.Equal(t, 21, st.lastListRuns.limit, "FetchN()：limit 20 → 取 21 判 has_more")
+	assert.True(t, st.lastListRuns.before.IsZero(), "首页零值 cursor → 行值比较跳过")
+	assert.Len(t, res.Items, 20)
+	assert.True(t, res.HasMore)
+	assert.Equal(t, 20, res.Limit)
+	assert.Equal(t, "21", res.Items[0].ID, "最新在前 + id 字符串化")
+	assert.Equal(t, t0, res.Items[0].StartedAt, "调用时间 = 执行起点（D2）")
+	assert.Equal(t, t0, res.Items[0].CreatedAt, "排序键落库时刻（D2）")
+
+	// next_cursor 可解码回末行（第 20 行）排序键——下一页起点
+	key, err := page.DecodeCursor[runCursorKey](res.NextCursor)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), key.ID)
+	assert.Equal(t, all[19].CreatedAt, key.CreatedAt)
+}
+
+// keysetStub 模拟 store 的行值比较语义：首页（before 零值）回全量，翻页只回
+// (created_at, id) < (before, beforeID) 的行——service 层测试据此验证游标续拉。
+func keysetStub(all []WorkflowRun) *stubStore {
+	return &stubStore{listRunsFn: func(_ uint64, before time.Time, beforeID uint64, limit int) ([]WorkflowRun, error) {
+		if before.IsZero() {
+			return all, nil
+		}
+		var rest []WorkflowRun
+		for _, r := range all {
+			if r.CreatedAt.Before(before) || (r.CreatedAt.Equal(before) && r.ID < beforeID) {
+				rest = append(rest, r)
+			}
+		}
+		if len(rest) > limit {
+			rest = rest[:limit]
+		}
+		return rest, nil
+	}}
+}
+
+func TestListRunsSecondPage(t *testing.T) {
+	t0 := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	all := seedRuns(21, t0)
+	st := keysetStub(all)
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	first, err := svc.ListRuns(context.Background(), workflowapi.ListRunsReq{WorkflowID: 42, Limit: 20})
+	require.NoError(t, err)
+
+	second, err := svc.ListRuns(context.Background(), workflowapi.ListRunsReq{WorkflowID: 42, Limit: 20, Cursor: first.NextCursor})
+	require.NoError(t, err)
+	assert.Len(t, second.Items, 1)
+	assert.False(t, second.HasMore)
+	assert.Empty(t, second.NextCursor, "has_more=false → 空 cursor（meta 序列化 null）")
+	assert.Equal(t, "1", second.Items[0].ID, "最旧行补尾页")
+	assert.Equal(t, uint64(2), st.lastListRuns.beforeID, "行值比较起点 = 上页末行 id")
+	assert.Equal(t, all[19].CreatedAt, st.lastListRuns.before, "行值比较起点 = 上页末行 created_at")
+}
+
+// limit 归一不拒请求（D7）：≤0 → 20、>100 → 100，透传 store 为归一后 +1。
+func TestListRunsLimitNormalize(t *testing.T) {
+	tests := []struct {
+		name       string
+		reqLimit   int
+		wantLimit  int
+		wantFetchN int
+	}{
+		{"零值归 20", 0, 20, 21},
+		{"负值归 20", -5, 20, 21},
+		{"越界归 100", 999, 100, 101},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &stubStore{listRunsFn: func(uint64, time.Time, uint64, int) ([]WorkflowRun, error) {
+				return nil, nil
+			}}
+			svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+			res, err := svc.ListRuns(context.Background(), workflowapi.ListRunsReq{WorkflowID: 42, Limit: tt.reqLimit})
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantFetchN, st.lastListRuns.limit)
+			assert.Equal(t, tt.wantLimit, res.Limit, "meta.limit = 归一值")
+			assert.NotNil(t, res.Items, "空结果 Items 为 [] 非 nil（空值约定）")
+			assert.Empty(t, res.Items)
+			assert.False(t, res.HasMore)
+		})
+	}
+}
+
+func TestListRunsBadCursor(t *testing.T) {
+	svc := New(&stubStore{}, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	_, err := svc.ListRuns(context.Background(), workflowapi.ListRunsReq{WorkflowID: 42, Cursor: "!!not-base64!!"})
+	require.ErrorIs(t, err, errs.ErrValidationFailed, "篡改游标 → 400（D7）")
+	assert.Contains(t, err.Error(), "cursor", "包装带 cursor 上下文")
+}
+
+func TestListRunsStoreError(t *testing.T) {
+	boom := errors.New("q failed")
+	st := &stubStore{listRunsFn: func(uint64, time.Time, uint64, int) ([]WorkflowRun, error) {
+		return nil, boom
+	}}
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	_, err := svc.ListRuns(context.Background(), workflowapi.ListRunsReq{WorkflowID: 42})
+	assert.ErrorIs(t, err, boom, "store 错误 %w 链保留")
+}
+
+// toRunSummary 转换字段面：摘要 9 字段全映射、id 字符串化、失败行错误两字段。
+func TestToRunSummary(t *testing.T) {
+	started := time.Date(2026, 9, 24, 7, 30, 0, 0, time.UTC)
+	created := started.Add(2 * time.Second)
+	r := WorkflowRun{
+		WorkflowID: 42, WorkflowName: "智能客服分流", TriggerSource: "chat", IsTrial: false,
+		Status: "failed", Input: `{"input":"查订单"}`, Output: "", ErrorNode: "order_api",
+		ErrorMsg: "node order_api: connection refused", DurationMs: 3000, StartedAt: started,
+		TraceID: "trace-abc",
+	}
+	r.ID = 7
+	r.CreatedAt = created
+
+	s := toRunSummary(&r)
+	assert.Equal(t, "7", s.ID)
+	assert.Equal(t, "failed", s.Status)
+	assert.Equal(t, "chat", s.TriggerSource)
+	assert.False(t, s.IsTrial)
+	assert.Equal(t, 3000, s.DurationMs)
+	assert.Equal(t, "order_api", s.ErrorNode)
+	assert.Equal(t, "node order_api: connection refused", s.ErrorMsg)
+	assert.Equal(t, started, s.StartedAt)
+	assert.Equal(t, created, s.CreatedAt)
+}
+
+// ---- GetRun：运行详情与节点轨迹（spec 015，D3 同判 404 + D5 组装）----
+
+// seedRun 一行 chat 触发的失败 run：三可空 id 两有一无（conversation/message 有值、
+// parent nil——顶层 run 无父），input/output 带截断标记形态文本，覆盖详情档字段面。
+func seedRun(t0 time.Time) *WorkflowRun {
+	convID, msgID := uint64(900), uint64(901)
+	r := &WorkflowRun{
+		WorkflowID: 42, WorkflowName: "智能客服分流", TriggerSource: "chat", IsTrial: false,
+		ConversationID: &convID, MessageID: &msgID, TraceID: "trace-abc",
+		Status: "failed", Input: `{"query":"查订单"}`, Output: "",
+		ErrorNode: "order_api", ErrorMsg: "node order_api: connection refused",
+		DurationMs: 3000, StartedAt: t0,
+	}
+	r.ID = 7
+	r.CreatedAt = t0.Add(2 * time.Second) // started_at 与排序键双时间区分
+	return r
+}
+
+// 不存在与跨工作流同判 404（D3）：stub 只有一种 NotFound，语义由 store 双条件保证
+//（service 只做哨兵翻译）；run 未命中不再查轨迹。
+func TestGetRunNotFound(t *testing.T) {
+	st := &stubStore{
+		getRunByIDFn: func(uint64, uint64) (*WorkflowRun, error) {
+			return nil, gorm.ErrRecordNotFound
+		},
+		listNodeRunsFn: func(uint64) ([]WorkflowNodeRun, error) {
+			t.Fatal("run 未命中不应再查轨迹")
+			return nil, nil
+		},
+	}
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	_, err := svc.GetRun(context.Background(), workflowapi.GetRunReq{WorkflowID: 42, RunID: 999})
+	assert.ErrorIs(t, err, workflowapi.ErrRunNotFound)
+}
+
+func TestGetRunAssemble(t *testing.T) {
+	t0 := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	run := seedRun(t0)
+	st := &stubStore{
+		getRunByIDFn: func(workflowID, runID uint64) (*WorkflowRun, error) {
+			return run, nil
+		},
+		listNodeRunsFn: func(runID uint64) ([]WorkflowNodeRun, error) {
+			return []WorkflowNodeRun{
+				{RunID: 7, Seq: 1, NodeKey: "classify", NodeType: "llm", Status: "succeeded",
+					Input: `{"q":"查订单"}`, Output: `{"intent":"ORDER"}`, DurationMs: 800},
+				{RunID: 7, Seq: 2, NodeKey: "order_api", NodeType: "tool", Status: "failed",
+					Input: `{"id":"A1"}`, DurationMs: 120},
+			}, nil
+		},
+	}
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	d, err := svc.GetRun(context.Background(), workflowapi.GetRunReq{WorkflowID: 42, RunID: 7})
+	require.NoError(t, err)
+	// 双条件透传（D3）与轨迹按 run 主键分次查询（跨模块不 JOIN 同款组装）
+	assert.Equal(t, uint64(42), st.lastGetRunByID.workflowID)
+	assert.Equal(t, uint64(7), st.lastGetRunByID.runID)
+	assert.Equal(t, uint64(7), st.lastListNodeRuns.runID)
+
+	assert.Equal(t, "7", d.ID)
+	assert.Equal(t, "failed", d.Status)
+	assert.Equal(t, "chat", d.TriggerSource)
+	assert.False(t, d.IsTrial)
+	require.NotNil(t, d.ConversationID)
+	assert.Equal(t, "900", *d.ConversationID)
+	require.NotNil(t, d.MessageID)
+	assert.Equal(t, "901", *d.MessageID)
+	assert.Nil(t, d.ParentRunID, "顶层 run 无父 → null")
+	assert.Equal(t, "trace-abc", d.TraceID)
+	assert.Equal(t, `{"query":"查订单"}`, d.Input, "input 原样透传（含截断标记文本）")
+	assert.Empty(t, d.Output)
+	assert.Equal(t, "order_api", d.ErrorNode)
+	assert.Equal(t, "node order_api: connection refused", d.ErrorMsg)
+	assert.Equal(t, 3000, d.DurationMs)
+	assert.Equal(t, t0, d.StartedAt)
+	assert.Equal(t, t0.Add(2*time.Second), d.CreatedAt)
+
+	require.Len(t, d.Nodes, 2)
+	assert.Equal(t, 1, d.Nodes[0].Seq)
+	assert.Equal(t, "classify", d.Nodes[0].NodeKey)
+	assert.Equal(t, 2, d.Nodes[1].Seq, "轨迹按执行序（seq ASC 回放）")
+	assert.Equal(t, "order_api", d.Nodes[1].NodeKey)
+	assert.Equal(t, "failed", d.Nodes[1].Status)
+	assert.Empty(t, d.Nodes[1].ErrorMsg, "node 级 error_msg 落库恒空（既有形态）")
+}
+
+func TestGetRunEmptyNodes(t *testing.T) {
+	t0 := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	st := &stubStore{
+		getRunByIDFn: func(uint64, uint64) (*WorkflowRun, error) { return seedRun(t0), nil },
+		listNodeRunsFn: func(uint64) ([]WorkflowNodeRun, error) {
+			return nil, nil // store 返 nil → service make 兜底
+		},
+	}
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	d, err := svc.GetRun(context.Background(), workflowapi.GetRunReq{WorkflowID: 42, RunID: 7})
+	require.NoError(t, err)
+	require.NotNil(t, d.Nodes, "空轨迹 nodes 为 [] 非 nil（空值约定，D5）")
+	assert.Empty(t, d.Nodes)
+}
+
+func TestGetRunStoreError(t *testing.T) {
+	boom := errors.New("q failed")
+	st := &stubStore{getRunByIDFn: func(uint64, uint64) (*WorkflowRun, error) { return nil, boom }}
+	svc := New(st, nil, nil, &recordCache{}, nil, nil, nil, false)
+
+	_, err := svc.GetRun(context.Background(), workflowapi.GetRunReq{WorkflowID: 42, RunID: 7})
+	assert.ErrorIs(t, err, boom, "store 错误 %w 链保留")
+}
+
+// toRunDetail 转换字段面：详情 16 字段（三可空 id nil→null / 有值→字符串指针）。
+func TestToRunDetail(t *testing.T) {
+	t0 := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	d := toRunDetail(seedRun(t0), nil)
+
+	assert.Equal(t, "7", d.ID)
+	assert.Equal(t, "failed", d.Status)
+	assert.Equal(t, "chat", d.TriggerSource)
+	assert.False(t, d.IsTrial)
+	require.NotNil(t, d.ConversationID)
+	assert.Equal(t, "900", *d.ConversationID)
+	require.NotNil(t, d.MessageID)
+	assert.Equal(t, "901", *d.MessageID)
+	assert.Nil(t, d.ParentRunID)
+	assert.Equal(t, "trace-abc", d.TraceID)
+	assert.Equal(t, `{"query":"查订单"}`, d.Input)
+	assert.Empty(t, d.Output)
+	assert.Equal(t, "order_api", d.ErrorNode)
+	assert.Equal(t, "node order_api: connection refused", d.ErrorMsg)
+	assert.Equal(t, 3000, d.DurationMs)
+	assert.Equal(t, t0, d.StartedAt)
+	assert.Equal(t, t0.Add(2*time.Second), d.CreatedAt)
+}
+
+// 三可空 id 的另一侧：子工作流嵌套 run——parent 有值、conversation/message nil。
+func TestToRunDetailNestedRun(t *testing.T) {
+	parent := uint64(3)
+	r := &WorkflowRun{WorkflowID: 42, TriggerSource: "workflow", Status: "succeeded", ParentRunID: &parent}
+	r.ID = 8
+
+	d := toRunDetail(r, nil)
+	assert.Nil(t, d.ConversationID, "嵌套 run 无会话关联 → null")
+	assert.Nil(t, d.MessageID)
+	require.NotNil(t, d.ParentRunID)
+	assert.Equal(t, "3", *d.ParentRunID)
+}
+
+// toNodeRun 转换字段面：轨迹 8 字段（seq/node_key/node_type/status/input/output/
+// error_msg/duration_ms）。
+func TestToNodeRun(t *testing.T) {
+	n := WorkflowNodeRun{RunID: 7, Seq: 2, NodeKey: "order_api", NodeType: "tool", Status: "failed",
+		Input: `{"id":"A1"}`, Output: "", ErrorMsg: "", DurationMs: 120}
+
+	s := toNodeRun(n)
+	assert.Equal(t, 2, s.Seq)
+	assert.Equal(t, "order_api", s.NodeKey)
+	assert.Equal(t, "tool", s.NodeType)
+	assert.Equal(t, "failed", s.Status)
+	assert.Equal(t, `{"id":"A1"}`, s.Input)
+	assert.Empty(t, s.Output)
+	assert.Empty(t, s.ErrorMsg)
+	assert.Equal(t, 120, s.DurationMs)
 }

@@ -20,3 +20,7 @@ var ErrWorkflowInUse = errors.New("WORKFLOW_IN_USE")
 // api 节点 SSRF 拦截 / 工作流总时长超 5min。图缺陷类走 errs.ErrValidationFailed
 // 既有行（400，message 带 node <key>: 前缀）；失败节点定位统一靠错误 message。
 var ErrWorkflowExecutionFailed = errors.New("WORKFLOW_EXECUTION_FAILED")
+
+// ErrRunNotFound 运行记录不存在（404，spec 015）：runId 不存在或属于其他工作流
+// 同判（查询带 workflow_id 双条件，两情形不可区分，不泄露存在性，D3）。
+var ErrRunNotFound = errors.New("RUN_NOT_FOUND")

@@ -47,4 +47,14 @@ type WorkflowService interface {
 	// RATE_LIMITED …）原样透传。把关：draft/disabled 且非 trial →
 	// ErrWorkflowNotPublished；目标不存在 → ErrWorkflowNotFound。
 	Execute(ctx context.Context, req ExecuteWorkflowReq) (*RunResultSchema, error)
+
+	// ListRuns 运行历史列表（spec 015，只读）：按工作流 keyset 游标分页（created_at
+	// DESC, id DESC 最新在前；limit 归一 ≤0→20、>100→100），摘要面不含 input/output
+	// 大文本。workflow 不存在不报错、返空列表（runs 无独立存在性校验）。
+	// 错误：errs.ErrValidationFailed（篡改 cursor，400）。
+	ListRuns(ctx context.Context, req ListRunsReq) (*RunListResult, error)
+	// GetRun 运行详情（spec 015）：按 workflow + run id 查单个 run 全字段 + 按
+	// 执行序（seq ASC）的节点轨迹。run 不存在与属于其他工作流同判 404（不泄露
+	// 存在性）。错误：ErrRunNotFound（404）。
+	GetRun(ctx context.Context, req GetRunReq) (*RunDetailSchema, error)
 }

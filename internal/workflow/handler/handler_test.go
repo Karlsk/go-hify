@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -45,6 +46,17 @@ type fakeSvc struct {
 	gotExecuteID    uint64
 	gotExecuteInput string
 	gotExecuteTrial bool
+	// listRuns 查收：路径 id / query limit+cursor（spec 015）
+	gotListRunsID     uint64
+	gotListRunsLimit  int
+	gotListRunsCursor string
+	// listRuns 结果覆写（nil → 默认一页数据）：空列表 / 归一 limit 形态用例注入
+	listRunsRes *workflowapi.RunListResult
+	// getRun 查收：两路径参数（spec 015）
+	gotGetRunWorkflowID uint64
+	gotGetRunRunID      uint64
+	// getRun 结果覆写（nil → 默认一 run + 两节点轨迹）
+	getRunRes *workflowapi.RunDetailSchema
 }
 
 func (f *fakeSvc) Create(_ context.Context, req workflowapi.UpsertReq) (*workflowapi.WorkflowDetailSchema, error) {
@@ -138,6 +150,55 @@ func (f *fakeSvc) Execute(_ context.Context, req workflowapi.ExecuteWorkflowReq)
 		NodeTrace: []workflowapi.NodeRunSummary{
 			{NodeKey: "classify", NodeType: "llm", Status: "succeeded", DurationMs: 80},
 			{NodeKey: "finish", NodeType: "end", Status: "succeeded", DurationMs: 1},
+		},
+	}, nil
+}
+
+// ListRuns 桩（spec 015）：查收绑定注入；默认固定一页数据，listRunsRes 可覆写
+//（空列表 / limit 归一形态）。
+func (f *fakeSvc) ListRuns(_ context.Context, req workflowapi.ListRunsReq) (*workflowapi.RunListResult, error) {
+	if f.injected != nil {
+		return nil, f.injected
+	}
+	f.gotListRunsID = req.WorkflowID
+	f.gotListRunsLimit = req.Limit
+	f.gotListRunsCursor = req.Cursor
+	if f.listRunsRes != nil {
+		return f.listRunsRes, nil
+	}
+	ts := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	return &workflowapi.RunListResult{
+		Items: []workflowapi.RunSummarySchema{
+			{ID: "7", Status: "succeeded", TriggerSource: "console", IsTrial: true, DurationMs: 120,
+				StartedAt: ts, CreatedAt: ts},
+		},
+		Limit: 20, HasMore: true, NextCursor: "next-cursor",
+	}, nil
+}
+
+// GetRun 桩（spec 015）：查收两路由参数注入；injected 优先（404 / 500 注入），
+// getRunRes 可覆写详情数据，默认固定一 run + 两节点轨迹。
+func (f *fakeSvc) GetRun(_ context.Context, req workflowapi.GetRunReq) (*workflowapi.RunDetailSchema, error) {
+	if f.injected != nil {
+		return nil, f.injected
+	}
+	f.gotGetRunWorkflowID = req.WorkflowID
+	f.gotGetRunRunID = req.RunID
+	if f.getRunRes != nil {
+		return f.getRunRes, nil
+	}
+	convID, msgID, parentID := "900", "901", "3"
+	ts := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	return &workflowapi.RunDetailSchema{
+		ID: "7", Status: "failed", TriggerSource: "chat", IsTrial: false,
+		ConversationID: &convID, MessageID: &msgID, TraceID: "trace-abc", ParentRunID: &parentID,
+		Input: `{"query":"查订单"}`, Output: "", ErrorNode: "order_api",
+		ErrorMsg: "node order_api: connection refused", DurationMs: 3000,
+		StartedAt: ts, CreatedAt: ts.Add(2 * time.Second),
+		Nodes: []workflowapi.NodeRunSchema{
+			{Seq: 1, NodeKey: "classify", NodeType: "llm", Status: "succeeded",
+				Input: `{"q":"查订单"}`, Output: `{"intent":"ORDER"}`, DurationMs: 800},
+			{Seq: 2, NodeKey: "order_api", NodeType: "tool", Status: "failed", Input: `{"id":"A1"}`, DurationMs: 120},
 		},
 	}, nil
 }
@@ -507,4 +568,131 @@ func TestExecuteRouteDownstreamSentinels(t *testing.T) {
 			assert.Equal(t, tc.want, e.Error.Code)
 		})
 	}
+}
+
+// ---- runs 列表路由（spec 015，api_contract §5）----
+
+// TestListRunsRoute 200 信封：data = RunSummarySchema 数组（摘要面无 input/output
+// 大文本，FR-002）+ 游标 meta（A 模式 limit/has_more/next_cursor）；两段绑定——
+// 路径 :id 注入 req.WorkflowID、query limit/cursor 缺省零值透传。
+func TestListRunsRoute(t *testing.T) {
+	svc := &fakeSvc{}
+	r := newTestRouter(svc)
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/1/runs", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.True(t, e.Success)
+	items := []workflowapi.RunSummarySchema{}
+	require.NoError(t, json.Unmarshal(e.Data, &items))
+	require.Len(t, items, 1)
+	assert.Equal(t, "7", items[0].ID)
+	assert.Equal(t, "succeeded", items[0].Status)
+	assert.Equal(t, "console", items[0].TriggerSource)
+	assert.True(t, items[0].IsTrial)
+	assert.NotContains(t, string(e.Data), `"input"`, "列表面无大文本键（FR-002）")
+	assert.NotContains(t, string(e.Data), `"output"`, "列表面无大文本键（FR-002）")
+	assert.Contains(t, w.Body.String(), `"limit":20,"has_more":true,"next_cursor":"next-cursor"`,
+		"游标 meta（chat 先例同款断言形态）")
+	// 两段绑定查收：路径 id 注入 + query 缺省零值
+	assert.Equal(t, uint64(1), svc.gotListRunsID)
+	assert.Zero(t, svc.gotListRunsLimit)
+	assert.Empty(t, svc.gotListRunsCursor)
+}
+
+// TestListRunsRouteQueryBinding query limit/cursor 绑定透传（归一在 service，T007 已测，
+// 此处验证 handler 忠实透传 service 的归一结果到 meta + 尾页 next_cursor 序列化 null）。
+func TestListRunsRouteQueryBinding(t *testing.T) {
+	svc := &fakeSvc{}
+	r := newTestRouter(svc)
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/1/runs?limit=999&cursor=abc", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, 999, svc.gotListRunsLimit, "?limit 原样透传（归一归 service）")
+	assert.Equal(t, "abc", svc.gotListRunsCursor, "?cursor 原样透传")
+
+	// service 归一后（limit=100、尾页无游标）→ meta 忠实反映 + next_cursor null
+	svc1 := &fakeSvc{listRunsRes: &workflowapi.RunListResult{
+		Items: []workflowapi.RunSummarySchema{}, Limit: 100, HasMore: false, NextCursor: "",
+	}}
+	r1 := newTestRouter(svc1)
+	w1 := doReq(t, r1, http.MethodGet, "/api/v1/workflows/1/runs?limit=-5", "")
+	require.Equal(t, http.StatusOK, w1.Code, w1.Body.String())
+	assert.Equal(t, -5, svc1.gotListRunsLimit)
+	assert.Contains(t, w1.Body.String(), `"limit":100,"has_more":false,"next_cursor":null`)
+}
+
+// TestListRunsRouteBadCursor 篡改 cursor → service 翻译 errs.ErrValidationFailed 包装
+// → failWorkflow 无模块哨兵命中、FailFromSentinel 通用映射 400。
+func TestListRunsRouteBadCursor(t *testing.T) {
+	r := newTestRouter(&fakeSvc{injected: fmt.Errorf("%w: cursor: illegal base64", errs.ErrValidationFailed)})
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/1/runs?cursor=%E7%AF%A1%E6%94%B9", "")
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "VALIDATION_FAILED", e.Error.Code)
+}
+
+// TestListRunsRouteEmptyList 空列表 → data 为 [] 非 null（空值约定）。
+func TestListRunsRouteEmptyList(t *testing.T) {
+	r := newTestRouter(&fakeSvc{listRunsRes: &workflowapi.RunListResult{
+		Items: []workflowapi.RunSummarySchema{}, Limit: 20,
+	}})
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/1/runs", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), `"data":[]`, "空列表 → [] 非 null")
+}
+
+// TestListRunsRouteBadID 路径 :id 非数字 → BindUri 失败 400。
+func TestListRunsRouteBadID(t *testing.T) {
+	r := newTestRouter(&fakeSvc{})
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/abc/runs", "")
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+}
+
+// ---- getRun：运行详情路由（spec 015，D3 同判 404 + 轨迹按执行序）----
+
+func TestGetRunRoute(t *testing.T) {
+	svc := &fakeSvc{}
+	r := newTestRouter(svc)
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/1/runs/7", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	assert.True(t, e.Success)
+	d := workflowapi.RunDetailSchema{}
+	require.NoError(t, json.Unmarshal(e.Data, &d))
+	assert.Equal(t, "7", d.ID)
+	assert.Equal(t, "failed", d.Status)
+	assert.Equal(t, "chat", d.TriggerSource)
+	assert.Equal(t, "order_api", d.ErrorNode, "失败节点可读")
+	assert.Equal(t, `{"query":"查订单"}`, d.Input, "详情面携带大文本")
+	require.NotNil(t, d.ParentRunID)
+	assert.Equal(t, "3", *d.ParentRunID)
+	require.Len(t, d.Nodes, 2)
+	assert.Equal(t, 1, d.Nodes[0].Seq)
+	assert.Equal(t, 2, d.Nodes[1].Seq, "轨迹按执行序（seq ASC）")
+	assert.Equal(t, "order_api", d.Nodes[1].NodeKey)
+	// 两路径参数注入查收（GetRunReq 无 uri tag，handler 手动注入）
+	assert.Equal(t, uint64(1), svc.gotGetRunWorkflowID)
+	assert.Equal(t, uint64(7), svc.gotGetRunRunID)
+}
+
+// 不存在与跨工作流同判 404（D3）：code 机器可读 + 中文 message（chat 会话 404 同款）。
+func TestGetRunRouteNotFound(t *testing.T) {
+	r := newTestRouter(&fakeSvc{injected: workflowapi.ErrRunNotFound})
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/1/runs/999", "")
+	require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	require.NotNil(t, e.Error)
+	assert.Equal(t, "RUN_NOT_FOUND", e.Error.Code)
+	assert.Equal(t, "运行记录不存在", e.Error.Message)
+}
+
+func TestGetRunRouteBadRunID(t *testing.T) {
+	r := newTestRouter(&fakeSvc{})
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/1/runs/abc", "")
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+}
+
+func TestGetRunRouteBadWorkflowID(t *testing.T) {
+	r := newTestRouter(&fakeSvc{})
+	w := doReq(t, r, http.MethodGet, "/api/v1/workflows/abc/runs/7", "")
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 }

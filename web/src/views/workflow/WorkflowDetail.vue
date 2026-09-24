@@ -78,6 +78,9 @@
         <GraphModeEditor v-if="graph" :initial="graph" default-mode="canvas" readonly />
       </el-card>
 
+      <!-- 运行历史（spec 015）：列表区块自治（挂载拉首页 + 加载更多），行点击详情抽屉 -->
+      <WorkflowRunsPanel class="workflow-detail__card" :workflow-id="detail.id" />
+
       <!-- 试运行对话框（spec 013）：detail 为 GET 已落库版本 -->
       <WorkflowTrialDialog v-model="trialVisible" :workflow="detail" />
     </template>
@@ -90,6 +93,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Edit } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import GraphModeEditor from './GraphModeEditor.vue'
+import WorkflowRunsPanel from './WorkflowRunsPanel.vue'
 import WorkflowTrialDialog from './WorkflowTrialDialog.vue'
 import { getWorkflowDetail, type WorkflowDetail } from '@/api/workflow'
 import { detailToGraphConfig, type GraphConfig } from './graph'

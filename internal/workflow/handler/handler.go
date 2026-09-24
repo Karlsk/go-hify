@@ -1,4 +1,4 @@
-// Package handler 是 workflow 模块的 HTTP 层：薄绑定——RegisterRoutes + 8 绑定函数，
+// Package handler 是 workflow 模块的 HTTP 层：薄绑定——RegisterRoutes + 10 绑定函数，
 // 每个函数只调一个 api 接口方法；错误经 errors.Is 映射状态码（spec 04 §2.2 表 + 执行
 // 引擎下游哨兵，spec 06），respond 信封包装。
 package handler
@@ -6,9 +6,11 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/respond"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
@@ -22,17 +24,19 @@ type Handler struct{ svc workflowapi.WorkflowService }
 // New 创建 Handler。
 func New(svc workflowapi.WorkflowService) *Handler { return &Handler{svc: svc} }
 
-// RegisterRoutes 注册 workflows 一组 8 路由（/api/v1 前缀与 auth 中间件由组合根挂）。
+// RegisterRoutes 注册 workflows 一组 10 路由（/api/v1 前缀与 auth 中间件由组合根挂）。
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	g := rg.Group("/workflows")
-	g.POST("", h.create)                // 201 Created(detail)
-	g.GET("", h.list)                   // 200 OKWithOffset(items, page, page_size, total)
-	g.GET("/:id", h.get)                // 200 OK(detail)
-	g.PUT("/:id", h.update)             // 200 OK(detail)
-	g.DELETE("/:id", h.delete)          // 204 无响应体
-	g.POST("/:id/publish", h.publish)   // 200 OK(summary)
-	g.POST("/:id/disable", h.disable)   // 200 OK(summary)
-	g.POST("/:id/execute", h.execute)   // 200 OK(run result)，?trial=true 试运行（spec 06）
+	g.POST("", h.create)                  // 201 Created(detail)
+	g.GET("", h.list)                     // 200 OKWithOffset(items, page, page_size, total)
+	g.GET("/:id", h.get)                  // 200 OK(detail)
+	g.PUT("/:id", h.update)               // 200 OK(detail)
+	g.DELETE("/:id", h.delete)            // 204 无响应体
+	g.POST("/:id/publish", h.publish)     // 200 OK(summary)
+	g.POST("/:id/disable", h.disable)     // 200 OK(summary)
+	g.POST("/:id/execute", h.execute)     // 200 OK(run result)，?trial=true 试运行（spec 06）
+	g.GET("/:id/runs", h.listRuns)        // 200 OKWithCursor(摘要列表 + 游标 meta，spec 015)
+	g.GET("/:id/runs/:runId", h.getRun)   // 200 OK(详情 + 节点轨迹，spec 015)
 }
 
 func (h *Handler) create(c *gin.Context) {
@@ -153,6 +157,49 @@ func (h *Handler) execute(c *gin.Context) {
 	respond.OK(c, res)
 }
 
+// listRuns 运行历史列表（spec 015，只读）：两段绑定（:id 路径 + query limit/cursor，
+// update 同款）→ 游标 meta 信封（chat conversations 列表同款）；limit 归一与 cursor
+// 校验都在 service（page.NewCursor / DecodeCursor），handler 只透传。
+func (h *Handler) listRuns(c *gin.Context) {
+	var idReq workflowapi.GetWorkflowReq
+	if !respond.BindUri(c, &idReq) {
+		return
+	}
+	var req workflowapi.ListRunsReq
+	req.WorkflowID = idReq.ID
+	if !respond.BindQuery(c, &req) {
+		return
+	}
+	res, err := h.svc.ListRuns(c.Request.Context(), req)
+	if err != nil {
+		failWorkflow(c, err)
+		return
+	}
+	respond.OKWithCursor(c, res.Items, res.Limit, res.HasMore, res.NextCursor)
+}
+
+// getRun 运行详情（spec 015，只读）：GetRunReq 无 uri tag（跨模块契约保持纯净），
+// 两路由参数 strconv 注入——非数字直接 400 VALIDATION_FAILED（BindUri 拒形态同义）；
+// 不存在与跨工作流同判 404 归 service（store 双条件），handler 只做哨兵映射。
+func (h *Handler) getRun(c *gin.Context) {
+	workflowID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		respond.Fail(c, http.StatusBadRequest, errs.ErrValidationFailed.Error(), "路由参数 id 非数字")
+		return
+	}
+	runID, err := strconv.ParseUint(c.Param("runId"), 10, 64)
+	if err != nil {
+		respond.Fail(c, http.StatusBadRequest, errs.ErrValidationFailed.Error(), "路由参数 runId 非数字")
+		return
+	}
+	d, err := h.svc.GetRun(c.Request.Context(), workflowapi.GetRunReq{WorkflowID: workflowID, RunID: runID})
+	if err != nil {
+		failWorkflow(c, err)
+		return
+	}
+	respond.OK(c, d)
+}
+
 // failWorkflow 模块哨兵映射（spec 04 §2.2 表 + spec 06 执行侧新增）：显式 errors.Is →
 // 状态码 + code（= 哨兵 Error()）。ErrWorkflowExecutionFailed → 500 环境限制类（O4）；
 // 下游哨兵（模型 / KB 不存在、供应商忙 / 熔断）原样透传 errors.Is 链命中；其余走
@@ -161,6 +208,8 @@ func failWorkflow(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, workflowapi.ErrWorkflowNotFound):
 		respond.Fail(c, http.StatusNotFound, workflowapi.ErrWorkflowNotFound.Error(), err.Error())
+	case errors.Is(err, workflowapi.ErrRunNotFound): // 404：run 不存在/跨工作流同判（spec 015 D3）
+		respond.Fail(c, http.StatusNotFound, workflowapi.ErrRunNotFound.Error(), "运行记录不存在")
 	case errors.Is(err, workflowapi.ErrWorkflowNameConflict):
 		respond.Fail(c, http.StatusConflict, workflowapi.ErrWorkflowNameConflict.Error(), err.Error())
 	case errors.Is(err, workflowapi.ErrWorkflowInUse): // 409：被 agent 绑定挡删（spec 05）

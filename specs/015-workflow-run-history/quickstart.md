@@ -6,11 +6,11 @@
 
 ## 前置
 
-1. 依赖就绪：PG / Redis 起（`make start ENV=dev`），`make migrate-status` 确认 20 条 applied（本篇零迁移）。
-2. 登录拿 cookie：`curl -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login -d '{"username":"...","password":"..."}'`（以下 curl 均带 `-b cookies.txt`）。
+1. 依赖就绪：PG / Redis 起（`make start ENV=dev`），`make migrate-status` 确认 20 条 applied（本篇零迁移）。curl 端口以 `.env` 的 `SERVER_PORT` 为准（本机 8081）。
+2. 登录拿 cookie：`curl -c cookies.txt -X POST http://localhost:8081/api/v1/auth/login -d '{"username":"...","password":"..."}'`（以下 curl 均带 `-b cookies.txt`）。
 3. 造数基础：一个可执行的工作流（task 型最简——单 end 节点即可试运行成功，无需真实模型）：
    ```bash
-   curl -b cookies.txt -X POST http://localhost:8080/api/v1/workflows \
+   curl -b cookies.txt -X POST http://localhost:8081/api/v1/workflows \
      -H 'Content-Type: application/json' \
      -d '{"name":"runs-冒烟","type":"task","start_node_key":"end","nodes":[{"key":"end","type":"end","config":{"output":"{{input}}"}}],"edges":[]}'
    ```
@@ -19,7 +19,7 @@
 ## 场景 A: 列表查询与摘要面（US1 / FR-001 / FR-002 / SC-003）
 
 ```bash
-curl -b cookies.txt 'http://localhost:8080/api/v1/workflows/{id}/runs?limit=20'
+curl -b cookies.txt 'http://localhost:8081/api/v1/workflows/{id}/runs?limit=20'
 ```
 
 **预期**：200 信封 `success:true`；`data.items` 数组，每项恰好 9 字段（id / status / trigger_source / is_trial / duration_ms / error_node / error_msg / started_at / created_at）——**无 input / output 键**（FR-002）；`data.limit=20`；`meta.has_more` + `meta.next_cursor` 正确；id 为字符串。空工作流 → `data.items: []`（非 null）。
