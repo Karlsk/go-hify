@@ -1193,11 +1193,12 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/014-workflow-llm-output-schema/plan.md](specs/014-workflow-llm-output-schema/plan.md)
-(feature: LLM 节点输出字段声明与变量下拉展开——spec 014，llm 节点 config 加法键
-output_schema（复用 task 型 SchemaField）：运行期渲染后 user 消息末尾自动注入固定
-JSON 输出指令（记录实发文本）+ 回复按声明严格校验（对齐 validateOutputSchema 家族
-语义）；前端 llm 检查器复用 SchemaFieldsEditor 声明编辑 + 变量下拉对已声明祖先 llm
-节点展开 {{key.field}} 字段条目；未声明节点逐字节零变化；零迁移、零新增哨兵与依赖；
-spec 见 specs/014-workflow-llm-output-schema/spec.md)
+[specs/015-workflow-run-history/plan.md](specs/015-workflow-run-history/plan.md)
+(feature: workflow 运行历史与节点轨迹查询——spec 015，纯只读查询篇：2 条 GET 路由
+（/workflows/{id}/runs 游标分页列表——keyset (created_at,id) 行值比较、摘要面不含
+input/output 大文本 + /workflows/{id}/runs/{runId} 详情含按执行序节点轨迹）+ 唯一新
+哨兵 RUN_NOT_FOUND（404——不存在与跨工作流同判不泄露）；前端详情页新增 WorkflowRunsPanel
+区块（列表分页 + el-drawer 运行详情 + 轨迹表失败节点按 error_node 高亮）；逐层照抄 chat
+游标先例（api 层 cursor 只是 string、page 工具全在 service 层）；零迁移（表在 00019/00020）、
+执行引擎与落库零改动、既有 8 端点零变化；spec 见 specs/015-workflow-run-history/spec.md)
 <!-- SPECKIT END -->
