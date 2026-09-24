@@ -102,6 +102,18 @@
             placeholder="必填：支持 {{var}} 模板"
           />
         </div>
+        <!-- FR-003：输出字段声明（可选）——复用 SchemaFieldsEditor（与伪节点 schema 面板
+             同组件同 props 形态）；readonly 态不渲染；未声明 = 现状行为零变化 -->
+        <div v-if="!readonly" class="node-inspector__field">
+          <span class="node-inspector__label">输出字段</span>
+          <SchemaFieldsEditor
+            :model-value="llmOutputSchema"
+            @update:model-value="(rows: SchemaField[]) => (llmOutputSchema = rows)"
+          />
+          <p class="node-inspector__hint">
+            可选：声明后运行期要求模型输出含这些字段的 JSON 对象并按此校验；未声明 = 现状行为
+          </p>
+        </div>
       </template>
 
       <template v-else-if="nodeType === 'end'">
@@ -344,7 +356,12 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { Delete, Pointer, Plus } from '@element-plus/icons-vue'
 import { getModelList, getProviderList, type ModelItem } from '@/api/provider'
-import { getWorkflowDetail, getWorkflowList, type SchemaField } from '@/api/workflow'
+import {
+  getWorkflowDetail,
+  getWorkflowList,
+  type LLMNodeConfig,
+  type SchemaField,
+} from '@/api/workflow'
 import TemplateField, {
   type VariableGroups,
   type VariableOption,
@@ -450,6 +467,23 @@ const url = useStrConfigField('url')
 const method = useStrConfigField('method', 'GET')
 const body = useStrConfigField('body')
 const workflowId = useStrConfigField('workflow_id')
+
+/** llm 输出字段声明（FR-003）：读写 config.output_schema——读时非数组回退 []；
+ *  写时原样写回（含未填名的编辑中空行——受控回路：行编辑器靠回读渲染新行），
+ *  仅空数组删键（omitempty）。空行不在此过滤：组装层 toPayloadNode 进载荷前清理
+ *  （契约「空数组 / 全空行 → 删键」落点，与伪节点面板 rows 原样上抛同形态） */
+const llmOutputSchema = computed<SchemaField[]>({
+  get: () => {
+    const cfg = props.node?.data?.config as Partial<LLMNodeConfig> | undefined
+    return Array.isArray(cfg?.output_schema) ? cfg.output_schema : []
+  },
+  set: (rows) => {
+    const cfg = props.node?.data?.config
+    if (!cfg) return
+    if (rows.length > 0) cfg.output_schema = rows
+    else delete cfg.output_schema
+  },
+})
 
 /** 连线 condition：label ↔ condition（空串在 canvasToGraphEdges 序列化时省略） */
 const edgeCondition = computed<string>({
@@ -593,12 +627,25 @@ const variableGroups = computed<VariableGroups>(() => {
   }
   groups.push({ group: '入参', options: inputOptions })
 
-  // 上游节点：祖先 key 逐个一行
-  const upstreamOptions: VariableOption[] = ancestorNodes.value.map((n) => ({
-    insert: `{{${n.id}}}`,
-    label: n.id,
-    group: 'upstream',
-  }))
+  // 上游节点：祖先 key 逐个一行；声明了输出字段的 llm 祖先在整体条目后展开字段条目
+  //（FR-004：{{key.field}} 一级下钻可插、label 标注类型与必填；整体条目保留，
+  //  未声明 llm 与非 llm 祖先条目形态零变化）
+  const upstreamOptions: VariableOption[] = []
+  for (const n of ancestorNodes.value) {
+    upstreamOptions.push({ insert: `{{${n.id}}}`, label: n.id, group: 'upstream' })
+    if (n.data?.nodeType !== 'llm') continue
+    const declared = (n.data.config as Partial<LLMNodeConfig>).output_schema
+    if (!Array.isArray(declared)) continue
+    for (const f of declared) {
+      const name = f.name.trim()
+      if (!name) continue
+      upstreamOptions.push({
+        insert: `{{${n.id}.${name}}}`,
+        label: `${n.id}.${name}（${f.type}·${f.required ? '必填' : '可选'}）`,
+        group: 'upstream',
+      })
+    }
+  }
   if (upstreamOptions.length > 0) {
     groups.push({ group: '上游节点', options: upstreamOptions })
   }
@@ -853,7 +900,7 @@ function maybeRestrictInputs(): void {
  *  仅切换选中节点不动既有 inputs（未知键透传） */
 const subflowSelection = computed(() =>
   props.node
-    ? `${props.node.id} ${nodeType.value === 'workflow' ? String(workflowId.value ?? '') : ''}`
+    ? `${props.node.id}\x00${nodeType.value === 'workflow' ? String(workflowId.value ?? '') : ''}`
     : '',
 )
 

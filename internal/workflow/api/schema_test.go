@@ -115,6 +115,77 @@ func TestLLMConfigSystemPromptSerialization(t *testing.T) {
 	})
 }
 
+// ---- spec 014 T003：LLMConfig.OutputSchema 加法键（FR-001 / FR-002 / SC-003）----
+
+// TestLLMConfigOutputSchemaSerialization output_schema 序列化三态（spec 014 FR-001）：
+// 带值产出 `output_schema` 数组键且往返保值；空数组与缺省均不出键（omitempty 对齐
+// task 型 workflow 级同名键——存量图保存读回不引入新键）。
+func TestLLMConfigOutputSchemaSerialization(t *testing.T) {
+	declared := []SchemaField{
+		{Name: "code", Type: "string", Required: true, Description: "分类码"},
+		{Name: "score", Type: "number"},
+	}
+	t.Run("带值 marshal 出键且往返保值", func(t *testing.T) {
+		b, err := json.Marshal(LLMConfig{ModelID: 3, Prompt: "p", OutputSchema: declared})
+		assert.NoError(t, err)
+		assert.Contains(t, string(b), `"output_schema":[`+
+			`{"name":"code","type":"string","required":true,"description":"分类码"},`+
+			`{"name":"score","type":"number","required":false,"description":""}]`)
+		var c LLMConfig
+		assert.NoError(t, json.Unmarshal(b, &c))
+		assert.Equal(t, declared, c.OutputSchema)
+	})
+	t.Run("空数组 marshal 不出键", func(t *testing.T) {
+		b, err := json.Marshal(LLMConfig{ModelID: 3, Prompt: "p", OutputSchema: []SchemaField{}})
+		assert.NoError(t, err)
+		assert.NotContains(t, string(b), "output_schema")
+	})
+	t.Run("缺省 marshal 不出键（存量形态零变化）", func(t *testing.T) {
+		b, err := json.Marshal(LLMConfig{ModelID: 3, Prompt: "p"})
+		assert.NoError(t, err)
+		assert.NotContains(t, string(b), "output_schema")
+	})
+	t.Run("ParseNodeConfig 带 output_schema 解析", func(t *testing.T) {
+		cfg, err := ParseNodeConfig(NodeLLM, json.RawMessage(
+			`{"model_id":"3","prompt":"p","output_schema":[{"name":"code","type":"string","required":true,"description":"分类码"}]}`))
+		assert.NoError(t, err)
+		c, ok := cfg.(*LLMConfig)
+		assert.True(t, ok)
+		assert.Equal(t, []SchemaField{{Name: "code", Type: "string", Required: true, Description: "分类码"}}, c.OutputSchema)
+	})
+}
+
+// TestLLMConfigOutputSchemaValidate 保存期校验（spec 014 FR-002）：OutputSchema 非空时
+// 委托既有 ValidateSchemaFields——name 空 / 节点内重名 / type 越枚举拒；仅新键新增
+// 拒绝路径，存量无声明 config 零新增拒绝。
+func TestLLMConfigOutputSchemaValidate(t *testing.T) {
+	t.Run("合法声明过", func(t *testing.T) {
+		assert.NoError(t, LLMConfig{ModelID: 3, Prompt: "p", OutputSchema: []SchemaField{
+			{Name: "code", Type: "string", Required: true},
+			{Name: "score", Type: "number"},
+		}}.Validate())
+	})
+	t.Run("name 空拒", func(t *testing.T) {
+		assert.ErrorContains(t, LLMConfig{ModelID: 3, Prompt: "p",
+			OutputSchema: []SchemaField{{Name: "", Type: "string"}}}.Validate(), "name")
+	})
+	t.Run("重名拒", func(t *testing.T) {
+		assert.ErrorContains(t, LLMConfig{ModelID: 3, Prompt: "p", OutputSchema: []SchemaField{
+			{Name: "code", Type: "string"}, {Name: "code", Type: "number"},
+		}}.Validate(), "重名")
+	})
+	t.Run("type 越枚举拒", func(t *testing.T) {
+		assert.ErrorContains(t, LLMConfig{ModelID: 3, Prompt: "p",
+			OutputSchema: []SchemaField{{Name: "code", Type: "integer"}}}.Validate(), "type")
+	})
+	t.Run("空数组不触发校验（等价未声明）", func(t *testing.T) {
+		assert.NoError(t, LLMConfig{ModelID: 3, Prompt: "p", OutputSchema: []SchemaField{}}.Validate())
+	})
+	t.Run("存量无声明 config 零新增拒绝", func(t *testing.T) {
+		assert.NoError(t, LLMConfig{ModelID: 3, Prompt: "p"}.Validate())
+	})
+}
+
 func TestParseNodeConfig(t *testing.T) {
 	t.Run("llm happy", func(t *testing.T) {
 		cfg, err := ParseNodeConfig(NodeLLM, json.RawMessage(`{"model_id":"3","prompt":"判断意图：{{input}}","temperature":0}`))

@@ -376,3 +376,47 @@
 - [ ] 编辑页脏态阻断（去保存 / 取消）+ 两步式无入口（FR-002/FR-003）（§9.7）
 - [ ] 存量回归引用复测（SC-004）（§9.8）
 - [ ] 双门禁全绿（SC-005）：`cd web && npm run type-check && npm run build`
+
+## 10. spec 014 增补：llm 节点输出字段声明与变量下拉展开（声明编辑 + 下拉展开插入 + 载荷回读 + 试运行校验 + 存量回归）
+
+交付面：前端 `web/src/views/workflow/NodeInspector.vue`（llm 表单「输出字段」区 + upstream 分组字段条目展开）+ `web/src/api/workflow.ts`（`LLMNodeConfig` 类型面）；后端 `internal/workflow/`（llm config 加法键 `output_schema` + 执行期 JSON 指令注入与回复校验，契约见 [api_contract.md](../changelog/workflow/api_contract.md) §4 spec 014 注记）。行为依据：[specs/014-workflow-llm-output-schema/spec.md](../../specs/014-workflow-llm-output-schema/spec.md)（FR-001~FR-007、SC-001~SC-005）与 [quickstart.md](../../specs/014-workflow-llm-output-schema/quickstart.md) 场景 A / B。前置同 §0，追加造数：编辑页画布两个 llm 节点串联（`classify` → `reply`，classify 配可用模型）。
+
+### 10.1 场景 A（US1）：声明编辑（FR-002 / FR-003）
+
+1. 编辑页选中 llm 节点 → Prompt 区之后出现「输出字段」区（复用 Schema 行编辑：字段名 / 类型下拉三值 / 必填开关 / 描述 + 行删除 + 「添加字段」）；**详情只读页同节点不渲染该区**
+2. 添加两行：`code`（string，必填）、`score`（number，可选）→ 保存成功
+3. 清空全部字段名（或删除全部行）再保存 → 重新进编辑页该区为空（空数组 / 全空行 = 删键，未声明语义）
+4. 非法声明：字段重名 → 后端 400 `VALIDATION_FAILED` 拒（文案含 `output_schema` 与字段名）；字段名空行**不进载荷**——组装层 `toPayloadNode` 进载荷前丢弃（单行空 = 该行丢弃、全空 = 删键，见 10.1.3；后端空行拒绝仅作直连 JSON 的防御路径）
+
+### 10.2 场景 B（US1）：下游下拉展开插入（FR-003 / SC-001）
+
+1. 选中下游节点（llm / condition / api / end 均可）→ 模板字段变量下拉「上游节点」分组：`classify` 整体条目 `{{classify}}` **保留**，其后追加 `classify.code（string·必填）`、`classify.score（number·可选）` 字段条目
+2. 光标定位在 Prompt / Output 模板内 → 点字段条目 → 插入完整 `{{classify.code}}` 文本
+3. 未声明输出字段的 llm 祖先 → 仍只有整体条目（零变化）；非 llm 祖先条目、「入参」「子流程出参」分组结构零变化
+4. 手写混排抽查：模板手打 `{{classify.reason}}`（未声明字段）→ 保存可过（编辑期不检测），运行期走既有 strict 缺失 fail-fast（边界行为，FR-007 不做引用失效检测）
+
+### 10.3 载荷回读核对（SC-003）
+
+- [ ] 保存时 Network 提交体：classify 节点 `config.output_schema` = `[{"name":"code","type":"string","required":true,"description":""},{"name":"score","type":"number","required":false,"description":""}]`（键序无关，四键齐）
+- [ ] 未声明节点（含清空后的 classify）config **无** `output_schema` 键（omitempty）
+- [ ] 保存后详情回读（GET）声明在；重进编辑页行编辑器回填如初
+
+### 10.4 试运行：注入与校验（FR-004~FR-006，需真实模型）
+
+1. 试运行声明节点工作流（prompt 让模型输出 JSON）→ 成功：输出为 JSON 文本，下游 `{{classify.code}}` 下钻取值成功（end.output 引用可见字段值）
+2. 改 prompt 诱导模型输出缺必填字段 / 非 JSON 纯文本 → 试运行失败面红色 alert 文案含 `node classify:` 前缀与具体字段名（`VALIDATION_FAILED`）；轨迹表 classify 行红字
+3. 记录保真抽查（DB executions 或运行日志）：`node_in` 的 `prompt` = 渲染后原文 + 注入的 JSON 输出指令全文（记录即实发）；`system_prompt` 不含注入
+
+### 10.5 存量回归复测（SC-004）
+
+1. 本文档 §5 EC-1~11、§7 EC-12~23、§8.7 按原步骤复测——既有表单 / 下拉 / 双模式编辑器零回归
+2. 未声明输出字段的 llm 工作流试运行一次 → 输出与 spec 013 前行为一致（零注入零校验）
+
+### 10.6 通过标准增补（SC-001~SC-005）
+
+- [ ] 声明编辑 + 只读不渲染 + 空删键（SC-001）（§10.1）
+- [ ] 下拉展开插入 + 未声明零变化（SC-001）（§10.2）
+- [ ] 载荷 / 回读逐键核对（SC-003）（§10.3）
+- [ ] 试运行校验错误定位可读 + 记录实发（SC-002）（§10.4）
+- [ ] 存量回归引用复测（SC-004）（§10.5）
+- [ ] 双门禁全绿（SC-005）：`cd web && npm run type-check && npm run build`

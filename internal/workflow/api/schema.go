@@ -55,10 +55,11 @@ type NodeConfig interface{ isNodeConfig() }
 
 // LLMConfig 单轮 LLM 调用（无多轮上下文；执行走 platform/llm，不经 chat）。
 type LLMConfig struct {
-	ModelID      uint64  `json:"model_id,string"`         // models.id；存在性 service 经 provider api 预检
-	SystemPrompt string  `json:"system_prompt,omitempty"` // 可选 system 消息模板（spec 011 加法修订）：空串=不发；{{var}} 渲染语义同 prompt
-	Prompt       string  `json:"prompt"`                  // 支持 {{var}} 模板
-	Temperature  float64 `json:"temperature,omitempty"`   // 0 = 跟随模型默认
+	ModelID      uint64        `json:"model_id,string"`         // models.id；存在性 service 经 provider api 预检
+	SystemPrompt string        `json:"system_prompt,omitempty"` // 可选 system 消息模板（spec 011 加法修订）：空串=不发；{{var}} 渲染语义同 prompt
+	Prompt       string        `json:"prompt"`                  // 支持 {{var}} 模板
+	Temperature  float64       `json:"temperature,omitempty"`   // 0 = 跟随模型默认
+	OutputSchema []SchemaField `json:"output_schema,omitempty"` // 可选输出字段声明（spec 014 加法键，形态同 task 型）：非空 → 运行期注入 JSON 指令 + 校验回复；未声明零变化
 }
 
 func (LLMConfig) isNodeConfig() {}
@@ -70,6 +71,11 @@ func (c LLMConfig) Validate() error {
 	}
 	if c.Prompt == "" {
 		return fmt.Errorf("prompt 必填")
+	}
+	if len(c.OutputSchema) > 0 { // spec 014：仅新键新增拒绝路径，存量零变化
+		if err := ValidateSchemaFields(c.OutputSchema); err != nil {
+			return fmt.Errorf("output_schema: %w", err)
+		}
 	}
 	return nil
 }

@@ -146,6 +146,8 @@ POST /api/v1/workflows
 ```
 
 > 〔2026-09-22 追加（spec 011，用户批准·加法修订）：llm 节点 config 增可选 `system_prompt`（string，`omitempty`——空串 / 缺省 / null 均合法且行为一致）。非空时执行发 `[system, user]` 两条消息，内容为各自模板 strict 渲染结果（`{{var}}` 与 `{{base.field}}` 一级下钻语义与 `prompt` 完全一致，缺失变量 fail-fast 报 `VALIDATION_FAILED`）；为空保持单 user 消息现状。保存期校验不变（`prompt` 仍必填、`system_prompt` 可选，`Validate` 无新增拒绝路径）；既有图（无该字段）的消息序列、executions 记录形态与保存往返零影响。执行语义细节见 [impl_spec_06_execution_engine.md](./impl_spec_06_execution_engine.md) callLLM 节。〕
+>
+> 〔2026-09-24 追加（spec 014，用户批准·加法修订）：llm 节点 config 增可选 `output_schema`（`[]SchemaField`，形态同 task 型 workflow 级 schema 字段，`omitempty`——空数组 / 缺省均合法且行为一致）。非空时执行期两处生效：① `prompt` 模板 strict 渲染成功后在 user 消息末尾自动追加系统固定 JSON 输出指令（固定文案不做模板渲染、不含用户变量；`node_in` 与 `executions` 记录追加后的实际发送文本——记录即实发；`system_prompt` 不注入）；② 模型回复按声明严格校验（语义对齐 task 型 `validateOutputSchema` 家族：回复须为合法 JSON 对象——null / 数组 / 纯文本 / markdown 围栏均拒，required 缺失拒，类型探针不符拒，多余字段宽容），不合规节点失败报 `VALIDATION_FAILED`（错误链带节点 key 前缀与具体字段名）。保存期新增字段集形态校验（name 非空不重名、type 枚举，仅新键新增拒绝路径）；未声明节点的消息序列、记录形态与序列化往返逐字节零影响。〕
 
 详情响应（201 / 200，结构与创建入参一致，另含服务端字段）：
 

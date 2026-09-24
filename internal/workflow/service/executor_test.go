@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/schema"
@@ -260,6 +261,206 @@ func TestExecuteNestedChildSystemPrompt(t *testing.T) {
 
 	require.Len(t, env.execs.rows, 2, "父 classify + 子 c_work 两行")
 	assert.Equal(t, "子任务角色：ORDER_QUERY", env.execs.rows[1].Input["system_prompt"], "子行 Input 携带渲染后 system")
+}
+
+// ---- spec 014 T002：未声明节点的 golden 基准（US3 SC-003 逐字节零变化对照）----
+
+// TestCallLLMUndeclaredGolden 改造前落样：未声明输出字段的 llm 节点全链基准——
+// 出站消息序列（单 user / system+user 两形态）、node_in、executions Input 均为
+// 渲染后原文，无任何追加文本与新键。spec 014 合入后本用例零改动须保持全绿
+//（未声明节点若被注入或引入新键，逐字节断言即击穿）。
+func TestCallLLMUndeclaredGolden(t *testing.T) {
+	t.Run("单 user 形态", func(t *testing.T) {
+		e, _, _, fs, execs, _ := newTestExecutor(okGen("ORDER_QUERY"))
+		c := newExecContext("查订单")
+
+		out, err := e.runNode(context.Background(), "classify",
+			&workflowapi.LLMConfig{ModelID: 3, Prompt: "判断意图：{{input}}"}, c)
+		require.NoError(t, err)
+		assert.Equal(t, "ORDER_QUERY", out)
+
+		msgs := fs.lastMsgs()
+		require.Len(t, msgs, 1, "恰一条消息")
+		assert.Equal(t, schema.User, msgs[0].Role)
+		assert.Equal(t, "判断意图：查订单", msgs[0].Content, "user 内容 = 渲染后 prompt 原文，无注入后缀")
+
+		assert.Equal(t, map[string]string{"prompt": "判断意图：查订单"}, c.takeNodeIn(), "node_in 恰 prompt 一键")
+		require.Len(t, execs.rows, 1)
+		assert.Equal(t, map[string]any{"prompt": "判断意图：查订单"}, execs.rows[0].Input,
+			"executions Input 与 node_in 同形态")
+	})
+	t.Run("system+user 形态", func(t *testing.T) {
+		e, _, _, fs, execs, _ := newTestExecutor(okGen("ORDER_QUERY"))
+		c := newExecContext("查订单")
+
+		_, err := e.runNode(context.Background(), "classify",
+			&workflowapi.LLMConfig{ModelID: 3, SystemPrompt: "你是分类器", Prompt: "判断意图：{{input}}"}, c)
+		require.NoError(t, err)
+
+		msgs := fs.lastMsgs()
+		require.Len(t, msgs, 2, "恰 [system, user] 两条")
+		assert.Equal(t, schema.System, msgs[0].Role)
+		assert.Equal(t, "你是分类器", msgs[0].Content)
+		assert.Equal(t, schema.User, msgs[1].Role)
+		assert.Equal(t, "判断意图：查订单", msgs[1].Content, "user 无注入后缀；system 不受影响")
+
+		assert.Equal(t, map[string]string{"prompt": "判断意图：查订单", "system_prompt": "你是分类器"}, c.takeNodeIn())
+		require.Len(t, execs.rows, 1)
+		assert.Equal(t, map[string]any{"prompt": "判断意图：查订单", "system_prompt": "你是分类器"}, execs.rows[0].Input)
+	})
+}
+
+// ---- spec 014 T009：US2 注入与校验（FR-005 / FR-006 / SC-002 / SC-005）----
+
+// TestBuildJSONDirective 注入指令纯函数（research D2 文案逐字冻结）：前缀 + 每字段
+// 一行 `- {name}（{type}，{必填|可选}）`；description 不进指令；不做模板渲染。
+func TestBuildJSONDirective(t *testing.T) {
+	fields := []workflowapi.SchemaField{
+		{Name: "code", Type: "string", Required: true, Description: "分类码"},
+		{Name: "score", Type: "number", Description: ""},
+		{Name: "verbose", Type: "boolean"},
+	}
+	want := "\n\n请只输出一个 JSON 对象（不要使用 markdown 代码块，不要包含 JSON 以外的任何文本），对象包含以下字段：\n" +
+		"- code（string，必填）\n" +
+		"- score（number，可选）\n" +
+		"- verbose（boolean，可选）\n"
+	got := buildJSONDirective(fields)
+	assert.Equal(t, want, got)
+	assert.NotContains(t, got, "分类码", "description 不进指令")
+}
+
+// TestValidateLLMOutput 回复按声明校验（FR-005，语义对齐 validateOutputSchema 家族）：
+// 未声明零校验 / 非 JSON 对象拒（纯文本、null、数组、markdown 围栏）/ required 缺失拒
+// 含字段名 / 类型探针不符拒含字段名与期望类型 / 多余字段宽容。
+func TestValidateLLMOutput(t *testing.T) {
+	fields := []workflowapi.SchemaField{
+		{Name: "code", Type: "string", Required: true},
+		{Name: "score", Type: "number"},
+	}
+	tests := []struct {
+		name     string
+		output   string
+		fields   []workflowapi.SchemaField
+		wantErr  bool
+		contains string
+	}{
+		{"未声明零校验", "任意文本", nil, false, ""},
+		{"合规 JSON 过", `{"code":"ORDER_QUERY"}`, fields, false, ""},
+		{"多余字段宽容", `{"code":"ok","extra":1}`, fields, false, ""},
+		{"缺必填拒含字段名", `{"score":1}`, fields, true, "code"},
+		{"类型不符拒含字段名与期望类型", `{"code":123}`, fields, true, "code"},
+		{"可选字段缺失过", `{"code":"ok"}`, fields, false, ""},
+		{"纯文本拒", "ORDER_QUERY", fields, true, ""},
+		{"null 拒", "null", fields, true, ""},
+		{"数组拒", `[1,2]`, fields, true, ""},
+		{"markdown 围栏拒（围栏不剥）", "```json\n{\"code\":\"x\"}\n```", fields, true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateLLMOutput(tt.output, tt.fields)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.contains != "" {
+					assert.Contains(t, err.Error(), tt.contains)
+				}
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestRunNodeLLMOutputSchemaInjection 注入位置与记录实发（FR-006 / SC-005）：strict
+// 渲染成功后、setNodeIn 之前追加——stub client 收到的 user 消息以指令全文结尾；
+// node_in["prompt"] 与 executions Input 记录追加后的实发文本；system_prompt 不被注入；
+// 空数组声明等价未声明（消息逐字节回到 golden 基准）。
+func TestRunNodeLLMOutputSchemaInjection(t *testing.T) {
+	fields := []workflowapi.SchemaField{{Name: "code", Type: "string", Required: true, Description: "分类码"}}
+	directive := buildJSONDirective(fields)
+
+	t.Run("声明非空：user = 渲染后 prompt + 指令，记录即实发", func(t *testing.T) {
+		e, _, _, fs, execs, _ := newTestExecutor(okGen(`{"code":"ORDER_QUERY"}`))
+		c := newExecContext("查订单")
+
+		out, err := e.runNode(context.Background(), "classify",
+			&workflowapi.LLMConfig{ModelID: 3, SystemPrompt: "你是分类器",
+				Prompt: "判断意图：{{input}}", OutputSchema: fields}, c)
+		require.NoError(t, err)
+		assert.Equal(t, `{"code":"ORDER_QUERY"}`, out, "合规回复原样入池")
+
+		msgs := fs.lastMsgs()
+		require.Len(t, msgs, 2)
+		assert.Equal(t, "你是分类器", msgs[0].Content, "system_prompt 不被注入")
+		assert.True(t, strings.HasSuffix(msgs[1].Content, directive), "user 消息以指令全文结尾")
+		assert.Equal(t, "判断意图：查订单"+directive, msgs[1].Content, "所见即所发")
+
+		assert.Equal(t, "判断意图：查订单"+directive, c.pendingIn["prompt"], "node_in 记录实发文本")
+		require.Len(t, execs.rows, 1)
+		assert.Equal(t, "判断意图：查订单"+directive, execs.rows[0].Input["prompt"], "executions Input 记录实发")
+	})
+	t.Run("空数组等价未声明：消息与 node_in 逐字节回到 golden 基准", func(t *testing.T) {
+		e, _, _, fs, execs, _ := newTestExecutor(okGen("ORDER_QUERY"))
+		c := newExecContext("查订单")
+
+		_, err := e.runNode(context.Background(), "classify",
+			&workflowapi.LLMConfig{ModelID: 3, Prompt: "判断意图：{{input}}",
+				OutputSchema: []workflowapi.SchemaField{}}, c)
+		require.NoError(t, err)
+
+		msgs := fs.lastMsgs()
+		require.Len(t, msgs, 1)
+		assert.Equal(t, "判断意图：查订单", msgs[0].Content, "零注入（len 门，非 nil 门）")
+		assert.Equal(t, map[string]string{"prompt": "判断意图：查订单"}, c.pendingIn)
+		require.Len(t, execs.rows, 1)
+		assert.Equal(t, map[string]any{"prompt": "判断意图：查订单"}, execs.rows[0].Input)
+	})
+}
+
+// TestRunNodeLLMOutputSchemaValidationFail 校验失败 → 节点失败（FR-005 / SC-002）：
+// ErrValidationFailed + node 前缀 + 字段名；不落池；executions 行照记且 LLM 调用
+// 本身成功（ErrorClass nil——校验失败是图契约层，不是供应商故障）。
+func TestRunNodeLLMOutputSchemaValidationFail(t *testing.T) {
+	e, _, _, _, execs, _ := newTestExecutor(okGen(`{"score":1}`)) // 缺必填 code
+	c := newExecContext("in")
+
+	_, err := e.runNode(context.Background(), "classify",
+		&workflowapi.LLMConfig{ModelID: 3, Prompt: "p", OutputSchema: []workflowapi.SchemaField{
+			{Name: "code", Type: "string", Required: true}}}, c)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed, "校验失败 → 图缺陷 400")
+	assert.Contains(t, err.Error(), "node classify:")
+	assert.Contains(t, err.Error(), "code", "错误含缺失字段名")
+	_, pooled := c.vars["classify"]
+	assert.False(t, pooled, "校验失败不落池")
+
+	require.Len(t, execs.rows, 1, "Generate 已成功，executions 照记")
+	assert.Nil(t, execs.rows[0].ErrorClass, "LLM 调用本身成功，错误类为空")
+}
+
+// TestExecuteNestedChildOutputSchema 嵌套子图内声明节点同注入同校验（SC-005）：
+// 子池渲染后追加指令、合规回复过校验、{{c_work.code}} 一级下钻取声明字段。
+func TestExecuteNestedChildOutputSchema(t *testing.T) {
+	child := childTaskGraph(5, "published",
+		`[{"name":"query","type":"string","required":true}]`, "",
+		`检索：{{input.query}}`, `{{c_work.code}}`)
+	for i, n := range child.nodes {
+		if n.NodeKey == "c_work" {
+			child.nodes[i].Config = `{"model_id":"3","prompt":"检索：{{input.query}}","output_schema":[{"name":"code","type":"string","required":true}]}`
+		}
+	}
+	parent := parentNestedGraph(3, "chat", "published", 5, `{"query":"{{classify}}"}`, `{{sub}}`)
+	env := newNestedEnv(t, map[uint64]*graphSnapshot{3: parent, 5: child},
+		twoGen("ORDER_QUERY", `{"code":"子码"}`))
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 3, Input: "查订单"})
+	require.NoError(t, err)
+	assert.Equal(t, "子码", res.Output, "子终稿经 {{c_work.code}} 下钻取声明字段")
+
+	msgs := env.streamer.lastMsgs()
+	require.Len(t, msgs, 1, "子图 c_work 无 system：单 user")
+	assert.Equal(t, "检索：ORDER_QUERY"+buildJSONDirective([]workflowapi.SchemaField{
+		{Name: "code", Type: "string", Required: true}}),
+		msgs[0].Content, "子图声明节点同样注入（子池独立渲染后追加）")
 }
 
 // ---- condition 节点：纯内存求值，零外部调用 ----

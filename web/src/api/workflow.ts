@@ -44,6 +44,22 @@ export interface SchemaField {
 }
 
 /**
+ * llm 节点 config 的类型面（对齐后端 LLMConfig；spec 014 起含加法键 output_schema）。
+ * config 在载荷 / 详情里仍是 Record 透传（未知键往返保留）——本类型供检查器读写
+ * 已知键时收窄，不约束透传通道；config 外键字符串保形（见文件头）。
+ */
+export interface LLMNodeConfig {
+  model_id: string
+  prompt: string
+  /** 空 = 不携带（对齐后端 omitempty） */
+  system_prompt?: string
+  /** 0 / 缺省 = 跟随模型默认 */
+  temperature?: number
+  /** 输出字段声明（spec 014 加法键）：非空 → 运行期注入 JSON 输出指令 + 校验回复；未声明 / 空数组 = 现状零变化 */
+  output_schema?: SchemaField[]
+}
+
+/**
  * 创建载荷的节点元素。type 为后端 NodeType 全集（7 类）字符串——前端画布面板
  * 只提供 5 类（llm/end/condition/api/workflow），手写 JSON 可携带其余（透传）。
  * config 外键字符串保形（见文件头）。

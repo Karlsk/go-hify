@@ -1193,10 +1193,11 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/013-agent-bind-trial-run/plan.md](specs/013-agent-bind-trial-run/plan.md)
-(feature: 前端 agent 绑定工作流与工作流试运行——spec 013，纯前端（web/）补齐 spec 05
-workflow_id 绑定（下拉仅 chat 型、PUT 全量解绑）与 spec 06 execute?trial=true 试运行
-（编辑页 + 详情页双入口共用 WorkflowTrialDialog，RunResult node_trace 轨迹呈现）的
-消费面；后端零改动、零新增依赖、无迁移；spec 见
-specs/013-agent-bind-trial-run/spec.md)
+[specs/014-workflow-llm-output-schema/plan.md](specs/014-workflow-llm-output-schema/plan.md)
+(feature: LLM 节点输出字段声明与变量下拉展开——spec 014，llm 节点 config 加法键
+output_schema（复用 task 型 SchemaField）：运行期渲染后 user 消息末尾自动注入固定
+JSON 输出指令（记录实发文本）+ 回复按声明严格校验（对齐 validateOutputSchema 家族
+语义）；前端 llm 检查器复用 SchemaFieldsEditor 声明编辑 + 变量下拉对已声明祖先 llm
+节点展开 {{key.field}} 字段条目；未声明节点逐字节零变化；零迁移、零新增哨兵与依赖；
+spec 见 specs/014-workflow-llm-output-schema/spec.md)
 <!-- SPECKIT END -->

@@ -225,6 +225,21 @@ export function graphSubmitError(config: GraphConfig): string | null {
 
 // ---- 提交组装（FR-011：config 外键字符串保形零转换；chat 型不带 schema 键） ----
 
+/** 组装层节点映射：llm 节点 config.output_schema 空行清理（spec 014 契约
+ *  「空数组 / 全空行 → 删键」的落点）——编辑中空行须留在画布 config（受控回路），
+ *  进载荷前丢弃：filter 后非空写副本、空则删键；其余节点（含未声明 llm）config
+ *  引用直传（不变量 1 保持，载荷键集零变化）。 */
+function toPayloadNode(n: GraphNode): GraphNode {
+  if (n.type !== 'llm') return n
+  const rows = n.config.output_schema
+  if (!Array.isArray(rows)) return n
+  const kept = rows.filter((r) => r.name.trim() !== '')
+  const config: Record<string, unknown> = { ...n.config }
+  if (kept.length > 0) config.output_schema = kept
+  else delete config.output_schema
+  return { ...n, config }
+}
+
 export interface CreateAssembly {
   name: string
   description: string
@@ -240,7 +255,7 @@ export function buildCreatePayload(a: CreateAssembly): CreateWorkflowData {
     name: a.name.trim(),
     type: a.type,
     start_node_key: a.graph.start_node_key,
-    nodes: a.graph.nodes,
+    nodes: a.graph.nodes.map(toPayloadNode),
     edges: a.graph.edges,
   }
   if (a.description.trim()) data.description = a.description.trim()
@@ -313,13 +328,14 @@ export interface UpdateAssembly {
 
 /** PUT 组装：请求体不出现 type 键（组装层闸，与 UpdateWorkflowData 类型层双闸）；
  *  task 型带 schema（空数组 = 清空）、chat 型不带；config 引用直传（外键字符串
- *  保形零转换）。description 恒携带（可清空——区别于创建侧的空省略）。 */
+ *  保形零转换；llm 空行清理例外见 toPayloadNode）。description 恒携带（可清空
+ *  ——区别于创建侧的空省略）。 */
 export function buildUpdatePayload(a: UpdateAssembly): UpdateWorkflowData {
   const data: UpdateWorkflowData = {
     name: a.name.trim(),
     description: a.description.trim(),
     start_node_key: a.graph.start_node_key,
-    nodes: a.graph.nodes,
+    nodes: a.graph.nodes.map(toPayloadNode),
     edges: a.graph.edges,
   }
   if (a.type === 'task') {

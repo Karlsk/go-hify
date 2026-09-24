@@ -129,6 +129,9 @@ func (e *executor) callLLM(ctx context.Context, key string, cfg *workflowapi.LLM
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", errs.ErrValidationFailed, err)
 	}
+	if len(cfg.OutputSchema) > 0 { // spec 014：注入在渲染后、nodeIn 构造前——记录即实发
+		prompt += buildJSONDirective(cfg.OutputSchema)
+	}
 	nodeIn := map[string]string{"prompt": prompt} // 渲染成功即记：下游失败时入参仍可读
 	if system != "" {
 		nodeIn["system_prompt"] = system
@@ -165,7 +168,53 @@ func (e *executor) callLLM(ctx context.Context, key string, cfg *workflowapi.LLM
 	if genErr != nil {
 		return "", genErr
 	}
+	if err := validateLLMOutput(reply.Content, cfg.OutputSchema); err != nil { // spec 014：声明非空才校验（未声明零变化）
+		return "", fmt.Errorf("%w: %v", errs.ErrValidationFailed, err)
+	}
 	return reply.Content, nil
+}
+
+// buildJSONDirective 由声明字段生成追加到 user 消息末尾的固定 JSON 输出指令
+//（spec 014 FR-006，research D2 文案冻结）：系统固定文案，不做模板渲染、不含用户
+// 变量；description 不进指令（声明说明是编排语义，不是提示词素材）。
+func buildJSONDirective(fields []workflowapi.SchemaField) string {
+	var b strings.Builder
+	b.WriteString("\n\n请只输出一个 JSON 对象（不要使用 markdown 代码块，不要包含 JSON 以外的任何文本），对象包含以下字段：\n")
+	for _, f := range fields {
+		req := "可选"
+		if f.Required {
+			req = "必填"
+		}
+		fmt.Fprintf(&b, "- %s（%s，%s）\n", f.Name, f.Type, req)
+	}
+	return b.String()
+}
+
+// validateLLMOutput llm 节点回复按声明严格校验（spec 014 FR-005，语义对齐
+// execute.go validateOutputSchema 家族）：未声明零校验；回复须合法 JSON 对象（null /
+// 数组 / 纯文本 / 围栏包裹均拒，围栏不剥）；required 缺失拒；probeSchemaType 类型
+// 探针不符拒（字段在场才探，可选缺失放行）；多余字段宽容。错误文案含字段名。
+func validateLLMOutput(output string, fields []workflowapi.SchemaField) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output), &obj); err != nil || obj == nil {
+		return fmt.Errorf("回复非合法 JSON 对象")
+	}
+	for _, f := range fields {
+		raw, ok := obj[f.Name]
+		if !ok {
+			if f.Required {
+				return fmt.Errorf("缺少必填字段 %s", f.Name)
+			}
+			continue
+		}
+		if !probeSchemaType(string(raw), f.Type) {
+			return fmt.Errorf("字段 %s 类型应为 %s", f.Name, f.Type)
+		}
+	}
+	return nil
 }
 
 // recordExecution llm 节点自记 executions（chat recordExecution 同款）：ConversationID
