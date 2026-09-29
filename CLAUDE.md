@@ -766,7 +766,7 @@ Hify 索引地图（建表时照抄；向量索引细节见《pgvector 索引规
 | 表 | 索引 |
 |---|---|
 | `models` | `(provider_id)` |
-| `mcp_tools` | `(mcp_server_id)` |
+| `mcp_tools` | `(mcp_server_id)` + `uq(mcp_server_id, name)`（discover upsert 锚点：tool id 稳定、agent_tools 绑定不漂移） |
 | `agents` | `(model_id)`、`(fallback_model_id)`、`(workflow_id)`（spec 05） |
 | `agent_tools` | id PK + `uq(agent_id, tool_id)` + 反查 `(tool_id)` |
 | `agent_knowledge_bases` | PK `(agent_id, knowledge_base_id)` + 反查 `(knowledge_base_id)` |
@@ -781,7 +781,7 @@ Hify 索引地图（建表时照抄；向量索引细节见《pgvector 索引规
 | `workflow_edges` | `(workflow_id)` |
 | `workflow_runs` | `(workflow_id, created_at DESC)`（按工作流查运行历史，00019）；`parent_run_id` 无索引（spec 08：子 run 按父关联是低频排障路径、每父行数个，00020 只加列） |
 | `workflow_node_runs` | `(run_id)` + uq `(run_id, seq)`（run 内 seq 回放序，00019） |
-| `providers`/`users`/`mcp_servers` | PK + 业务唯一键（`providers.name`、`users.username`） |
+| `providers`/`users`/`mcp_servers` | PK + 业务唯一键（`providers.name`、`users.username`、`mcp_servers.name`） |
 
 ### SQL 编写规范
 
@@ -1003,7 +1003,7 @@ Hify 后端所有 HTTP 接口的统一规范，与《代码组织规范》handle
 |---|---|---|
 | auth | session | `POST /auth/login`、`POST /auth/register`、`POST /auth/logout`、`GET /auth/me` |
 | provider | providers、models | `/providers`、`/providers/{id}/models`、`/providers/{id}/test-connection` |
-| mcp | mcp-servers、tools | `/mcp-servers`、`/mcp-servers/{id}/tools`、`/mcp-servers/{id}/discover` |
+| mcp | mcp-servers、tools | `/mcp-servers`、`/mcp-servers/{id}`（详情含 tools 清单）、`/mcp-servers/{id}/discover`（连通 + 发现 + upsert）、`/mcp-servers/{id}/run`（实调工具） |
 | agent | agents | `/agents`、`/agents/{id}/mcp-tools`、`/agents/{id}/knowledge-bases` |
 | rag | knowledge-bases、documents | `/knowledge-bases`、`/knowledge-bases/{id}/documents`、`/documents/{id}/reindex` |
 | chat | conversations、messages | `POST /conversations`（绑 agent 建会话）、`/conversations/{id}/messages`（发消息：`stream` 开关两模式 + 历史查询）、`DELETE /conversations/{id}` |
@@ -1128,6 +1128,10 @@ HTTP 状态映射：
 | `RUN_NOT_FOUND` | 404 | `workflowapi.ErrRunNotFound`（runs 详情：run 不存在或不属于所查工作流同判 404、不泄露存在性，spec 015） |
 | `KNOWLEDGE_BASE_NOT_FOUND` | 404 | `ragapi.ErrKnowledgeBaseNotFound`（KB 不存在）；`agentapi.ErrKnowledgeBaseNotFound`（agent 侧绑定写入同码哨兵，FK 23503 翻译——agent 不依赖 rag，FK 是 KB 存在性的唯一校验） |
 | `MCP_SERVER_NOT_FOUND` | 404 | `mcpapi.ErrMCPServerNotFound` |
+| `MCP_SERVER_NAME_CONFLICT` | 409 | `mcpapi.ErrMCPServerNameConflict`（uq_mcp_servers_name 23505） |
+| `MCP_SERVER_IN_USE` | 409 | `mcpapi.ErrMCPServerInUse`（有 Agent 绑定该 Server 的工具：server 删除 → mcp_tools 级联删被 fk_agent_tools_tool_id RESTRICT 拦下 → 23503 按约束名分发翻译，mcp 批） |
+| `MCP_TOOL_NOT_FOUND` | 404 | `mcpapi.ErrMCPToolNotFound`（run 实调时工具不在 discover 入库清单）；`agentapi.ErrToolNotFound`（agent 侧绑定写入同码哨兵——mcp 预检缺失 404 / FK 兜底，mcp 批） |
+| `MCP_TOOL_CALL_FAILED` | 500 | `mcpapi.ErrMCPToolCallFailed`（连接 / 握手 / 工具返回 isError，对齐 WORKFLOW_EXECUTION_FAILED 定位） |
 | `INTERNAL_ERROR` | 500 | `errs.ErrInternal`（兜底，不向前端泄露细节） |
 
 规则：

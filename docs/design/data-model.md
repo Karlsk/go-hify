@@ -14,7 +14,7 @@
 erDiagram
     providers ||--o{ models : "删提供商级联删模型"
     providers ||--o| provider_health : "1:1，首次探测才建行"
-    mcp_servers ||--o{ mcp_tools : ""
+    mcp_servers ||--o{ mcp_tools : "级联删；有绑定时被 RESTRICT 挡（00021）"
     agents }o--|| models : "主/备用模型"
     agents }o--o{ mcp_tools : "agent_tools"
     agents }o--o{ knowledge_bases : "agent_knowledge_bases"
@@ -45,12 +45,13 @@ erDiagram
 - 决策与 DDL 详见 [docs/changelog/provider/db_model.md](../changelog/provider/db_model.md)
 
 ### mcp
-- `mcp_servers` — MCP 工具服务器配置（transport、command/url、env）
-- `mcp_tools` — 各 server 暴露的工具（名称、描述、参数 schema）
+- `mcp_servers` — MCP 工具服务器配置（transport、command/url、env、enabled 可逆下架开关——00021）
+- `mcp_tools` — 各 server 暴露的工具（名称、描述、参数 schema；discover 按 `uq(server_id, name)` upsert，只增改不删）
+- 决策与迁移 00021 详见 [docs/changelog/mcp/db_model.md](../changelog/mcp/db_model.md)
 
 ### agent（关系枢纽）
 - `agents` — Agent 配置（系统提示词、温度、max_output_tokens；引用主模型 + 备用模型；可选绑定一个工作流 `workflow_id`，spec 05）
-- `agent_tools` — 关联表：Agent ↔ MCP 工具（多对多；绑定=授权，粒度到工具不到 server）
+- `agent_tools` — 关联表：Agent ↔ MCP 工具（多对多；绑定=授权，粒度到工具不到 server；tool 侧 FK RESTRICT 挡删——有绑定的 server 不可删，409 `MCP_SERVER_IN_USE`，00021）
 - `agent_knowledge_bases` — 关联表：Agent ↔ 知识库（多对多）
 
 ### rag
@@ -79,11 +80,11 @@ erDiagram
 providers 1──N models                          # 一个提供商多个模型（ON DELETE CASCADE）
 providers 1──1 provider_health                 # 探测结果，惰性建行（ON DELETE CASCADE）
 
-mcp_servers 1──N mcp_tools                     # 一个 server 多个工具
+mcp_servers 1──N mcp_tools                     # 一个 server 多个工具（ON DELETE CASCADE；工具被 Agent 绑定时被 agent_tools RESTRICT 挡 → 409，00021）
 
 agents N──1 models         (model_id 主模型)
 agents N──1 models         (fallback_model_id 备用，一期不用)
-agents N──M mcp_tools      via agent_tools
+agents N──M mcp_tools      via agent_tools     # agent_id CASCADE 清绑定 / tool_id RESTRICT 挡删（00021）
 agents N──M knowledge_bases via agent_knowledge_bases
 agents N──1 workflows      (workflow_id 可空，ON DELETE RESTRICT，spec 05)
 

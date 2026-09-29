@@ -60,7 +60,7 @@ curl -s localhost:8081/api/v1/agents | jq .error.code                    # → "
 
 ```bash
 curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/providers -H 'Content-Type: application/json' \
-  -d '{"name":"openai-main","kind":"openai","api_key":"sk-test-123"}' | jq .data.id   # → "1"
+  -d '{"name":"openai-main","kind":"openai_compatible","api_key":"sk-test-123","base_url":"https://api.openai.com/v1"}' | jq .data.id   # → "1"（00010 后 kind 枚举：openai_compatible / claude / gemini / ollama）
 curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/models -H 'Content-Type: application/json' \
   -d '{"provider_id":1,"name":"GPT-4o","model_id":"gpt-4o","capability":"chat"}' | jq .data.id       # → "1"
 curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/models -H 'Content-Type: application/json' \
