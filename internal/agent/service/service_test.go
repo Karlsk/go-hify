@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -11,7 +12,9 @@ import (
 	"gorm.io/gorm"
 
 	agentapi "github.com/Karlsk/go-hify/internal/agent/api"
+	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	"github.com/Karlsk/go-hify/internal/platform/cache"
+	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/page"
 	"github.com/Karlsk/go-hify/internal/platform/schema"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
@@ -168,6 +171,33 @@ func (s *stubModels) ListByIDs(ctx context.Context, req providerapi.ListModelsBy
 	return s.listByIDs(ctx, req)
 }
 
+// stubMCPClient 内嵌接口兜底，只覆写 GetToolsByIDs（agent 本批唯一消费的方法，
+// 小接口惯例——service 可另声明窄接口，此处直接用整面 + 内嵌兜底）。
+type stubMCPClient struct {
+	mcpapi.MCPClientService
+	getToolsByIDs func(ctx context.Context, req mcpapi.GetToolsByIDsReq) ([]mcpapi.ToolCheck, error)
+}
+
+func (s *stubMCPClient) GetToolsByIDs(ctx context.Context, req mcpapi.GetToolsByIDsReq) ([]mcpapi.ToolCheck, error) {
+	return s.getToolsByIDs(ctx, req)
+}
+
+// okTools 默认工具桩：所有请求 id 均存在且 server 启用（既有用例只关心 FK 兜底路径）。
+func okTools() *stubMCPClient {
+	return &stubMCPClient{
+		getToolsByIDs: func(ctx context.Context, req mcpapi.GetToolsByIDsReq) ([]mcpapi.ToolCheck, error) {
+			checks := make([]mcpapi.ToolCheck, 0, len(req.IDs))
+			for _, id := range req.IDs {
+				checks = append(checks, mcpapi.ToolCheck{
+					ToolSchema:    mcpapi.ToolSchema{ID: strconv.FormatUint(id, 10), Name: fmt.Sprintf("tool-%d", id)},
+					ServerEnabled: true,
+				})
+			}
+			return checks, nil
+		},
+	}
+}
+
 // stubCache 按方法注入行为；Delete 默认记录 key 后成功。
 type stubCache struct {
 	get    func(ctx context.Context, name, key string, dst any) (bool, error)
@@ -236,7 +266,12 @@ func okModels() *stubModels {
 }
 
 func newSvc(st Store, models providerapi.ModelService, cm cacheManager) agentapi.AgentService {
-	return New(st, models, cm)
+	return newSvcWithTools(st, models, okTools(), cm)
+}
+
+// newSvcWithTools 注入指定工具桩（绑定校验路径的用例用）。
+func newSvcWithTools(st Store, models providerapi.ModelService, tools mcpapi.MCPClientService, cm cacheManager) agentapi.AgentService {
+	return New(st, models, tools, cm)
 }
 
 // ---- Create ----
@@ -332,6 +367,47 @@ func TestCreate_FKOnTools(t *testing.T) {
 
 	_, err := svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 5, ToolIDs: []uint64{999}})
 	assert.ErrorIs(t, err, agentapi.ErrToolNotFound, "FK 23503 → 工具不存在")
+}
+
+// toolsStub 按缺失集合与停用标志构造工具桩：missing 内的 id 不返回（不存在），
+// 其余存在且 ServerEnabled = !disabled（checkTools 两类失败路径的共用夹具）。
+func toolsStub(missing map[uint64]bool, disabled bool) *stubMCPClient {
+	return &stubMCPClient{getToolsByIDs: func(ctx context.Context, req mcpapi.GetToolsByIDsReq) ([]mcpapi.ToolCheck, error) {
+		checks := make([]mcpapi.ToolCheck, 0, len(req.IDs))
+		for _, id := range req.IDs {
+			if missing[id] {
+				continue
+			}
+			checks = append(checks, mcpapi.ToolCheck{
+				ToolSchema:    mcpapi.ToolSchema{ID: strconv.FormatUint(id, 10), Name: fmt.Sprintf("tool-%d", id)},
+				ServerEnabled: !disabled,
+			})
+		}
+		return checks, nil
+	}}
+}
+
+func TestCreate_ToolMissingPrecheck(t *testing.T) {
+	// 主路径：mcp api GetToolsByIDs 预检发现缺失 → 404 哨兵，不落库
+	//（FK 23503 只兜底预检后的并发删除，server_mgmt_spec.md §5）。
+	st := &stubStore{}
+	svc := newSvcWithTools(st, okModels(), toolsStub(map[uint64]bool{999: true}, false), &stubCache{})
+
+	_, err := svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 5, ToolIDs: []uint64{10, 999}})
+	assert.ErrorIs(t, err, agentapi.ErrToolNotFound)
+	assert.Contains(t, err.Error(), "999", "错误信息带缺失工具 id")
+	assert.Equal(t, 0, st.calls.createAgent, "预检失败不落库")
+}
+
+func TestCreate_ToolServerDisabled(t *testing.T) {
+	// 工具存在但所属 server 停用 → 400 VALIDATION_FAILED（errs 包装，非模块哨兵）。
+	st := &stubStore{}
+	svc := newSvcWithTools(st, okModels(), toolsStub(nil, true), &stubCache{})
+
+	_, err := svc.Create(context.Background(), agentapi.CreateAgentReq{Name: "a", ModelID: 5, ToolIDs: []uint64{10}})
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "已停用")
+	assert.Equal(t, 0, st.calls.createAgent, "预检失败不落库")
 }
 
 func TestCreate_FKOnKBs(t *testing.T) {
@@ -715,6 +791,16 @@ func TestUpdate_FKOnKBs(t *testing.T) {
 	assert.Empty(t, cm.deletedKeys, "事务失败不失效缓存")
 }
 
+func TestUpdate_ToolServerDisabled(t *testing.T) {
+	// Update 与 Create 同款 checkTools：停用 server 的工具 → 400，不进事务。
+	st := &stubStore{}
+	svc := newSvcWithTools(st, okModels(), toolsStub(nil, true), &stubCache{})
+
+	_, err := svc.Update(context.Background(), agentapi.UpdateAgentReq{ID: 1, Name: "x", ModelID: 5, ToolIDs: []uint64{10}})
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Equal(t, 0, st.calls.updateAgent, "预检失败不落库")
+}
+
 // ---- Delete ----
 
 func TestDelete_Happy(t *testing.T) {
@@ -753,4 +839,87 @@ func TestEvict_FailureDoesNotFailRequest(t *testing.T) {
 
 	err := svc.Delete(context.Background(), agentapi.DeleteAgentReq{ID: 1})
 	assert.NoError(t, err, "缓存删失败仅 WARN，业务照常成功")
+}
+
+// ---- BindTools（mcp 管理批，server_mgmt_spec.md §5） ----
+
+func TestBindTools_FullReplace(t *testing.T) {
+	st := &stubStore{}
+	var gotCreated []uint64
+	st.createTools = func(ctx context.Context, agentID uint64, toolIDs []uint64) error {
+		gotCreated = toolIDs
+		return nil
+	}
+	cm := &stubCache{}
+	svc := newSvc(st, okModels(), cm)
+
+	resp, err := svc.BindTools(context.Background(), agentapi.BindToolsReq{ID: 1, ToolIDs: []uint64{10, 12}})
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"10", "12"}, resp.ToolIDs, "响应 id 字符串化")
+	assert.Equal(t, 1, st.calls.deleteTools, "全量替换先清空")
+	assert.Equal(t, 1, st.calls.createTools, "后插新绑定")
+	assert.Equal(t, []uint64{10, 12}, gotCreated)
+	assert.Equal(t, []string{"detail:1"}, cm.deletedKeys, "提交后写时删 key")
+}
+
+func TestBindTools_EmptyUnbindsAll(t *testing.T) {
+	// 空数组 = 解绑全部（Validate 放行空，业务语义为清空）。
+	st := &stubStore{}
+	cm := &stubCache{}
+	svc := newSvc(st, okModels(), cm)
+
+	resp, err := svc.BindTools(context.Background(), agentapi.BindToolsReq{ID: 1})
+	assert.NoError(t, err)
+	assert.Equal(t, []string{}, resp.ToolIDs, "空绑定返 [] 不返 null")
+	assert.Equal(t, 1, st.calls.deleteTools)
+	assert.Equal(t, 1, st.calls.createTools, "空列表照走 CreateTools（store 短路空插入）")
+}
+
+func TestBindTools_AgentNotFound(t *testing.T) {
+	st := &stubStore{getByID: func(ctx context.Context, id uint64) (*Agent, error) {
+		return nil, gorm.ErrRecordNotFound
+	}}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	_, err := svc.BindTools(context.Background(), agentapi.BindToolsReq{ID: 999, ToolIDs: []uint64{10}})
+	assert.ErrorIs(t, err, agentapi.ErrAgentNotFound)
+	assert.Equal(t, 0, st.calls.deleteTools, "agent 不存在不动绑定")
+}
+
+func TestBindTools_ToolMissing(t *testing.T) {
+	st := &stubStore{}
+	svc := newSvcWithTools(st, okModels(), toolsStub(map[uint64]bool{999: true}, false), &stubCache{})
+
+	_, err := svc.BindTools(context.Background(), agentapi.BindToolsReq{ID: 1, ToolIDs: []uint64{999}})
+	assert.ErrorIs(t, err, agentapi.ErrToolNotFound)
+	assert.Equal(t, 0, st.calls.deleteTools, "预检失败不进事务")
+}
+
+func TestBindTools_ToolServerDisabled(t *testing.T) {
+	st := &stubStore{}
+	svc := newSvcWithTools(st, okModels(), toolsStub(nil, true), &stubCache{})
+
+	_, err := svc.BindTools(context.Background(), agentapi.BindToolsReq{ID: 1, ToolIDs: []uint64{10}})
+	assert.ErrorIs(t, err, errs.ErrValidationFailed, "停用 server 的工具 → 400")
+	assert.Equal(t, 0, st.calls.deleteTools)
+}
+
+func TestBindTools_FKFallback(t *testing.T) {
+	// 预检通过后工具被并发删除：FK 23503 兜底翻译（事务回滚，绑定原样保留）。
+	st := &stubStore{createTools: func(ctx context.Context, id uint64, ids []uint64) error { return fkErr() }}
+	svc := newSvc(st, okModels(), &stubCache{})
+
+	_, err := svc.BindTools(context.Background(), agentapi.BindToolsReq{ID: 1, ToolIDs: []uint64{10}})
+	assert.ErrorIs(t, err, agentapi.ErrToolNotFound)
+}
+
+func TestBindTools_Validation(t *testing.T) {
+	// 缺 id → Validate 拦截；重复 id 同样被拒（schema_test 钉住，这里过 service 入口）。
+	svc := newSvc(&stubStore{}, okModels(), &stubCache{})
+
+	_, err := svc.BindTools(context.Background(), agentapi.BindToolsReq{ToolIDs: []uint64{10}})
+	assert.Error(t, err)
+
+	_, err = svc.BindTools(context.Background(), agentapi.BindToolsReq{ID: 1, ToolIDs: []uint64{10, 10}})
+	assert.Error(t, err)
 }

@@ -30,8 +30,9 @@ func TestConstantsPinned(t *testing.T) {
 	assert.Equal(t, 100, MaxContextTurnsMax)
 	assert.Equal(t, 10, DefaultMaxContextTurns)
 
-	// 绑定上限与 binding tag max=100 对齐（防提示词无界膨胀）。
-	assert.Equal(t, 100, MaxToolBindings)
+	// 绑定上限 = 10（用户 spec 定稿 2026-09-28：防 tools 参数过长影响 LLM 效率；
+	// binding tag max=10 与本常量对齐）。
+	assert.Equal(t, 10, MaxToolBindings)
 
 	// KB 绑定上限 = ragapi.MaxRetrieveKBs（绑超则 chat 检索必撞 kb_ids 上限，绑定期挡）。
 	assert.Equal(t, 10, MaxKBBindings)
@@ -81,6 +82,44 @@ func TestValidateAgent_Update(t *testing.T) {
 	t.Run("带 id 合法", func(t *testing.T) {
 		r := UpdateAgentReq{ID: 1, Name: "客服助手", ModelID: 5}
 		assert.NoError(t, r.Validate())
+	})
+}
+
+// ---- 工具绑定（mcp server 管理批：PUT /agents/{id}/mcp-tools 全量替换）----
+
+func TestValidateBindTools(t *testing.T) {
+	t.Run("缺 id 被拒", func(t *testing.T) {
+		r := BindToolsReq{ToolIDs: []uint64{10}}
+		assert.ErrorContains(t, r.Validate(), "id 必填")
+	})
+	t.Run("空数组合法（= 解绑全部）", func(t *testing.T) {
+		r := BindToolsReq{ID: 1}
+		assert.NoError(t, r.Validate())
+	})
+	t.Run("tool_ids 重复被拒", func(t *testing.T) {
+		r := BindToolsReq{ID: 1, ToolIDs: []uint64{10, 12, 10}}
+		assert.ErrorContains(t, r.Validate(), "重复")
+	})
+	t.Run("去重后合法", func(t *testing.T) {
+		r := BindToolsReq{ID: 1, ToolIDs: []uint64{10, 12}}
+		assert.NoError(t, r.Validate())
+	})
+}
+
+func TestBindToolsSchema_JSON(t *testing.T) {
+	t.Run("tool_ids 字符串化", func(t *testing.T) {
+		b, err := json.Marshal(BindToolsSchema{ToolIDs: []string{"10", "12"}})
+		assert.NoError(t, err)
+		var m map[string]any
+		assert.NoError(t, json.Unmarshal(b, &m))
+		assert.Equal(t, []any{"10", "12"}, m["tool_ids"])
+	})
+	t.Run("nil ToolIDs 序列化为 null——service 必须保证非 nil（空绑定返 []）", func(t *testing.T) {
+		b, err := json.Marshal(BindToolsSchema{})
+		assert.NoError(t, err)
+		var m map[string]any
+		assert.NoError(t, json.Unmarshal(b, &m))
+		assert.Nil(t, m["tool_ids"])
 	})
 }
 

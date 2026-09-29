@@ -27,6 +27,10 @@ const (
 	NameRag = "rag-cache"
 	// NameWorkflow workflow 配置缓存（整图详情，静态低频变更）。
 	NameWorkflow = "workflow-cache"
+	// NameMCPServer mcp server 配置缓存（server 实体按 id，CallTool / 详情热路径读）。
+	NameMCPServer = "mcp-server-cache"
+	// NameMCPTool mcp 工具清单缓存（按 server 分键，详情 / ListTools 读）。
+	NameMCPTool = "mcp-tool-cache"
 )
 
 // TTL 约定（CLAUDE.md《部署架构》：配置类 Cache-Aside，TTL 30 分钟 + 写时删 key）。
@@ -43,15 +47,18 @@ type Config struct {
 }
 
 // DefaultConfig 返回带已知配置类缓存名 TTL 的默认装配配置
-// （provider-cache / agent-cache / rag-cache / workflow-cache 均 30 min，等于默认）。业务模块若需不同 TTL，覆盖对应项。
+// （provider-cache / agent-cache / rag-cache / workflow-cache / mcp-server-cache /
+// mcp-tool-cache 均 30 min，等于默认）。业务模块若需不同 TTL，覆盖对应项。
 func DefaultConfig() Config {
 	return Config{
 		DefaultTTL: DefaultTTL,
 		TTLs: map[string]time.Duration{
-			NameProvider: DefaultTTL,
-			NameAgent:    DefaultTTL,
-			NameRag:      DefaultTTL,
-			NameWorkflow: DefaultTTL,
+			NameProvider:  DefaultTTL,
+			NameAgent:     DefaultTTL,
+			NameRag:       DefaultTTL,
+			NameWorkflow:  DefaultTTL,
+			NameMCPServer: DefaultTTL,
+			NameMCPTool:   DefaultTTL,
 		},
 	}
 }

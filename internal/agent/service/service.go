@@ -15,7 +15,9 @@ import (
 	"gorm.io/gorm"
 
 	agentapi "github.com/Karlsk/go-hify/internal/agent/api"
+	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	"github.com/Karlsk/go-hify/internal/platform/cache"
+	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/page"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 )
@@ -88,19 +90,23 @@ const fkAgentsWorkflow = "fk_agents_workflow"
 type agentService struct {
 	store  Store
 	models providerapi.ModelService // 主/备用模型存在性预检（provider 模块 api 注入）
+	tools  mcpapi.MCPClientService  // 工具绑定校验（mcp 模块 api 注入：存在 + server 启用）
 	cache  cacheManager             // 配置类 Cache-Aside（NameAgent，TTL 由 cache 包统一）
 }
 
-// New 构造 AgentService；store / models 由组合根注入，cm 传 *cache.Cache（单测可 stub）。
-func New(store Store, models providerapi.ModelService, cm cacheManager) agentapi.AgentService {
-	return &agentService{store: store, models: models, cache: cm}
+// New 构造 AgentService；store / models / tools 由组合根注入（mcp service 的调用面
+// 面孔），cm 传 *cache.Cache（单测可 stub）。
+func New(store Store, models providerapi.ModelService, tools mcpapi.MCPClientService, cm cacheManager) agentapi.AgentService {
+	return &agentService{store: store, models: models, tools: tools, cache: cm}
 }
 
 // ---- AgentService ----
 
-// Create 创建 Agent：模型存在性预检（经 provider api）→ 同一事务内落 agent 行 + 绑定行
-// （工具 + 知识库）。错误：providerapi.ErrModelNotFound（主/备用模型不存在，含预检后被
-// 并发删除的 FK 兜底）、agentapi.ErrToolNotFound（tool_ids 含不存在的工具，FK 23503 翻译）、
+// Create 创建 Agent：模型存在性预检（经 provider api）→ 工具绑定预检（经 mcp api）→
+// 同一事务内落 agent 行 + 绑定行（工具 + 知识库）。错误：providerapi.ErrModelNotFound
+// （主/备用模型不存在，含预检后被并发删除的 FK 兜底）、agentapi.ErrToolNotFound
+// （tool_ids 含不存在的工具——mcp api GetToolsByIDs 预检翻译，FK 23503 兜底并发删）、
+// errs.ErrValidationFailed（工具所属 MCP Server 已停用，400）、
 // agentapi.ErrKnowledgeBaseNotFound（knowledge_base_ids 含不存在的 KB，FK 23503 翻译——
 // agent 不依赖 rag，FK 是 KB 存在性的唯一校验）、agentapi.ErrWorkflowNotFound
 // （workflow_id 指向不存在的 workflow，FK 23503 约束名分发翻译——agent 不依赖
@@ -110,6 +116,9 @@ func (s *agentService) Create(ctx context.Context, req agentapi.CreateAgentReq) 
 		return nil, fmt.Errorf("validate create agent: %w", err)
 	}
 	if err := s.checkModels(ctx, req.ModelID, req.FallbackModelID); err != nil {
+		return nil, err
+	}
+	if err := s.checkTools(ctx, req.ToolIDs); err != nil {
 		return nil, err
 	}
 
@@ -123,7 +132,7 @@ func (s *agentService) Create(ctx context.Context, req agentapi.CreateAgentReq) 
 		}
 		if err := tx.CreateTools(ctx, a.ID, req.ToolIDs); err != nil {
 			if isFKViolation(err) {
-				return agentapi.ErrToolNotFound // 工具存在性的唯一校验（mcp 模块未建，db_model.md §4.1）
+				return agentapi.ErrToolNotFound // checkTools 预检后被并发删除的兜底（server_mgmt_spec.md §5）
 			}
 			return fmt.Errorf("bind tools: %w", err)
 		}
@@ -245,8 +254,10 @@ func (s *agentService) withAggregates(ctx context.Context, agents []Agent, items
 }
 
 // Update 整体更新（PUT 语义）：先取实体（区分 404 与静默不命中，且保住 created_at 等
-// DB 生成列）→ 模型预检 → 同一事务内 Save + 绑定（工具 / KB）先删后插 → 提交后失效缓存。
-// 错误：agentapi.ErrAgentNotFound、providerapi.ErrModelNotFound、agentapi.ErrToolNotFound、
+// DB 生成列）→ 模型预检 → 工具绑定预检（与 Create 同款 checkTools）→ 同一事务内 Save +
+// 绑定（工具 / KB）先删后插 → 提交后失效缓存。错误：agentapi.ErrAgentNotFound、
+// providerapi.ErrModelNotFound、agentapi.ErrToolNotFound（GetToolsByIDs 预检翻译 +
+// FK 23503 兜底）、errs.ErrValidationFailed（工具所属 MCP Server 已停用，400）、
 // agentapi.ErrKnowledgeBaseNotFound、agentapi.ErrWorkflowNotFound（重绑撞不存在的
 // workflow，23503 约束名分发翻译）。
 func (s *agentService) Update(ctx context.Context, req agentapi.UpdateAgentReq) (*agentapi.AgentSchema, error) {
@@ -261,6 +272,9 @@ func (s *agentService) Update(ctx context.Context, req agentapi.UpdateAgentReq) 
 		return nil, fmt.Errorf("get agent %d: %w", req.ID, err)
 	}
 	if err := s.checkModels(ctx, req.ModelID, req.FallbackModelID); err != nil {
+		return nil, err
+	}
+	if err := s.checkTools(ctx, req.ToolIDs); err != nil {
 		return nil, err
 	}
 
@@ -322,6 +336,44 @@ func (s *agentService) Delete(ctx context.Context, req agentapi.DeleteAgentReq) 
 	return nil
 }
 
+// BindTools 全量替换 Agent 的工具绑定（PUT /agents/{id}/mcp-tools）：agent 存在性 →
+// 工具绑定预检（与 Create / Update 同款 checkTools：存在且所属 server 启用）→ 事务内
+// 先删后插 → 提交后失效详情缓存。空数组 = 解绑全部；上限 10（MaxToolBindings）由
+// req 的 binding tag + Validate 挡（server_mgmt_spec.md §5）。
+// 错误：agentapi.ErrAgentNotFound、agentapi.ErrToolNotFound（GetToolsByIDs 预检翻译 +
+// FK 23503 兜底并发删）、errs.ErrValidationFailed（工具所属 MCP Server 已停用，400）。
+func (s *agentService) BindTools(ctx context.Context, req agentapi.BindToolsReq) (*agentapi.BindToolsSchema, error) {
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("validate bind tools: %w", err)
+	}
+	if _, err := s.store.GetAgentByID(ctx, req.ID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, agentapi.ErrAgentNotFound
+		}
+		return nil, fmt.Errorf("get agent %d: %w", req.ID, err)
+	}
+	if err := s.checkTools(ctx, req.ToolIDs); err != nil {
+		return nil, err
+	}
+	err := s.store.WithTx(ctx, func(tx Store) error {
+		if err := tx.DeleteToolsByAgent(ctx, req.ID); err != nil {
+			return fmt.Errorf("unbind tools: %w", err)
+		}
+		if err := tx.CreateTools(ctx, req.ID, req.ToolIDs); err != nil {
+			if isFKViolation(err) {
+				return agentapi.ErrToolNotFound // checkTools 预检后被并发删除的兜底
+			}
+			return fmt.Errorf("bind tools: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.evict(ctx, fmt.Sprintf(cacheKeyDetail, req.ID))
+	return &agentapi.BindToolsSchema{ToolIDs: strIDs(req.ToolIDs)}, nil
+}
+
 // ---- 内部辅助 ----
 
 // checkModels 校验主/备用模型存在（provider 模块哨兵直接透传）。只挡「引用不存在的
@@ -340,6 +392,41 @@ func (s *agentService) checkModels(ctx context.Context, modelID uint64, fallback
 			}
 			return fmt.Errorf("check fallback model %d: %w", *fallback, err)
 		}
+	}
+	return nil
+}
+
+// checkTools 校验工具绑定「工具存在且所属 MCP Server 启用」（server_mgmt_spec.md §5，
+// Create / Update / BindTools 三处共用）：缺失 → ErrToolNotFound（404）；停用 →
+// errs.ErrValidationFailed 包装（400，提示先启用 server 或换工具）。存在性经 mcp api
+// 的 GetToolsByIDs 判定（agent 不依赖 mcp 的表）；FK 23503 只兜底预检后的并发删除。
+func (s *agentService) checkTools(ctx context.Context, toolIDs []uint64) error {
+	if len(toolIDs) == 0 {
+		return nil // 无绑定直接过（KB / 工具均可不绑）
+	}
+	checks, err := s.tools.GetToolsByIDs(ctx, mcpapi.GetToolsByIDsReq{IDs: toolIDs})
+	if err != nil {
+		return fmt.Errorf("check tools: %w", err)
+	}
+	found := make(map[string]bool, len(checks))
+	var disabled []string
+	for i := range checks {
+		found[checks[i].ID] = true // ToolCheck 内嵌 ToolSchema，id 双方同为字符串化形态
+		if !checks[i].ServerEnabled {
+			disabled = append(disabled, checks[i].Name)
+		}
+	}
+	var missing []uint64
+	for _, id := range toolIDs {
+		if !found[strconv.FormatUint(id, 10)] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: %v", agentapi.ErrToolNotFound, missing)
+	}
+	if len(disabled) > 0 {
+		return fmt.Errorf("%w: 工具 %v 所属 MCP Server 已停用，请先启用或移除", errs.ErrValidationFailed, disabled)
 	}
 	return nil
 }
@@ -493,4 +580,13 @@ func toDetailSchema(a *Agent, toolIDs, kbIDs []uint64) agentapi.AgentDetailSchem
 		d.KnowledgeBaseIDs = append(d.KnowledgeBaseIDs, strconv.FormatUint(id, 10))
 	}
 	return d
+}
+
+// strIDs uint64 id 列表 → 字符串化列表（响应契约：id 一律字符串，接口规范）。
+func strIDs(ids []uint64) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, strconv.FormatUint(id, 10))
+	}
+	return out
 }

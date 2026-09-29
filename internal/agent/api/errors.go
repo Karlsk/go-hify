@@ -12,8 +12,10 @@ var (
 	// RESTRICT 的 23503 翻译）。可先删除相关会话，或改用停用（enabled=false）。
 	ErrAgentInUse = errors.New("AGENT_IN_USE")
 
-	// ErrToolNotFound 绑定的工具不存在（404；tool_ids 撞 FK 23503 的翻译——
-	// mcp 模块未建时这是工具存在性的唯一校验，建成后作为兜底保留）。
+	// ErrToolNotFound 绑定的工具不存在（404；service 经 mcp api GetToolsByIDs
+	// 预检的翻译，agent_tools 的 FK 23503 兜底并发删——server_mgmt_spec.md §5）。
+	// 码与 mcpapi.ErrMCPToolNotFound 同义（前者是 agent 侧绑定写入的翻译产物，
+	// 后者是 mcp run 端点直查产物），前端按 code 分支无歧义。
 	ErrToolNotFound = errors.New("TOOL_NOT_FOUND")
 
 	// ErrKnowledgeBaseNotFound 绑定的知识库不存在（404；knowledge_base_ids 撞 FK

@@ -28,4 +28,11 @@ type AgentService interface {
 	// 挡删（可先删会话或改停用）。
 	// 错误：ErrAgentNotFound、ErrAgentInUse。
 	Delete(ctx context.Context, req DeleteAgentReq) error
+
+	// BindTools 全量替换 Agent 的工具绑定（PUT /agents/{id}/mcp-tools；空数组 =
+	// 解绑全部，事务内先删后插）。绑定校验经 mcp api：工具存在且所属 server 启用
+	//（server_mgmt_spec.md §5）。
+	// 错误：ErrAgentNotFound、ErrToolNotFound（工具不存在）；
+	// server 停用为校验错误（400 VALIDATION_FAILED，非哨兵）。
+	BindTools(ctx context.Context, req BindToolsReq) (*BindToolsSchema, error)
 }

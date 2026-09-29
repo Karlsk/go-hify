@@ -78,8 +78,9 @@ const (
 	MaxContextTurnsMin     = 1
 	MaxContextTurnsMax     = 100
 	DefaultMaxContextTurns = 10
-	// MaxToolBindings 单 Agent 绑定工具数上限（uq 防重复，上限防提示词无界膨胀）。
-	MaxToolBindings = 100
+	// MaxToolBindings 单 Agent 绑定工具数上限（uq 防重复；10 = 用户 spec 定稿
+	// 2026-09-28：防 tools 参数过长影响 LLM 效率；binding tag max=10 与本常量对齐）。
+	MaxToolBindings = 10
 	// MaxKBBindings 单 Agent 绑定知识库数上限 = ragapi.MaxRetrieveKBs：检索一次最多
 	// 10 个 KB，绑超则 chat 注入的 Retrieve 必撞 kb_ids 上限、运行期才爆——绑定期挡
 	//（binding tag max=10 与本常量对齐；数值取等）。
@@ -103,7 +104,7 @@ type CreateAgentReq struct {
 	MaxOutputTokens *int64   `json:"max_output_tokens" binding:"omitempty,min=1"`
 	MaxContextTurns *int     `json:"max_context_turns" binding:"omitempty,min=1,max=100"`
 	Enabled         *bool    `json:"enabled"` // 未传 = true（创建即启用）
-	ToolIDs         []uint64 `json:"tool_ids" binding:"omitempty,max=100,dive,gt=0"`
+	ToolIDs         []uint64 `json:"tool_ids" binding:"omitempty,max=10,dive,gt=0"`
 	// KnowledgeBaseIDs 绑定的知识库（RAG 召回范围，多对多）；kb 不存在时 FK 23503
 	// 由 service 翻译 ErrKnowledgeBaseNotFound（agent 不依赖 rag，FK 是唯一校验）。
 	KnowledgeBaseIDs []uint64 `json:"knowledge_base_ids" binding:"omitempty,max=10,dive,gt=0"`
@@ -136,7 +137,7 @@ type UpdateAgentReq struct {
 	MaxOutputTokens *int64   `json:"max_output_tokens" binding:"omitempty,min=1"`
 	MaxContextTurns *int     `json:"max_context_turns" binding:"omitempty,min=1,max=100"`
 	Enabled         *bool    `json:"enabled"` // 未传 = true（PUT 全量；前端漏发会被置回启用）
-	ToolIDs         []uint64 `json:"tool_ids" binding:"omitempty,max=100,dive,gt=0"`
+	ToolIDs         []uint64 `json:"tool_ids" binding:"omitempty,max=10,dive,gt=0"`
 	// KnowledgeBaseIDs 同 CreateAgentReq（PUT 全量覆盖：绑定事务内先删后插）。
 	KnowledgeBaseIDs []uint64 `json:"knowledge_base_ids" binding:"omitempty,max=10,dive,gt=0"`
 	// RAGTopK / RAGMinSimilarity 同 CreateAgentReq。
@@ -179,6 +180,37 @@ type ListAgentsReq struct {
 
 // Validate 跨字段校验；当前无跨字段规则。
 func (r ListAgentsReq) Validate() error { return nil }
+
+// BindToolsSchema 绑定工具结果：生效的 tool_ids（字符串化，全量替换后的最终态）。
+// ToolIDs 由 service 保证非 nil（空绑定返 []）。
+type BindToolsSchema struct {
+	ToolIDs []string `json:"tool_ids"`
+}
+
+// BindToolsReq 绑定工具请求（PUT /agents/{id}/mcp-tools，全量替换：先删后插，
+// 空数组 = 解绑全部）。ID 带 json:"-" 两段绑定同 UpdateAgentReq（防 body 改写路径值）。
+// 工具存在性与所属 server 启用状态由 service 经 mcp api 校验（agent 依赖 mcp）：
+// 不存在 → ErrToolNotFound（mcpapi.ErrMCPToolNotFound 同义），server 停用 → 400
+// VALIDATION_FAILED（server_mgmt_spec.md §5）。
+type BindToolsReq struct {
+	ID      uint64   `json:"-"`
+	ToolIDs []uint64 `json:"tool_ids" binding:"omitempty,max=10,dive,gt=0"`
+}
+
+// Validate 跨字段校验；ID>0 兜底 + tool_ids 去重（撞 uq 前提前 400 友好）。
+func (r BindToolsReq) Validate() error {
+	if r.ID == 0 {
+		return fmt.Errorf("id 必填")
+	}
+	seen := make(map[uint64]struct{}, len(r.ToolIDs))
+	for _, id := range r.ToolIDs {
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("tool_ids 含重复 id %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
 
 // validateAgent 创建/更新共用的跨字段规则：备用模型不得等于主模型；tool_ids /
 // knowledge_base_ids 不得重复（重复会撞 uq / 复合 PK，提前 400 比落库报错友好）。

@@ -24,13 +24,14 @@ func New(agents agentapi.AgentService) *Handler {
 	return &Handler{agents: agents}
 }
 
-// RegisterRoutes 挂 agents 一组 5 条路由（REST 资源路径，接口规范）。
+// RegisterRoutes 挂 agents 一组 6 条路由（REST 资源路径，接口规范）。
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	g := rg.Group("/agents")
 	g.POST("", h.create)
 	g.GET("", h.list)
 	g.GET("/:id", h.get)
 	g.PUT("/:id", h.update)
+	g.PUT("/:id/mcp-tools", h.bindTools)
 	g.DELETE("/:id", h.delete)
 }
 
@@ -107,6 +108,27 @@ func (h *Handler) delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// bindTools 全量替换 Agent 的工具绑定（PUT /agents/{id}/mcp-tools，mcp 管理批）：
+// 两段绑定——先路径 :id 再 body（tool_ids 数组，空数组 = 解绑全部）；上限 10 由
+// binding tag + Validate 挡。工具不存在 → 404；所属 server 停用 → 400（errs 通用哨兵）。
+func (h *Handler) bindTools(c *gin.Context) {
+	var idReq agentapi.GetAgentReq
+	if !respond.BindUri(c, &idReq) {
+		return
+	}
+	var req agentapi.BindToolsReq
+	req.ID = idReq.ID
+	if !respond.BindJSON(c, &req) {
+		return
+	}
+	s, err := h.agents.BindTools(c.Request.Context(), req)
+	if err != nil {
+		failAgent(c, err)
+		return
+	}
+	respond.OK(c, s)
 }
 
 // failAgent 映射 agent 侧业务哨兵。agent 操作也可能翻出 provider 哨兵

@@ -106,6 +106,21 @@ func (f *fakeSvc) Delete(_ context.Context, req agentapi.DeleteAgentReq) error {
 	return nil
 }
 
+// BindTools 复现全量替换语义（agent 存在 → tool_ids 覆盖；缺失 → 哨兵），
+// 供 Step 6 挂 PUT /:id/mcp-tools 路由后直接复用。
+func (f *fakeSvc) BindTools(_ context.Context, req agentapi.BindToolsReq) (*agentapi.BindToolsSchema, error) {
+	if f.injected != nil {
+		return nil, f.injected
+	}
+	d, ok := f.agents[req.ID]
+	if !ok {
+		return nil, agentapi.ErrAgentNotFound
+	}
+	d.ToolIDs = strIDs(req.ToolIDs)
+	f.agents[req.ID] = d
+	return &agentapi.BindToolsSchema{ToolIDs: d.ToolIDs}, nil
+}
+
 func strIDs(ids []uint64) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -343,4 +358,88 @@ func TestDelete_NotFound(t *testing.T) {
 	r := newTestRouter(newFakeSvc())
 	w := doReq(t, r, http.MethodDelete, "/api/v1/agents/999", "")
 	assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+}
+
+// ---- bindTools（PUT /:id/mcp-tools，mcp 管理批）----
+
+func TestBindTools(t *testing.T) {
+	svc := newFakeSvc()
+	svc.agents[1] = agentapi.AgentDetailSchema{AgentSchema: agentapi.AgentSchema{Name: "客服助手"}, ToolIDs: []string{"99"}}
+	r := newTestRouter(svc)
+
+	w := doReq(t, r, http.MethodPut, "/api/v1/agents/1/mcp-tools", `{"tool_ids":[10,12]}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	require.True(t, e.Success)
+	d := decodeData[agentapi.BindToolsSchema](t, e)
+	assert.Equal(t, []string{"10", "12"}, d.ToolIDs, "全量替换后的绑定结果")
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+}
+
+func TestBindTools_EmptyArrayUnbindsAll(t *testing.T) {
+	svc := newFakeSvc()
+	svc.agents[1] = agentapi.AgentDetailSchema{ToolIDs: []string{"10"}}
+	r := newTestRouter(svc)
+
+	w := doReq(t, r, http.MethodPut, "/api/v1/agents/1/mcp-tools", `{"tool_ids":[]}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	d := decodeData[agentapi.BindToolsSchema](t, parseEnvelope(t, w.Body.Bytes()))
+	assert.Empty(t, d.ToolIDs, "空数组 = 解绑全部")
+}
+
+func TestBindTools_ValidationFailed(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"tool_ids 超 10 个上限（binding max）", `{"tool_ids":[1,2,3,4,5,6,7,8,9,10,11]}`},
+		{"tool_id 含 0（binding dive gt=0）", `{"tool_ids":[10,0]}`},
+		{"tool_ids 重复（跨字段 Validate）", `{"tool_ids":[10,10]}`},
+		{"tool_ids 非数值", `{"tool_ids":[10,"12"]}`},
+		{"坏 JSON", `{`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestRouter(newFakeSvc())
+			w := doReq(t, r, http.MethodPut, "/api/v1/agents/1/mcp-tools", tc.body)
+			assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			e := parseEnvelope(t, w.Body.Bytes())
+			require.NotNil(t, e.Error)
+			assert.Equal(t, errs.ErrValidationFailed.Error(), e.Error.Code)
+		})
+	}
+}
+
+func TestBindTools_NotFound(t *testing.T) {
+	r := newTestRouter(newFakeSvc())
+	w := doReq(t, r, http.MethodPut, "/api/v1/agents/999/mcp-tools", `{"tool_ids":[10]}`)
+	assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	e := parseEnvelope(t, w.Body.Bytes())
+	require.NotNil(t, e.Error)
+	assert.Equal(t, agentapi.ErrAgentNotFound.Error(), e.Error.Code)
+}
+
+func TestBindTools_Sentinel(t *testing.T) {
+	// 工具不存在（mcp 预检 404）与 server 停用（errs 通用 400）都由 service 翻译、
+	// handler 映射：ErrToolNotFound 走 failAgent，ErrValidationFailed 走 FailFromSentinel。
+	t.Run("工具不存在", func(t *testing.T) {
+		svc := newFakeSvc()
+		svc.injected = agentapi.ErrToolNotFound
+		r := newTestRouter(svc)
+		w := doReq(t, r, http.MethodPut, "/api/v1/agents/1/mcp-tools", `{"tool_ids":[404]}`)
+		assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+		e := parseEnvelope(t, w.Body.Bytes())
+		require.NotNil(t, e.Error)
+		assert.Equal(t, agentapi.ErrToolNotFound.Error(), e.Error.Code)
+	})
+	t.Run("所属 server 停用（通用哨兵）", func(t *testing.T) {
+		svc := newFakeSvc()
+		svc.injected = errs.ErrValidationFailed
+		r := newTestRouter(svc)
+		w := doReq(t, r, http.MethodPut, "/api/v1/agents/1/mcp-tools", `{"tool_ids":[10]}`)
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		e := parseEnvelope(t, w.Body.Bytes())
+		require.NotNil(t, e.Error)
+		assert.Equal(t, errs.ErrValidationFailed.Error(), e.Error.Code)
+	})
 }

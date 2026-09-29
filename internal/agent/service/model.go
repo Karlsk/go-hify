@@ -42,7 +42,7 @@ func (Agent) TableName() string { return "agents" }
 type AgentTool struct {
 	db.BaseAppendOnly
 	AgentID uint64 `gorm:"not null"` // agents.id，ON DELETE CASCADE（仅硬删触发）
-	ToolID  uint64 `gorm:"not null"` // mcp_tools.id，ON DELETE CASCADE
+	ToolID  uint64 `gorm:"not null"` // mcp_tools.id，ON DELETE RESTRICT（00021：有绑定挡删 server/tool → 409 MCP_SERVER_IN_USE；agent 侧删除仍走 agent_id CASCADE）
 }
 
 // TableName 显式表名。

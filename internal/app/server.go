@@ -30,6 +30,9 @@ import (
 	demohandler "github.com/Karlsk/go-hify/internal/demo/handler"
 	demosvc "github.com/Karlsk/go-hify/internal/demo/service"
 	demostore "github.com/Karlsk/go-hify/internal/demo/store"
+	mcphandler "github.com/Karlsk/go-hify/internal/mcp/handler"
+	mcpsvc "github.com/Karlsk/go-hify/internal/mcp/service"
+	mcpstore "github.com/Karlsk/go-hify/internal/mcp/store"
 	"github.com/Karlsk/go-hify/internal/platform/cache"
 	"github.com/Karlsk/go-hify/internal/platform/config"
 	"github.com/Karlsk/go-hify/internal/platform/db"
@@ -120,12 +123,21 @@ func Run(cfg *config.Config) error {
 		slog.Warn("executions partition maintenance disabled (EXECUTIONS_RETENTION_DAYS <= 0); partitions are neither created nor dropped")
 	}
 
-	// agent：依赖 provider 的 ModelService（主/备用模型存在性预检，api 接口注入）。
+	// mcp：MCP Server 管理 + 工具调用面（server_mgmt_spec.md §3）。New 双返回同一实例的
+	// 两张面孔：MCPServerService 挂 mcp handler（管理面 7 端点），MCPClientService 注入
+	// agent（绑定校验）与后续 chat（工具循环）。cache 独立实例（NameMCPServer / NameMCPTool
+	// 双命名空间：server 实体 + tools 清单两条失效边，db_model.md §2.5）。
+	mcpStore := mcpstore.New(gormDB)
+	mcpCache := cache.New(rdb, cache.DefaultConfig())
+	mcpServerSvc, mcpClientSvc := mcpsvc.New(mcpStore, mcpCache)
+
+	// agent：依赖 provider 的 ModelService（主/备用模型存在性预检）+ mcp 的
+	// MCPClientService（工具绑定预检：存在 + server 启用，api 接口注入）。
 	// cache 用独立实例（NameAgent 命名空间隔离）；失效矩阵只有 detail:{id} 一条边——
 	// 列表是低频管理页查询，不进缓存（agent/service/service.go cacheKeyDetail 注释）。
 	agentStore := agentstore.New(gormDB)
 	agentCache := cache.New(rdb, cache.DefaultConfig()) // agent-cache：TTL 30min + 写时删 key
-	agentSvc := agentsvc.New(agentStore, modelSvc, agentCache)
+	agentSvc := agentsvc.New(agentStore, modelSvc, mcpClientSvc, agentCache)
 
 	// rag：知识库 + 入库管线 + 检索（spec 08 装配，依赖仅 provider + platform）。
 	// 建库/管线用 provider 的 ModelService（嵌入模型预检 + ResolveLLMConfig）；
@@ -170,8 +182,6 @@ func Run(cfg *config.Config) error {
 	chatStore := chatstore.New(gormDB)
 	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore, ragSvc, workflowSvc)
 
-	// mcp 后续批次再接入。
-
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()
 	// 校验错误报 JSON 字段名而非 Go 字段名（填 respond/bind.go 既有 TODO）；失败非致命，回退 Go 名。
@@ -196,11 +206,11 @@ func Run(cfg *config.Config) error {
 	authH.RegisterRoutes(v1)
 	demohandler.New(demoSvc).RegisterRoutes(v1)                            // demo 参照实现（受登录中间件保护）
 	providerhandler.New(providerSvc, modelSvc).RegisterRoutes(v1)          // provider：providers + models 双组 12 端点
-	agenthandler.New(agentSvc).RegisterRoutes(v1)                          // agent：agents 一组 5 端点
+	mcphandler.New(mcpServerSvc).RegisterRoutes(v1)                        // mcp：mcp-servers 一组 7 端点（含 agent 侧 mcp-tools 绑定在 agenthandler）
+	agenthandler.New(agentSvc).RegisterRoutes(v1)                          // agent：agents 一组 6 端点（含 PUT /:id/mcp-tools）
 	raghandler.New(ragSvc, int(cfg.Rag.MaxUploadBytes)).RegisterRoutes(v1) // rag：KB + documents 两组 11 端点
 	workflowhandler.New(workflowSvc).RegisterRoutes(v1)                    // workflow：workflows 一组 7 端点
 	chathandler.New(chatSvc).RegisterRoutes(v1)                            // chat：conversations + messages 5 端点
-	// TODO: 其余模块 handler.RegisterRoutes(v1)（mcp）
 
 	// ── ⑤ 启动（§组合根步骤 5）──────────────────────────────────────
 	slog.Info("hify ready", slog.String("addr", ":"+cfg.Server.Port), slog.String("version", version))
