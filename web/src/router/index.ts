@@ -34,6 +34,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '提供商管理' },
   },
   {
+    path: '/mcp-servers',
+    name: 'mcp-servers',
+    component: () => import('@/views/mcp/McpServerList.vue'),
+    meta: { title: 'MCP 服务' },
+  },
+  {
     path: '/agent',
     name: 'agent',
     component: () => import('@/views/agent/AgentList.vue'),

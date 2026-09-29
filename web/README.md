@@ -47,7 +47,8 @@ web/
     │   ├── HifyTable.vue              # 通用列表表格（泛型，偏移分页，refresh()）
     │   ├── HifyFormDialog.vue         # 通用表单弹窗（泛型，open(data?) 编辑/新增）
     │   ├── AuthShell.vue              # 登录/注册分栏壳（左品牌深底面板 + 右表单卡片）
-    │   └── ProviderModelsDrawer.vue   # 提供商模型列表抽屉（子资源形态：同步/勾选启用/手动增删）
+    │   ├── ProviderModelsDrawer.vue   # 提供商模型列表抽屉（子资源形态：同步/勾选启用/手动增删）
+    │   └── McpToolsDrawer.vue         # MCP Server 工具清单抽屉（发现/实调运行，子资源形态）
     ├── composables/
     │   ├── useRequest.ts   # 请求三态 { data, loading, error, execute }
     │   ├── useConfirm.ts   # 删除确认全流程：调用即执行，返回 Promise<boolean>
@@ -64,12 +65,14 @@ web/
     ├── api/
     │   ├── auth.ts          # Auth 模块 API 层：登录/注册/注销/me（cookie 会话，token 不经前端）
     │   ├── provider.ts      # Provider 模块 API 层：类型 + 请求方法（对齐后端 api 契约，唯一事实源）
+    │   ├── mcp.ts           # MCP 模块 API 层：类型 + server CRUD/发现/实调（agent.ts 另含工具绑定）
     │   └── workflow.ts      # Workflow 模块 API 层：类型 + 列表/创建/删除/发布/停用/详情/更新（PUT 不带 type）
     └── views/
         ├── auth/
         │   ├── LoginView.vue     # 登录页（bare：无 chrome 分栏布局，回跳 redirect）
         │   └── RegisterView.vue  # 注册页（注册成功即自动登录进入）
         ├── provider/ProviderList.vue
+        ├── mcp/McpServerList.vue
         ├── agent/AgentList.vue
         ├── chat/ChatView.vue
         ├── workflow/

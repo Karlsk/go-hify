@@ -159,17 +159,33 @@
           </el-tab-pane>
 
           <el-tab-pane label="工具绑定">
-            <!-- mcp 模块未建：无可选工具，展示占位；已保存绑定仍随 PUT 提交保留 -->
-            <el-checkbox-group v-model="form.toolIds">
-              <el-checkbox
-                v-for="t in toolOptions"
-                :key="t.value"
-                :value="t.value"
-                :label="t.label"
-              />
-            </el-checkbox-group>
-            <el-text v-if="toolOptions.length === 0" size="small" type="info">
-              MCP 工具接入后可在此勾选；当前仅保留已保存的绑定
+            <!-- 绑定 = 授权 Agent 调用（chat 阶段生效）；选项仅列启用 server 的工具
+                 （后端预检：工具存在 + server 启用，PUT 全量提交同样校验）。
+                 multiple-limit=10 对齐后端 MaxToolBindings；历史绑定已失效
+                 （server 停用 / 工具被删）时需先解绑再保存，否则 400 由拦截器提示 -->
+            <el-select
+              v-model="form.toolIds"
+              multiple
+              :loading="toolLoading"
+              :multiple-limit="10"
+              placeholder="选择 MCP 工具（可多选，最多 10 个）"
+              style="width: 100%"
+            >
+              <el-option-group
+                v-for="g in toolGroups"
+                :key="g.name"
+                :label="g.name"
+              >
+                <el-option
+                  v-for="t in g.tools"
+                  :key="t.id"
+                  :label="t.name"
+                  :value="t.id"
+                />
+              </el-option-group>
+            </el-select>
+            <el-text v-if="toolGroups.length === 0" size="small" type="info">
+              暂无可用工具；可先到「MCP 服务」添加 server 并发现工具
             </el-text>
           </el-tab-pane>
 
@@ -244,6 +260,11 @@ import {
   type AgentItem,
 } from '@/api/agent'
 import { getModelList, getProviderList, type ModelItem } from '@/api/provider'
+import {
+  getMcpServer,
+  getMcpServerList,
+  type McpTool,
+} from '@/api/mcp'
 import { getKnowledgeBaseList } from '@/api/rag'
 import { getWorkflowList } from '@/api/workflow'
 
@@ -290,9 +311,30 @@ async function loadModelOptions(): Promise<void> {
   }
 }
 
-// ---- 工具绑定（mcp 模块未建：占位空列表，绑定明细走详情 tool_ids 保留） ----
+// ---- 工具绑定数据源（弹窗打开时现拉：启用 server → 各自 discover 入库的工具，按 server 分组） ----
 
-const toolOptions: Array<{ value: string; label: string }> = []
+const toolGroups = ref<Array<{ name: string; tools: McpTool[] }>>([])
+const toolLoading = ref(false)
+
+async function loadToolOptions(): Promise<void> {
+  toolLoading.value = true
+  try {
+    const page = await getMcpServerList({ page: 1, page_size: 100 })
+    const groups = await Promise.all(
+      page.list
+        .filter((s) => s.enabled)
+        .map(async (s) => ({
+          name: s.name,
+          tools: (await getMcpServer(s.id)).tools,
+        })),
+    )
+    toolGroups.value = groups.filter((g) => g.tools.length > 0)
+  } catch {
+    // 拦截器已提示；空分组下拉即反馈
+  } finally {
+    toolLoading.value = false
+  }
+}
 
 // ---- 知识库下拉数据源（弹窗打开时现拉：只列启用的 KB，与模型下拉同策略） ----
 
@@ -385,10 +427,13 @@ const rules: FormRules = {
 
 function openCreate(): void {
   isEdit.value = false
-  // 先拉模型 / 知识库 / 工作流选项再开弹窗（量小可接受；保持选项新鲜）
-  void Promise.all([loadModelOptions(), loadKbOptions(), loadWorkflowOptions()]).then(() =>
-    dialogRef.value?.open(),
-  )
+  // 先拉模型 / 工具 / 知识库 / 工作流选项再开弹窗（量小可接受；保持选项新鲜）
+  void Promise.all([
+    loadModelOptions(),
+    loadToolOptions(),
+    loadKbOptions(),
+    loadWorkflowOptions(),
+  ]).then(() => dialogRef.value?.open())
 }
 
 /** 编辑：列表行无 tool_ids / knowledge_base_ids，先取详情再回填 */
@@ -396,11 +441,12 @@ function openEdit(row: AgentItem): void {
   isEdit.value = true
   void Promise.all([
     loadModelOptions(),
+    loadToolOptions(),
     loadKbOptions(),
     loadWorkflowOptions(),
     getAgent(row.id),
   ])
-    .then(([, , , detail]) => {
+    .then(([, , , , detail]) => {
       dialogRef.value?.open(toForm(detail))
     })
     .catch(() => {

@@ -96,3 +96,17 @@ export function updateAgent(id: string, data: AgentSaveData) {
 export function deleteAgent(id: string) {
   return del<void>(`/agents/${id}`)
 }
+
+/** 工具绑定结果（全量替换后的最终态；空绑定返 [] 不返 null） */
+export interface BindToolsResult {
+  tool_ids: string[]
+}
+
+/**
+ * 全量替换 Agent 的 MCP 工具绑定（PUT；空数组 = 解绑全部）。
+ * 请求侧 tool_ids 是数值数组（踩坑 #8——响应侧才是字符串），
+ * 提交处由 McpTool.id 字符串经 Number() 转换；上限 10 个。
+ */
+export function bindMcpTools(id: string, toolIds: number[]) {
+  return put<BindToolsResult>(`/agents/${id}/mcp-tools`, { tool_ids: toolIds })
+}

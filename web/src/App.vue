@@ -23,6 +23,10 @@
           <el-icon><Setting /></el-icon>
           <template #title>提供商管理</template>
         </el-menu-item>
+        <el-menu-item index="/mcp-servers">
+          <el-icon><Monitor /></el-icon>
+          <template #title>MCP 服务</template>
+        </el-menu-item>
         <el-menu-item index="/agent">
           <el-icon><User /></el-icon>
           <template #title>Agent 管理</template>
