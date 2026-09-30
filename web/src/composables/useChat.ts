@@ -25,6 +25,8 @@ import {
   type ErrorFrame,
   type MessageItem,
   type ToolCall,
+  type ToolCallFrame,
+  type ToolResultFrame,
 } from '@/api/chat'
 import { SSEError } from '@/utils/sse'
 
@@ -32,11 +34,27 @@ import { SSEError } from '@/utils/sse'
 
 export type MessageState = 'loading' | 'streaming' | 'done' | 'error' | 'interrupted'
 
+/** 工具活动卡（spec 017 F2）：挂在 assistant 行上的单次工具调用展示单元；
+ *  id = 流式帧配对（tool_call ↔ tool_result）与历史行配对的共同锚点；
+ *  result / isError 仅 tool_result 到达后落（running / interrupted 态不伪造结果） */
+export interface ToolActivity {
+  id: string
+  /** 完整调用名（含 s<数字>__ 派生前缀，如 s1__weather）——展示层剥离前缀、完整名进 title */
+  tool: string
+  args: Record<string, unknown>
+  result?: string
+  isError?: boolean
+  state: 'running' | 'done' | 'interrupted'
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'tool'
   content: string
   toolCalls: ToolCall[]
+  /** 本行工具卡清单（按到达序，spec 017）：未绑工具对话恒 []——
+   *  任何变化一律整数组替换（v-memo 依赖按数组引用判定的前提） */
+  toolActivities: ToolActivity[]
   /** assistant 行的 RAG 引用来源（buildSystemPrompt 检索命中）；user / tool 行恒 [] */
   citations: Citation[]
   createdAt: string
@@ -58,10 +76,83 @@ function toChatMessage(m: MessageItem): ChatMessage {
     role: m.role,
     content: m.content,
     toolCalls: m.tool_calls ?? [],
+    // 历史行构造点：分组（loadMessages）按 id 配对回填，归并前恒 []
+    toolActivities: [],
     citations: m.citations ?? [],
     createdAt: m.created_at,
     state: 'done',
   }
+}
+
+/**
+ * 历史回放分组（spec 017 FR-005）：assistant 中间行（判定仅「content 空 + tool_calls
+ * 非空」——正文非空的行按普通消息行渲染防误吞）与其后 tool 行按 id 配对，归并进其后
+ * 首个 assistant 终答行的 toolActivities，与流式路径同一形态；历史卡直接落 done、
+ * 不重演 running、不标 isError（messages 行未存 is_error，后端 schema 冻结）。
+ *
+ * 纯函数式重排：产出行数 ≤ 原始行数（中间行 / 已配对 tool 行不产出），
+ * 归并行与合成气泡一律新对象，不改入参行。配对锚点 = 后端 tool 行
+ * `tool_calls[0].id`（tools.go：调用引用存 ToolCalls[0]，无独立列）。
+ */
+function groupToolRows(rows: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = []
+  let pending: ToolActivity[] = []
+  // 合成气泡 id / createdAt 取残留卡最后来源行（DB id 稳定，刷新后 :key 不漂移）
+  let lastSource: ChatMessage | null = null
+
+  /** 残留卡独立成尾部气泡（仅卡片无正文）：错误中断轮 / 窗口末尾无终答行 */
+  const flush = (): void => {
+    if (pending.length === 0 || !lastSource) return
+    out.push({
+      id: `tools:${lastSource.id}`,
+      role: 'assistant',
+      content: '',
+      toolCalls: [],
+      toolActivities: pending,
+      citations: [],
+      createdAt: lastSource.createdAt,
+      state: 'done',
+    })
+    pending = []
+  }
+
+  for (const row of rows) {
+    if (row.role === 'assistant' && row.content === '' && row.toolCalls.length > 0) {
+      // 中间行：每条 tool_call 一张卡（id / 工具名 / args；空参 jsonb 为 null 时兜底 {}）
+      for (const tc of row.toolCalls) {
+        pending = [
+          ...pending,
+          { id: tc.id, tool: tc.tool, args: tc.args ?? {}, state: 'done' },
+        ]
+      }
+      lastSource = row
+      continue
+    }
+    if (row.role === 'tool') {
+      const callId = row.toolCalls[0]?.id
+      const idx = pending.findIndex((a) => a.id === callId)
+      if (idx >= 0) {
+        // tool 行供 result（按 id 配对）
+        pending = pending.map((a, i) => (i === idx ? { ...a, result: row.content } : a))
+      } else {
+        out.push(row) // 孤儿 tool 行（窗口截断 / 数据异常）：防御性原样输出，MessageList 兜底
+      }
+      lastSource = row
+      continue
+    }
+    if (row.role === 'assistant' && pending.length > 0) {
+      // 终答行：残留卡归并进气泡顶部（新对象，不改入参行）
+      out.push({ ...row, toolActivities: [...row.toolActivities, ...pending] })
+      pending = []
+      continue
+    }
+    if (row.role === 'user') {
+      flush() // 轮次边界：中断轮残留卡先独立成气泡，再渲染新 user 行
+    }
+    out.push(row)
+  }
+  flush() // 窗口末尾残留（最后一轮即错误中断轮）
+  return out
 }
 
 // ---- 布局无关的行为常量（spec §12.2：非 token，不进 tokens.css） ----
@@ -187,7 +278,9 @@ export function useChat() {
         }
       }
       if (activeId.value !== convId) return // 加载期间已切走，丢弃
-      messages.value = rows.slice(-MESSAGE_MAX)
+      // 截断先于分组（spec 017 FR-005）：MESSAGE_MAX 按原始行数保尾部最新——
+      // 先分组后截断会把工具行顶出尾窗（历史失真）；分组归并只减不增，产出行数 ≤ 截断数
+      messages.value = groupToolRows(rows.slice(-MESSAGE_MAX))
     } catch {
       // 拦截器已提示；保留已切换的空态
     } finally {
@@ -209,6 +302,17 @@ export function useChat() {
     }
   }
 
+  /** 流收尾统一兜底（spec 017 FR-002）：残留 running 卡置 interrupted、停动画——
+   *  无 result 不伪造结果（与 assistant 行「（连接中断）」标注同哲学）；
+   *  在 send() 的 finally 单点调用即覆盖全部收尾路径
+   *  （done / 流内 error 事件 / EOF 被动中断 / 网络层失败 / 主动 abort）。 */
+  function settleToolActivities(row: ChatMessage): void {
+    if (!row.toolActivities.some((a) => a.state === 'running')) return
+    row.toolActivities = row.toolActivities.map((a): ToolActivity =>
+      a.state === 'running' ? { ...a, state: 'interrupted' } : a,
+    )
+  }
+
   async function send(content: string): Promise<void> {
     const convId = activeId.value
     const text = content.trim()
@@ -222,6 +326,7 @@ export function useChat() {
         role: 'user',
         content: text,
         toolCalls: [],
+        toolActivities: [],
         citations: [],
         createdAt: new Date().toISOString(),
         state: 'done',
@@ -232,6 +337,7 @@ export function useChat() {
         role: 'assistant',
         content: '',
         toolCalls: [],
+        toolActivities: [],
         citations: [],
         createdAt: new Date().toISOString(),
         state: 'loading',
@@ -273,6 +379,23 @@ export function useChat() {
           onCitations: (cites) => {
             assistant.citations = cites
           },
+          // 工具卡（spec 017 F2）：call 建 running 卡 / result 按 id 置结果转 done；
+          // 恒整数组替换（v-memo 依赖按引用判定），与正文 += 直改路径不混用
+          onToolCall: (frame: ToolCallFrame) => {
+            assistant.toolActivities = [
+              ...assistant.toolActivities,
+              { id: frame.id, tool: frame.tool, args: frame.args, state: 'running' },
+            ]
+          },
+          onToolResult: (frame: ToolResultFrame) => {
+            const idx = assistant.toolActivities.findIndex((a) => a.id === frame.id)
+            if (idx < 0) return // 孤儿结果帧（后端保证 call 先于 result，异常序防御）：忽略不建卡
+            assistant.toolActivities = assistant.toolActivities.map((a, i): ToolActivity =>
+              i === idx
+                ? { ...a, result: frame.result.content, isError: frame.result.is_error, state: 'done' }
+                : a,
+            )
+          },
         },
         signal,
       )
@@ -302,6 +425,8 @@ export function useChat() {
     } finally {
       streaming.value = false
       abortController = null
+      // 流收尾兜底（FR-002）：done 后异常残留 / 中断路径的 running 卡统一标「（中断）」
+      settleToolActivities(assistant)
     }
   }
 

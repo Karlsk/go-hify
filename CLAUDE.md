@@ -1277,14 +1277,18 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/016-workflow-tool-node-mcp/plan.md](specs/016-workflow-tool-node-mcp/plan.md)
-(feature: workflow 工具节点接 MCP——spec 016，执行引擎补完篇：tool 节点从占位
-fail-fast 换真实执行——executor 定义 toolSourceFactory 窄接口（ToolSourceFor 按
-ToolID 解析），组合根注入 mcpClientSvc（New 增第 9 参，零重排）；调用链 =
-Tools 清单空→MCP_TOOL_NOT_FOUND 404 透传 / args 严格 {{var}} 渲染缺失→
-VALIDATION_FAILED 400 带 args.<k> 定位 / Invoke IsError→MCP_TOOL_CALL_FAILED 500
-（message=Content 截断）；输出 Content 落变量池 + node run Output（16KB 截断既有）；
-fail-fast 语义与 chat 的「错误即上下文」分野钉死；零迁移、零新哨兵、ToolConfig
-契约冻结（D5 拍板 A：args 值域仅字符串）、chat 管道零改动透传受益；spec 见
-specs/016-workflow-tool-node-mcp/spec.md)
+[specs/017-frontend-tool-events/plan.md](specs/017-frontend-tool-events/plan.md)
+(feature: chat 前端工具事件渲染——spec 017，纯前端增量篇：打开 tool_call/tool_result
+两帧的忽略分支为折叠卡片渲染 + 历史回放分组，流式与历史两路径同一形态——
+api/chat.ts 类型修正（result 收敛 ToolResultPayload{content,is_error}）+ switch 补
+两分发；useChat.ts ToolActivity 状态编排（running→done，流收尾残留卡标 interrupted，
+不可变整数组替换）+ loadMessages 历史分组（中间行/tool 行 id 配对归并进其后首个
+assistant 终答行、错误中断轮独立尾部气泡、MESSAGE_MAX 按原始行数截断）；新组件
+ToolActivityCard.vue（折叠/展开、状态图标、剥离 s<数字>__ 派生前缀进 title、
+args JSON + result 全文限高滚动）；MessageList.vue 气泡顶部卡片列 + v-memo 追加
+msg.toolActivities + 防御分支转「分组异常兜底」注释。三零边界：零后端改动、
+零新依赖（package.json 不动）、零新增设计 token（tokens.css 不动）；验收门 =
+cd web && npm run type-check && npm run build 全绿 + 手测六条人工项用户过；
+spec 见 specs/017-frontend-tool-events/spec.md，上位契约
+docs/changelog/chat/tool_events_frontend_spec.md F1–F5 冻结)
 <!-- SPECKIT END -->

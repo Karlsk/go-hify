@@ -66,5 +66,5 @@
 ## 4. 下阶段（明确不在本批）
 
 - **workflow 工具节点接 `mcpapi`**：已交付（spec 016，2026-09-30）——tool 节点经 `toolSourceFactory` 窄面（`ToolSourceFor` 按 ToolID 解析）消费统一 `tool.Source`，fail-fast 错误分型；实现记录 [../workflow/impl_spec_16_tool_node_mcp.md](../workflow/impl_spec_16_tool_node_mcp.md)。README §7 旧草图名 `mcpapi.InvokeTool` 实即 `ToolSourceFor` 路径。
-- **前端 tool_call / tool_result 事件渲染**：本批前端零改动（契约预留值已生效）；控制台展示工具调用过程（折叠卡片样式）留待前端批。
+- **前端 tool_call / tool_result 事件渲染**：已交付（spec 017，2026-09-30）——两帧以折叠卡片收进 assistant 气泡顶部（running→done 状态流转、is_error 红警示、中断兜底），历史中间行 / tool 行按 id 配对归并进终答气泡，流式与回放两路径同一形态；设计定稿 [../chat/tool_events_frontend_spec.md](../chat/tool_events_frontend_spec.md)，手测六条见 [chat-manual-test.md](../../testing/chat-manual-test.md) §14。
 - **MCP 会话复用升级**（README §5.2 设计点 2）：chat 每轮对话多次工具调用、per-call 握手开销是否可忽略，待真实 MCP server 手测后再评估 singleflight 重建。

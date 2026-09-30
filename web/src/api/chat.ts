@@ -23,7 +23,7 @@ export interface ConversationItem {
   updated_at: string
 }
 
-/** assistant 中间行的工具调用请求（tool_calls jsonb；v1 后端不触发，仅为历史行完整性） */
+/** 工具调用请求：历史中间行 tool_calls jsonb 与流式 tool_call 帧共用同一形态（chat 工具循环批已触发） */
 export interface ToolCall {
   id: string
   tool: string
@@ -98,11 +98,17 @@ export interface ToolCallFrame {
   retryable: boolean
 }
 
+/** tool_result 帧的结果载荷（对齐后端 ToolResultPayload，json tag 逐字） */
+export interface ToolResultPayload {
+  content: string
+  is_error: boolean
+}
+
 export interface ToolResultFrame {
   type: 'tool_result'
   id: string
   tool: string
-  result: unknown
+  result: ToolResultPayload
   retryable: boolean
 }
 
@@ -158,11 +164,15 @@ export interface StreamCallbacks {
   onDone: (frame: DoneFrame) => void
   onError: (frame: ErrorFrame) => void
   onCitations?: (citations: Citation[]) => void
+  /** tool_call 帧：按 id 建 running 工具卡（可选——未绑工具对话不传则忽略） */
+  onToolCall?: (frame: ToolCallFrame) => void
+  /** tool_result 帧：按 id 置 result + isError → done（可选，未传则忽略） */
+  onToolResult?: (frame: ToolResultFrame) => void
 }
 
 /** 流式发消息：startSSE 薄封装，onEvent 内 JSON.parse 后按 type 分发。
  * resolve = 流 EOF（是否正常收尾由调用方结合 onDone 判定）；HTTP 失败 / 网络错误 reject。
- * tool_call / tool_result：后端 v1 预留不触发，忽略（渲染形态留后续）。 */
+ * tool_call / tool_result 回调可选：未传（未绑工具对话）时忽略两帧。 */
 export async function sendMessageStream(
   id: string,
   content: string,
@@ -192,6 +202,12 @@ export async function sendMessageStream(
           break
         case 'citations':
           callbacks.onCitations?.(frame.citations)
+          break
+        case 'tool_call':
+          callbacks.onToolCall?.(frame)
+          break
+        case 'tool_result':
+          callbacks.onToolResult?.(frame)
           break
       }
     },

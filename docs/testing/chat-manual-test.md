@@ -281,6 +281,21 @@ docker exec hify-pg-test psql -U hify -d hify -c \
 | 标题回填 | `logs/hify.log` | `"chat: backfill title failed"`（WARN，仅当 store 写失败时） |
 | 客户端断连 | `logs/hify.log` | 部分内容落库、execution error_class=Network |
 
-## 14. 走查结论
+## 14. 工具事件渲染（前端，spec 017）
+
+浏览器 UI 手测（本节 curl 不覆盖，需 web 前端）：验证 tool_call / tool_result 折叠卡片与历史回放分组，流式与历史两路径同一形态。实现契约见 [tool_events_frontend_spec.md](../changelog/chat/tool_events_frontend_spec.md)。
+
+**前置**：
+- web 前端已起（`cd web && npm run dev`），用 §2 账号登录；
+- Agent 已绑 MCP 工具且可被自然语言触发（server 发现 / 工具绑定步骤见 [mcp-manual-test.md](mcp-manual-test.md)）。
+
+1. **状态流转**：对绑工具 Agent 提一个触发工具调用的问题 → assistant 气泡顶部出现折叠卡（旋转图标 + 工具名 + 参数摘要），工具返回后卡片转完成态（对勾图标 + 结果首行摘要）；点击头部可展开看 args 完整 JSON 与 result 全文；终答到达后卡片保持折叠、正文在下。
+2. **并行多卡**：同一轮触发多个工具 → 多卡并列，各自独立 running→done，结果互不串卡。
+3. **错误卡**：某工具返回错误（is_error）→ 该卡红色警示态、展开可见错误文本；对话不中断（后端喂回 LLM 自纠），后续轮正常作答。
+4. **历史分组**：刷新页面 / 切走再切回该会话 → 卡片归并进对应 assistant 终答气泡顶部，中间行 / tool 行不再以独立消息行出现，args / result 完整可展开；曾因流中断而无终答的轮次，其卡片独立成尾部气泡（仅卡片无正文）。
+5. **中断兜底**：工具执行中切换会话 / 离开页面（主动 abort）或断网（被动中断）→ 残留 running 卡标「（中断）」弱化、动画停止、不伪造结果；assistant 行既有中断语义不变（主动 abort 不标注 / 被动中断标「（连接中断）」）。
+6. **零回归**：换未绑工具的 Agent 完整对话（流式发送 + 刷新回放）→ 零卡片，消息三态 / 中断标注 / citations / 重发等既有行为全部不变。
+
+## 15. 走查结论
 
 （待手测后填写）

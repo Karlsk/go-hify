@@ -48,7 +48,12 @@ web/
     │   ├── HifyFormDialog.vue         # 通用表单弹窗（泛型，open(data?) 编辑/新增）
     │   ├── AuthShell.vue              # 登录/注册分栏壳（左品牌深底面板 + 右表单卡片）
     │   ├── ProviderModelsDrawer.vue   # 提供商模型列表抽屉（子资源形态：同步/勾选启用/手动增删）
-    │   └── McpToolsDrawer.vue         # MCP Server 工具清单抽屉（发现/实调运行，子资源形态）
+    │   ├── McpToolsDrawer.vue         # MCP Server 工具清单抽屉（发现/实调运行，子资源形态）
+    │   └── chat/
+    │       ├── ConversationSidebar.vue # 会话列表左栏（纯展示，props/emits 上收 ChatView；>992 静态栏 / ≤992 drawer 复用）
+    │       ├── MessageList.vue        # 消息滚动区 + 气泡渲染（assistant 走 mdRender / user 纯文本；v-memo 行级钉住；assistant 气泡顶部工具活动卡列）
+    │       ├── ToolActivityCard.vue   # 工具活动折叠卡（spec 017）：running→done 状态图标 + args/result 展开态，纯文本插值不经 v-html
+    │       └── ChatInput.vue          # 底部输入区（Enter 发送 / Shift+Enter 换行；流式中按钮禁用、输入可预打下一条）
     ├── composables/
     │   ├── useRequest.ts   # 请求三态 { data, loading, error, execute }
     │   ├── useConfirm.ts   # 删除确认全流程：调用即执行，返回 Promise<boolean>

@@ -2,8 +2,8 @@
   <!-- 消息滚动区（spec §6.2 / §11 / §15，2026-09-04 布局修订：AI/我 头像 + 气泡贴合内容贴边分布）。
        页面唯一纵向滚动容器。user 气泡永远纯文本（用户输入不可信）；
        assistant 走 mdRender（marked + DOMPurify）。
-       v-memo 钉住 [content, state, errorText]：流式 delta 只重渲染当前行，
-       不触发全列表 Markdown 重解析。 -->
+       v-memo 钉住行内可变字段（content / state / errorText / citations / toolActivities）：
+       流式 delta 与卡片整数组替换只重渲染当前行，不触发全列表 Markdown 重解析。 -->
   <div ref="scrollEl" class="msg-list" @scroll="onScroll">
     <!-- 会话消息加载中（切换会话时组件保持挂载，加载完成 watch 触发滚底） -->
     <div v-if="loading" class="msg-list__status">
@@ -24,7 +24,7 @@
       <div
         v-for="(msg, idx) in messages"
         :key="msg.id"
-        v-memo="[msg.content, msg.state, msg.errorText, msg.passiveInterrupt, msg.citations]"
+        v-memo="[msg.content, msg.state, msg.errorText, msg.passiveInterrupt, msg.citations, msg.toolActivities]"
         class="msg-list__row"
         :class="[
           msg.role === 'user' ? 'msg-list__row--user' : 'msg-list__row--assistant',
@@ -35,6 +35,12 @@
         <template v-if="msg.role === 'assistant'">
           <span class="msg-avatar" aria-hidden="true">AI</span>
           <div class="msg-bubble msg-bubble--assistant">
+            <!-- 工具活动卡（spec 017 F1）：气泡顶部、三分支链之前，按到达序；
+                 空数组零渲染——未绑工具对话零卡片零回归（FR-003 引用身份驱动重渲染） -->
+            <div v-if="msg.toolActivities.length > 0" class="msg-tools">
+              <ToolActivityCard v-for="act in msg.toolActivities" :key="act.id" :activity="act" />
+            </div>
+
             <!-- 等待首字：三点跳动 -->
             <span v-if="msg.state === 'loading'" class="msg-dots" aria-label="生成中">
               <span></span><span></span><span></span>
@@ -77,7 +83,9 @@
           <span class="msg-avatar" aria-hidden="true">我</span>
         </template>
 
-        <!-- tool 历史行（后端 v1 不产生，防御性渲染：弱化等宽文本、无头像） -->
+        <!-- tool 历史行兜底（分组异常兜底，spec 017 FR-008）：正常历史经 useChat 的
+             groupToolRows 归并后不再产出 tool 行，此分支只接孤儿 tool 行（窗口首行
+             截断 / 数据异常）——降级弱化等宽文本、无头像，页面不崩；分支保留不删 -->
         <div v-else class="msg-bubble msg-bubble--tool">{{ msg.content }}</div>
       </div>
     </div>
@@ -87,6 +95,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 import { Loading } from '@element-plus/icons-vue'
+import ToolActivityCard from './ToolActivityCard.vue'
 import type { ChatMessage } from '@/composables/useChat'
 import { mdRender } from '@/utils/markdown'
 
@@ -243,6 +252,14 @@ watch(
   font-family: var(--hf-font-mono);
   font-size: var(--hf-font-size-sm);
   white-space: pre-wrap;
+}
+
+/* 工具活动卡列（spec 017 F1）：气泡顶部、正文之前；多卡纵向紧凑排列 */
+.msg-tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hf-space-2);
+  margin-bottom: var(--hf-space-2);
 }
 
 /* 错误态：红字提示（文案来自后端 error.message） */
