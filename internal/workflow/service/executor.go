@@ -1,10 +1,11 @@
 package service
 
-// executor：六类节点的执行分发（spec 06 §4.2 / FR5）。runNode 是密封 NodeConfig 的
-// type switch（无断言无反射），所有错误统一带 `node <key>:` 前缀上抛；错误分类遵循
-// O4 二分法——图缺陷（渲染缺失变量 / 非法表达式 / tool 未支持）包装 errs.ErrValidationFailed，
-// 环境限制（scheme / SSRF / HTTP 失败）包装 workflowapi.ErrWorkflowExecutionFailed，
-// 下游哨兵（模型 / KB 不存在、供应商忙）原样透传。llm 调用经 platform/llm（重试 /
+// executor：六类节点的执行分发（spec 06 §4.2 / FR5 + spec 016 tool 节点）。runNode
+// 是密封 NodeConfig 的 type switch（无断言无反射），所有错误统一带 `node <key>:` 前缀
+// 上抛；错误分类遵循 O4 二分法——图缺陷（渲染缺失变量 / 非法表达式 / tool args 缺失
+// 变量）包装 errs.ErrValidationFailed，环境限制（scheme / SSRF / HTTP 失败 / 工具调用
+// 失败 / 装配缺位）包装 workflowapi.ErrWorkflowExecutionFailed 或 mcpapi 哨兵，下游
+// 哨兵（模型 / KB / 工具不存在、供应商忙）原样透传。llm 调用经 platform/llm（重试 /
 // 熔断 / 超时只在那里）且自记 executions——ConversationID=nil 即 workflow 节点调用标识。
 
 import (
@@ -19,9 +20,11 @@ import (
 	"strings"
 	"time"
 
+	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
+	"github.com/Karlsk/go-hify/internal/platform/tool"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
@@ -48,6 +51,13 @@ type ragRetriever interface {
 	Retrieve(ctx context.Context, req ragapi.RetrieveReq) ([]ragapi.RetrievedChunk, error)
 }
 
+// toolSourceFactory mcpapi.MCPClientService 的窄面（小接口惯例，spec 016 D1；
+// 签名即已交付 mcpapi 契约原形——构造无 IO，ctx 在 Source.Tools / Invoke 上）：
+// tool 节点按 ToolID 解析统一工具来源（platform/tool.Source）。
+type toolSourceFactory interface {
+	ToolSourceFor(req mcpapi.ToolSourceReq) tool.Source
+}
+
 // childExecFunc workflow 节点的子执行缝（spec 08 §4.3）：签名与
 // workflowService.executeChild 对齐（同包函数类型——executor 不持有 service 类型，
 // 避免执行器与编排层互相持有）；生产由 New 接线 executeChild，测试注入 stub。
@@ -56,21 +66,24 @@ type childExecFunc func(ctx context.Context, workflowID uint64, fields map[strin
 // executor 节点执行器（无状态，execContext 承载单次执行的可变状态）。
 type executor struct {
 	resolveLLM   llmConfigResolver
-	clients      llmClientFactory
-	execs        executionWriter
-	rags         ragRetriever
-	blockPrivate bool          // O6：WORKFLOW_API_BLOCK_PRIVATE（RFC1918 一并拒绝）
-	execChild    childExecFunc // workflow 节点执行缝（spec 08）：New 接线，测试注入 stub
+	clients       llmClientFactory
+	execs         executionWriter
+	rags          ragRetriever
+	toolSources   toolSourceFactory // tool 节点工具来源（spec 016）；nil = 装配缺位（fail-fast）
+	blockPrivate  bool             // O6：WORKFLOW_API_BLOCK_PRIVATE（RFC1918 一并拒绝）
+	execChild     childExecFunc    // workflow 节点执行缝（spec 08）：New 接线，测试注入 stub
 }
 
 // newExecutor 组装执行器（依赖由组合根注入；测试注入 stub）。
 func newExecutor(resolveLLM llmConfigResolver, clients llmClientFactory,
-	execs executionWriter, rags ragRetriever, blockPrivate bool) *executor {
-	return &executor{resolveLLM: resolveLLM, clients: clients, execs: execs, rags: rags, blockPrivate: blockPrivate}
+	execs executionWriter, rags ragRetriever, toolSources toolSourceFactory,
+	blockPrivate bool) *executor {
+	return &executor{resolveLLM: resolveLLM, clients: clients, execs: execs, rags: rags,
+		toolSources: toolSources, blockPrivate: blockPrivate}
 }
 
 // runNode 按节点 config 类型分发执行，返回节点输出字符串。错误一律
-// `node <key>: %w` 包装（失败定位，O4）；tool 节点执行期 fail-fast（mcp 未建）。
+// `node <key>: %w` 包装（失败定位，O4）。
 func (e *executor) runNode(ctx context.Context, key string, cfg workflowapi.NodeConfig, c *execContext) (string, error) {
 	var out string
 	var err error
@@ -88,7 +101,7 @@ func (e *executor) runNode(ctx context.Context, key string, cfg workflowapi.Node
 	case *workflowapi.WorkflowNodeConfig:
 		out, err = e.callWorkflow(ctx, key, v, c)
 	case *workflowapi.ToolConfig:
-		err = fmt.Errorf("%w: tool node %q not supported (mcp 未建，图缺陷)", errs.ErrValidationFailed, key)
+		out, err = e.callTool(ctx, key, v, c)
 	default:
 		err = fmt.Errorf("unknown node config type %T", cfg)
 	}
@@ -304,6 +317,54 @@ func (e *executor) callWorkflow(ctx context.Context, key string, cfg *workflowap
 		c.childRunIDs = append(c.childRunIDs, res.runID) // 失败子 run 也参与链接
 	}
 	return res.output, err
+}
+
+// callTool tool 节点执行（spec 016 §5 / D2）：解析工具（nil 装配 → 同码「工具来源
+// 未注入」；ToolSourceFor 按 ToolID → Tools 预检，空清单 = 工具已删 / server 停用
+// 静默过滤 → 404 哨兵透传）→ args 逐值严格渲染（缺失变量 → 图缺陷 400 带
+// args.<k> 定位，先于调用——不浪费工具 IO）→ 按 key 排序 marshal（确定性序列化，
+// 轨迹可复现）→ 单次确定性 Invoke（非 ReACT）→ Content 即节点输出（落池与 node
+// run Output / DurationMs 归 walk 层既有机制）。前置 Tools() 预检中和 boundToolSource
+// 加载失败吞错路径——预检通过后 Invoke IsError 只剩真实调用失败一种来源；fail-fast
+// 终止 run（错误文本进 message），与 chat 的「错误即上下文」分野：契约同、消费语义
+// 由调用方定（contracts/errors.md 钉死）。
+func (e *executor) callTool(ctx context.Context, key string, cfg *workflowapi.ToolConfig, c *execContext) (string, error) {
+	if e.toolSources == nil {
+		return "", fmt.Errorf("%w: 工具来源未注入", mcpapi.ErrMCPToolCallFailed)
+	}
+	src := e.toolSources.ToolSourceFor(mcpapi.ToolSourceReq{ToolIDs: []uint64{cfg.ToolID}})
+	defs, err := src.Tools(ctx)
+	if err != nil {
+		return "", fmt.Errorf("load tools: %w", err) // DB 错 %w 包装（500），预检吞错路径由本行兜住
+	}
+	if len(defs) == 0 {
+		return "", mcpapi.ErrMCPToolNotFound // 工具已删 / server 停用静默过滤 → 404 哨兵透传
+	}
+	rendered := make(map[string]string, len(cfg.Args))
+	for k, tpl := range cfg.Args {
+		v, err := c.render(tpl)
+		if err != nil {
+			return "", fmt.Errorf("%w: args.%s: %v", errs.ErrValidationFailed, k, err)
+		}
+		rendered[k] = v
+	}
+	argsJSON, err := json.Marshal(rendered) // map 按 key 排序序列化（Go 标准库保证）
+	if err != nil {
+		return "", fmt.Errorf("marshal args: %w", err) // 防御兜底：map[string]string 序列化不会失败
+	}
+	c.setNodeIn(map[string]string{ // 渲染成功即记：调用失败时入参仍可读（对齐 callWorkflow）
+		"tool_id": strconv.FormatUint(cfg.ToolID, 10),
+		"args":    string(argsJSON),
+	})
+	res := src.Invoke(ctx, tool.ToolCall{
+		ID:        fmt.Sprintf("wf-%s", key), // 执行器生成锚点（workflow 单次调用，无 LLM 轮次）
+		Name:      defs[0].Name,              // 调用名 = Source 供出的派生名（s{id}__{tool}），executor 不自造
+		Arguments: argsJSON,
+	})
+	if res.IsError {
+		return "", fmt.Errorf("%w: %s", mcpapi.ErrMCPToolCallFailed, truncateUTF8(res.Content, maxTraceValueBytes))
+	}
+	return res.Content, nil
 }
 
 // buildAPIRequest api 节点纯渲染（无网络）：url / method / headers 值 / body 全链

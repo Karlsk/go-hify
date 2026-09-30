@@ -12,8 +12,10 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
+	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
+	"github.com/Karlsk/go-hify/internal/platform/tool"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 )
@@ -153,4 +155,54 @@ func (s *stubClientFactory) Client(key string, opts llm.UpstreamOptions) (*llm.C
 		return nil, s.err
 	}
 	return s.client, nil
+}
+
+// stubToolSourceFactory 记录式 ToolSourceFor stub（toolSourceFactory 窄面的替身，
+// spec 016 §6 任务 1）：ToolSourceFor（构造无 ctx，与 mcpapi 契约同形）记录请求并
+// 返回共享行为的 stub Source——defs / toolsErr 控制 Tools 清单，invokeFn 编排 Invoke
+// 结果；Invoke 参数记录回 factory 供断言（对齐 stubResolve / stubRetrieve 记录式模式）。
+type stubToolSourceFactory struct {
+	defs     []tool.ToolDef
+	toolsErr error
+	invokeFn func(call tool.ToolCall) tool.ToolResult
+
+	calls   int
+	lastReq mcpapi.ToolSourceReq
+	invokes []tool.ToolCall
+}
+
+func (s *stubToolSourceFactory) ToolSourceFor(req mcpapi.ToolSourceReq) tool.Source {
+	s.calls++
+	s.lastReq = req
+	return &stubToolSource{f: s}
+}
+
+// stubToolSource 由 factory 派生：行为共享 factory 字段（测试在构造 env 后仍可改
+// defs / invokeFn——ToolSourceFor 是执行期惰性调用）。
+type stubToolSource struct{ f *stubToolSourceFactory }
+
+func (src *stubToolSource) Tools(context.Context) ([]tool.ToolDef, error) {
+	return src.f.defs, src.f.toolsErr
+}
+
+func (src *stubToolSource) Invoke(_ context.Context, call tool.ToolCall) tool.ToolResult {
+	src.f.invokes = append(src.f.invokes, call)
+	if src.f.invokeFn == nil {
+		return tool.ToolResult{CallID: call.ID, Name: call.Name}
+	}
+	return src.f.invokeFn(call)
+}
+
+// okToolInvoke 单值成功结果编排（忽略调用详情）。
+func okToolInvoke(content string) func(tool.ToolCall) tool.ToolResult {
+	return func(call tool.ToolCall) tool.ToolResult {
+		return tool.ToolResult{CallID: call.ID, Name: call.Name, Content: content}
+	}
+}
+
+// errToolInvoke IsError 结果编排（错误文本进 Content，对齐 tool.Source 契约）。
+func errToolInvoke(content string) func(tool.ToolCall) tool.ToolResult {
+	return func(call tool.ToolCall) tool.ToolResult {
+		return tool.ToolResult{CallID: call.ID, Name: call.Name, Content: content, IsError: true}
+	}
 }

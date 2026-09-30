@@ -1,10 +1,12 @@
 package service
 
-// Execute 端到端测试（spec 06 §5 FR1-FR6）：真实执行器 + 真实 llm.NewClient 包可编程
-// fake 上游 + stub store / executions / rag——零真实 PG / LLM / 网络。覆盖：把关节点
-//（published / draft / disabled / trial 例外）、快照游走（线性 / 隐式终止 / 条件分支 /
-// 首条命中 / 无命中 fail-fast）、错误分类与失败轨迹照写（ErrorNode 定位）、5min 上限
-// 归一 ErrWorkflowExecutionFailed、调用方取消不归一、onNodeDone 回调缝、chat 触发引用。
+// Execute 端到端测试（spec 06 §5 FR1-FR6 + spec 016 tool 节点图级面）：真实执行器
+// + 真实 llm.NewClient 包可编程 fake 上游 + stub store / executions / rag——零真实
+// PG / LLM / 网络。覆盖：把关节点（published / draft / disabled / trial 例外）、
+// 快照游走（线性 / 隐式终止 / 条件分支 / 首条命中 / 无命中 fail-fast）、tool 节点
+//（llm→tool→end 正常链路 / condition 按工具输出路由 / 404 透传，spec 016 §7 清单 2/7）、
+// 错误分类与失败轨迹照写（ErrorNode 定位）、5min 上限归一 ErrWorkflowExecutionFailed、
+// 调用方取消不归一、onNodeDone 回调缝、chat 触发引用。
 
 import (
 	"context"
@@ -19,15 +21,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
+	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
+	"github.com/Karlsk/go-hify/internal/platform/tool"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	"github.com/Karlsk/go-hify/internal/platform/traceid"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
 // execEnv 一次执行测试的装配：svc 持真实执行器（真 client + fake 上游），store stub
-// 三查回图、CreateRun 记录快照（回填 run.ID=7 模拟 RETURNING）。
+// 三查回图、CreateRun 记录快照（回填 run.ID=7 模拟 RETURNING）。tools 默认空清单
+//（tool 节点用例在构造后设 defs / invokeFn——ToolSourceFor 执行期惰性调用）。
 type execEnv struct {
 	svc      *workflowService
 	st       *stubStore
@@ -35,6 +40,7 @@ type execEnv struct {
 	streamer *genStreamer
 	execs    *execRecorder
 	rags     *stubRetrieve
+	tools    *stubToolSourceFactory
 
 	createRunCalls int
 	lastRun        *WorkflowRun
@@ -50,6 +56,7 @@ func newExecEnv(t *testing.T, status string, nodes []WorkflowNode, edges []Workf
 	env.factory = &stubClientFactory{client: llm.NewClient("test", fastProfile(), env.streamer)}
 	env.execs = &execRecorder{}
 	env.rags = &stubRetrieve{}
+	env.tools = &stubToolSourceFactory{}
 	env.st = &stubStore{
 		getByIDFn: func(id uint64) (*Workflow, error) {
 			wf := &Workflow{Name: "智能客服分流", StartNodeKey: nodes[0].NodeKey, Status: status}
@@ -68,7 +75,7 @@ func newExecEnv(t *testing.T, status string, nodes []WorkflowNode, edges []Workf
 	models := &stubModels{resolveFn: func(req providerapi.ResolveLLMConfigReq) (*providerapi.LLMConfig, error) {
 		return testResolveCfg(), nil
 	}}
-	svc := New(env.st, models, nil, &recordCache{}, env.factory, env.execs, env.rags, false)
+	svc := New(env.st, models, nil, &recordCache{}, env.factory, env.execs, env.rags, env.tools, false)
 	env.svc = svc.(*workflowService)
 	return env
 }
@@ -246,17 +253,133 @@ func TestExecuteMissingVar(t *testing.T) {
 	assert.Empty(t, env.execs.rows, "渲染先于上游调用，未真正打到 LLM")
 }
 
-func TestExecuteToolFailFast(t *testing.T) {
+// 工具缺失（Tools 清单空 = 已删 / server 停用静默过滤）：404 哨兵透传 + 节点定位 +
+// run failed + error_node（spec 016 §7 清单 2 的图级面；取代 spec 06 占位 fail-fast
+// 断言，spec §7 清单 8 授权）。nodeIn 未落（Tools 预检先于渲染与 setNodeIn）。
+func TestExecuteToolNotFound(t *testing.T) {
 	nodes := []WorkflowNode{
 		{NodeKey: "t1", Type: "tool", Config: `{"tool_id":"5"}`},
 	}
-	env := newExecEnv(t, "published", nodes, nil, singleGen("x"))
+	env := newExecEnv(t, "published", nodes, nil, singleGen("x")) // tools 默认空清单
 
 	_, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 42, Input: "in"})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errs.ErrValidationFailed, "tool 未支持 → 图缺陷 400")
-	assert.Contains(t, err.Error(), "node t1:")
+	assert.ErrorIs(t, err, mcpapi.ErrMCPToolNotFound, "工具缺失 → 404 哨兵透传")
+	assert.Contains(t, err.Error(), "node t1:", "节点 key 定位")
+	assert.Equal(t, "failed", env.lastRun.Status)
 	assert.Equal(t, "t1", env.lastRun.ErrorNode)
+	require.Len(t, env.lastNodeRuns, 1)
+	assert.Equal(t, "failed", env.lastNodeRuns[0].Status)
+	assert.Zero(t, env.tools.invokes, "未起任何调用")
+}
+
+// 工具调用失败（Invoke IsError，§7 清单 3 图级面）：同码 500 哨兵 + 错误文本进
+// message + run failed + error_node 定位 tool 节点；失败发生在调用之后，nodeIn
+// 照落（入参摘要可读）；walk 层失败分支照记 In（execute.go 失败臂）。
+func TestExecuteToolCallFailed(t *testing.T) {
+	nodes := []WorkflowNode{
+		{NodeKey: "t1", Type: "tool", Config: `{"tool_id":"5","args":{"q":"{{input}}"}}`},
+	}
+	env := newExecEnv(t, "published", nodes, nil, singleGen("x"))
+	env.tools.defs = []tool.ToolDef{{Name: "s5__search"}}
+	env.tools.invokeFn = errToolInvoke("目标服务不可达")
+
+	_, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 42, Input: "查订单"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, mcpapi.ErrMCPToolCallFailed, "调用失败 → 500 哨兵")
+	assert.Contains(t, err.Error(), "node t1:", "节点 key 定位")
+	assert.Contains(t, err.Error(), "目标服务不可达", "错误文本进 message")
+
+	assert.Equal(t, "failed", env.lastRun.Status)
+	assert.Equal(t, "t1", env.lastRun.ErrorNode, "error_node 定位到 tool 节点")
+	assert.Contains(t, env.lastRun.ErrorMsg, "目标服务不可达", "错误文本落 run 级 ErrorMsg（node 级恒空，既有形态）")
+	require.Len(t, env.lastNodeRuns, 1)
+	assert.Equal(t, "failed", env.lastNodeRuns[0].Status)
+	assert.Empty(t, env.lastNodeRuns[0].ErrorMsg, "node run ErrorMsg 落库恒空（冻结形态）")
+	inM := decodeJSONb(t, env.lastNodeRuns[0].Input)
+	assert.Equal(t, "5", inM["tool_id"], "调用后失败：入参摘要仍可读")
+	assert.Equal(t, `{"q":"查订单"}`, inM["args"])
+	require.Len(t, env.tools.invokes, 1)
+}
+
+// ---- 图级正常链路（spec 016 §7 清单 7）----
+
+// 图级 llm→tool→end 三节点（spec 016 US1 独立可测形态）：llm 产物渲染进 tool args
+// 模板 → 工具 Content 落池 → end 终答模板引用工具输出；tool 节点轨迹 In 记
+// tool_id + 渲染后 args、Out 记内容（quickstart §5 场景 2-3 的自动化等价）。
+func TestExecuteToolChain(t *testing.T) {
+	nodes := []WorkflowNode{
+		{NodeKey: "classify", Type: "llm", Config: `{"model_id":"3","prompt":"判断意图：{{input}}"}`},
+		{NodeKey: "lookup", Type: "tool", Config: `{"tool_id":"5","args":{"q":"{{classify}}"}}`},
+		{NodeKey: "finish", Type: "end", Config: `{"output":"答复：{{lookup}}"}`},
+	}
+	edges := []WorkflowEdge{
+		{SourceNodeKey: "classify", TargetNodeKey: "lookup"},
+		{SourceNodeKey: "lookup", TargetNodeKey: "finish"},
+	}
+	env := newExecEnv(t, "published", nodes, edges, singleGen("ORDER_QUERY"))
+	env.tools.defs = []tool.ToolDef{{Name: "s5__search", Description: "查订单"}}
+	env.tools.invokeFn = okToolInvoke("ORDER-123 已发货")
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 42, Input: "查订单"})
+	require.NoError(t, err)
+	assert.Equal(t, "答复：ORDER-123 已发货", res.Output, "end 模板引用工具输出，终答含工具取回的数据")
+
+	require.Len(t, res.NodeTrace, 3)
+	assert.Equal(t, "lookup", res.NodeTrace[1].NodeKey)
+	assert.Equal(t, "tool", res.NodeTrace[1].NodeType)
+	assert.Equal(t, "succeeded", res.NodeTrace[1].Status, "tool 节点 succeeded")
+	assert.Equal(t, "succeeded", res.NodeTrace[2].Status)
+
+	// 工具收到单次确定性调用：args 为 llm 产物渲染后的按 key 排序 JSON
+	require.Len(t, env.tools.invokes, 1)
+	assert.Equal(t, "s5__search", env.tools.invokes[0].Name, "调用名 = Source 供出的派生名")
+	assert.Equal(t, `{"q":"ORDER_QUERY"}`, string(env.tools.invokes[0].Arguments))
+
+	// node_runs：tool 步 In 记 tool_id + args、Out 记内容、DurationMs 落值
+	require.Len(t, env.lastNodeRuns, 3)
+	toolRun := env.lastNodeRuns[1]
+	assert.Equal(t, "lookup", toolRun.NodeKey)
+	assert.Equal(t, "succeeded", toolRun.Status)
+	inM := decodeJSONb(t, toolRun.Input)
+	assert.Equal(t, "5", inM["tool_id"])
+	assert.Equal(t, `{"q":"ORDER_QUERY"}`, inM["args"])
+	outM := decodeJSONb(t, toolRun.Output)
+	assert.Equal(t, "ORDER-123 已发货", outM["output"])
+	assert.GreaterOrEqual(t, toolRun.DurationMs, 0, "耗时照记")
+	assert.Empty(t, toolRun.ErrorMsg)
+
+	// executions 只有 classify 一行（tool 非 LLM 调用不落，spec 016 边界）
+	require.Len(t, env.execs.rows, 1)
+}
+
+// condition 节点按 tool 输出路由二选一（§7 清单 7 后半）：工具结果 "IN_STOCK" 命中
+// true 边走 ship，soldout 分支不执行——工具输出即条件求值的一等变量。
+func TestExecuteToolConditionRoute(t *testing.T) {
+	nodes := []WorkflowNode{
+		{NodeKey: "lookup", Type: "tool", Config: `{"tool_id":"5","args":{"q":"{{input}}"}}`},
+		{NodeKey: "router", Type: "condition", Config: `{"expression":"{{lookup}} == 'IN_STOCK'"}`},
+		{NodeKey: "ship", Type: "llm", Config: `{"model_id":"3","prompt":"发货答复"}`},
+		{NodeKey: "soldout", Type: "llm", Config: `{"model_id":"3","prompt":"缺货答复"}`},
+	}
+	tt, ff := "true", "false"
+	edges := []WorkflowEdge{
+		{SourceNodeKey: "lookup", TargetNodeKey: "router"},
+		{SourceNodeKey: "router", TargetNodeKey: "ship", Condition: &tt},
+		{SourceNodeKey: "router", TargetNodeKey: "soldout", Condition: &ff},
+	}
+	env := newExecEnv(t, "published", nodes, edges, singleGen("明天送达"))
+	env.tools.defs = []tool.ToolDef{{Name: "s5__stock", Description: "查库存"}}
+	env.tools.invokeFn = okToolInvoke("IN_STOCK")
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 42, Input: "查库存"})
+	require.NoError(t, err)
+	assert.Equal(t, "明天送达", res.Output, "隐式终止：末节点输出即终稿")
+	require.Len(t, res.NodeTrace, 3, "lookup + router + ship，soldout 未执行")
+	assert.Equal(t, "lookup", res.NodeTrace[0].NodeKey)
+	assert.Equal(t, "router", res.NodeTrace[1].NodeKey)
+	assert.Equal(t, "ship", res.NodeTrace[2].NodeKey, "工具输出 IN_STOCK 命中 true 边")
+	assert.Equal(t, 1, env.streamer.calls, "只有 ship 分支打到 LLM")
 }
 
 // ---- 把关节点：published 才放行 / draft / disabled 文案区分 / trial 例外 ----
@@ -497,7 +620,7 @@ func newNestedEnv(t *testing.T, graphs map[uint64]*graphSnapshot,
 	models := &stubModels{resolveFn: func(req providerapi.ResolveLLMConfigReq) (*providerapi.LLMConfig, error) {
 		return testResolveCfg(), nil
 	}}
-	env.svc = New(env.st, models, nil, &recordCache{}, env.factory, env.execs, env.rags, false).(*workflowService)
+	env.svc = New(env.st, models, nil, &recordCache{}, env.factory, env.execs, env.rags, nil, false).(*workflowService) // 嵌套图无 tool 节点：工具来源不接线
 	return env
 }
 

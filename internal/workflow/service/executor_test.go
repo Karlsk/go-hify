@@ -1,7 +1,8 @@
 package service
 
-// executor 测试（spec 06 §4.2 / O4-O6）：runNode 六类分发（tool fail-fast 图缺陷 400 /
-// 未知 config 兜底）、callLLM 全链（resolve → client → Generate 非流式 → executions
+// executor 测试（spec 06 §4.2 / O4-O6 + spec 016 tool 节点）：runNode 六类分发
+//（tool 真实执行链：解析→严格渲染→单次 Invoke→Content 即输出 / 未知 config 兜底）、
+// callLLM 全链（resolve → client → Generate 非流式 → executions
 // 自记恰好一行 ConversationID=nil / 抢槽失败不落库）、retrieve 编号段落落池、
 // api 节点全链渲染 + scheme/SSRF 环境类 500、end buildOutput、route 声明顺序首条命中
 // 与无命中 fail-fast。零真实网络 / LLM（fake Streamer + 不可达 IP 字面量）。
@@ -20,14 +21,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
+	"github.com/Karlsk/go-hify/internal/platform/tool"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
-// newTestExecutor 常规装配：可解析配置 + 可编程上游 + 记录式 executions/rags。
+// newTestExecutor 常规装配：可解析配置 + 可编程上游 + 记录式 executions/rags +
+// 空清单工具来源（tool 节点用例自带可控 factory，不走本装配）。
 func newTestExecutor(gen func(ctx context.Context, call int) (*schema.Message, error)) (
 	*executor, *stubResolve, *stubClientFactory, *genStreamer, *execRecorder, *stubRetrieve,
 ) {
@@ -36,7 +40,7 @@ func newTestExecutor(gen func(ctx context.Context, call int) (*schema.Message, e
 	factory := &stubClientFactory{client: llm.NewClient("test", fastProfile(), fs)}
 	execs := &execRecorder{}
 	rags := &stubRetrieve{}
-	return newExecutor(r, factory, execs, rags, false), r, factory, fs, execs, rags
+	return newExecutor(r, factory, execs, rags, &stubToolSourceFactory{}, false), r, factory, fs, execs, rags
 }
 
 // okGen 单值应答编排（忽略调用序）。
@@ -138,7 +142,7 @@ func TestRunNodeLLMProviderBusyNoRecord(t *testing.T) {
 	r := &stubResolve{cfg: testResolveCfg()}
 	factory := &stubClientFactory{err: llm.ErrProviderBusy}
 	execs := &execRecorder{}
-	e := newExecutor(r, factory, execs, &stubRetrieve{}, false)
+	e := newExecutor(r, factory, execs, &stubRetrieve{}, &stubToolSourceFactory{}, false)
 
 	_, err := e.runNode(context.Background(), "reply",
 		&workflowapi.LLMConfig{ModelID: 3, Prompt: "p"}, newExecContext("in"))
@@ -572,15 +576,167 @@ func TestRunNodeEnd(t *testing.T) {
 	assert.Equal(t, "答案", out2)
 }
 
-// ---- tool 节点：执行期 fail-fast（mcp 未建，图缺陷类 400）----
+// ---- tool 节点：解析 → 严格渲染 → 单次 Invoke → Content 即输出（spec 016 §5）----
 
+// 正常链路（spec 016 §7 清单 1，取代 spec 06 占位 fail-fast 断言）：ToolSourceFor
+// 按 ToolID 解析、args 模板渲染后按 key 排序 marshal、Invoke 收到渲染后 JSON、
+// Content 即节点输出；nodeIn 记 {"tool_id","args"}（渲染后）。变量池落值与
+// node run Output / DurationMs 归 walk 层（图级用例 TestExecuteToolChain 证）。
 func TestRunNodeTool(t *testing.T) {
-	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
-	_, err := e.runNode(context.Background(), "t1", &workflowapi.ToolConfig{ToolID: 5}, newExecContext("in"))
+	tf := &stubToolSourceFactory{
+		defs:     []tool.ToolDef{{Name: "s2__search", Description: "查订单"}},
+		invokeFn: okToolInvoke("ORDER-123 已发货"),
+	}
+	e := newExecutor(&stubResolve{cfg: testResolveCfg()}, &stubClientFactory{},
+		&execRecorder{}, &stubRetrieve{}, tf, false)
+	c := newExecContext("查订单 123")
+
+	out, err := e.runNode(context.Background(), "lookup",
+		&workflowapi.ToolConfig{ToolID: 5, Args: map[string]string{"q": "{{input}}", "limit": "10"}}, c)
+	require.NoError(t, err)
+	assert.Equal(t, "ORDER-123 已发货", out, "Content 即节点输出")
+
+	assert.Equal(t, 1, tf.calls, "ToolSourceFor 每节点恰一次")
+	assert.Equal(t, []uint64{5}, tf.lastReq.ToolIDs, "按节点 ToolID 解析")
+	require.Len(t, tf.invokes, 1, "确定性单次调用（非 ReACT 多轮）")
+	assert.Equal(t, "s2__search", tf.invokes[0].Name, "调用名 = Source 供出的派生名")
+	assert.Equal(t, `{"limit":"10","q":"查订单 123"}`, string(tf.invokes[0].Arguments),
+		"渲染后按 key 排序的 JSON 对象")
+	assert.NotEmpty(t, tf.invokes[0].ID, "调用 id 锚点由执行器生成")
+
+	nodeIn := c.takeNodeIn()
+	assert.Equal(t, "5", nodeIn["tool_id"], "tool_id 字符串化（对齐 callWorkflow workflow_id 形态）")
+	assert.Equal(t, `{"limit":"10","q":"查订单 123"}`, nodeIn["args"], "nodeIn args = 渲染后 JSON")
+}
+
+// args 未填（空 map / nil 同形）：marshal 为 {} = 无参调用语义（MCP 空参数），
+// 链路照走、nodeIn args 恒为 JSON 对象。
+func TestRunNodeToolNoArgs(t *testing.T) {
+	tf := &stubToolSourceFactory{
+		defs:     []tool.ToolDef{{Name: "s1__ping"}},
+		invokeFn: okToolInvoke("pong"),
+	}
+	e := newExecutor(&stubResolve{cfg: testResolveCfg()}, &stubClientFactory{},
+		&execRecorder{}, &stubRetrieve{}, tf, false)
+	c := newExecContext("in")
+
+	out, err := e.runNode(context.Background(), "ping", &workflowapi.ToolConfig{ToolID: 2}, c)
+	require.NoError(t, err)
+	assert.Equal(t, "pong", out)
+	require.Len(t, tf.invokes, 1)
+	assert.Equal(t, "{}", string(tf.invokes[0].Arguments), "空 args → {}（无参语义）")
+	assert.Equal(t, "2", c.takeNodeIn()["tool_id"])
+}
+
+// ---- tool 节点失败分型（spec 016 §7 清单 2–6 / contracts/errors.md E1–E5）----
+// 五类故障各归其哨兵/包装形态；run failed + error_node 落库由 walk 层既有机制
+// （图级面 TestExecuteToolNotFound / TestExecuteToolCallFailed 证）。
+
+// E1（清单 2）：Tools 预检空清单（工具已删 / server 停用静默过滤）→ 哨兵原样
+// 透传（不加壳）+ node key 前缀；零调用、零渲染（预检先于 args 渲染与 setNodeIn）。
+func TestRunNodeToolNotFound(t *testing.T) {
+	tf := &stubToolSourceFactory{} // defs nil = 空清单
+	e := newExecutor(&stubResolve{cfg: testResolveCfg()}, &stubClientFactory{},
+		&execRecorder{}, &stubRetrieve{}, tf, false)
+	c := newExecContext("查订单")
+
+	_, err := e.runNode(context.Background(), "lookup",
+		&workflowapi.ToolConfig{ToolID: 5, Args: map[string]string{"q": "{{input}}"}}, c)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errs.ErrValidationFailed, "tool 未支持 → 图缺陷 400")
-	assert.Contains(t, err.Error(), "node t1:")
-	assert.Contains(t, err.Error(), "tool")
+	assert.ErrorIs(t, err, mcpapi.ErrMCPToolNotFound, "工具缺失 → 404 哨兵透传")
+	assert.Contains(t, err.Error(), "node lookup:", "runNode 统一失败定位前缀")
+	assert.Empty(t, tf.invokes, "预检失败不起调用")
+	assert.Empty(t, c.takeNodeIn(), "预检先于渲染：nodeIn 未落")
+}
+
+// E2（清单 5）：Tools 加载 DB 错误 → %w 保链包装（非哨兵、handler 兜底 500），
+// 错误链可 errors.Is 回溯原始 DB 错。
+func TestRunNodeToolLoadErr(t *testing.T) {
+	dbErr := errors.New("connection refused")
+	tf := &stubToolSourceFactory{toolsErr: dbErr}
+	e := newExecutor(&stubResolve{cfg: testResolveCfg()}, &stubClientFactory{},
+		&execRecorder{}, &stubRetrieve{}, tf, false)
+
+	_, err := e.runNode(context.Background(), "lookup", &workflowapi.ToolConfig{ToolID: 5}, newExecContext("in"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, dbErr, "%w 包装保留原始错误链")
+	assert.Contains(t, err.Error(), "load tools:", "加下文不加哨兵")
+	assert.NotErrorIs(t, err, mcpapi.ErrMCPToolNotFound, "DB 错误 ≠ 工具缺失")
+	assert.Empty(t, tf.invokes)
+}
+
+// E3（清单 4）：args 缺失变量 → 图缺陷 errs.ErrValidationFailed + args.<参数名>
+// 定位；渲染先于调用（不浪费工具 IO）与 setNodeIn（失败不落入参摘要）。
+func TestRunNodeToolArgsMissingVar(t *testing.T) {
+	tf := &stubToolSourceFactory{
+		defs:     []tool.ToolDef{{Name: "s5__search"}},
+		invokeFn: okToolInvoke("unreachable"),
+	}
+	e := newExecutor(&stubResolve{cfg: testResolveCfg()}, &stubClientFactory{},
+		&execRecorder{}, &stubRetrieve{}, tf, false)
+	c := newExecContext("in")
+
+	_, err := e.runNode(context.Background(), "lookup",
+		&workflowapi.ToolConfig{ToolID: 5, Args: map[string]string{"q": "{{typo_key}}", "limit": "10"}}, c)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed, "图缺陷类 → 400")
+	assert.Contains(t, err.Error(), "args.q:", "缺失参数名定位")
+	assert.Contains(t, err.Error(), "node lookup:")
+	assert.Empty(t, tf.invokes, "渲染失败不起调用")
+	assert.Empty(t, c.takeNodeIn(), "渲染失败不落 nodeIn")
+}
+
+// E4（清单 3）：Invoke IsError → ErrMCPToolCallFailed（message 含结果文本）；
+// 失败发生在调用之后——nodeIn 已落（入参仍可读，排障可见发了什么）。
+func TestRunNodeToolInvokeError(t *testing.T) {
+	tf := &stubToolSourceFactory{
+		defs:     []tool.ToolDef{{Name: "s5__search"}},
+		invokeFn: errToolInvoke("工具执行超时：目标服务不可达"),
+	}
+	e := newExecutor(&stubResolve{cfg: testResolveCfg()}, &stubClientFactory{},
+		&execRecorder{}, &stubRetrieve{}, tf, false)
+	c := newExecContext("in")
+
+	_, err := e.runNode(context.Background(), "lookup",
+		&workflowapi.ToolConfig{ToolID: 5, Args: map[string]string{"q": "{{input}}"}}, c)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, mcpapi.ErrMCPToolCallFailed, "调用失败 → 500 哨兵")
+	assert.Contains(t, err.Error(), "工具执行超时：目标服务不可达", "错误文本（=Content）进 message")
+	assert.Contains(t, err.Error(), "node lookup:")
+	require.Len(t, tf.invokes, 1)
+	nodeIn := c.takeNodeIn()
+	assert.Equal(t, "5", nodeIn["tool_id"], "调用后失败：入参摘要仍可读")
+}
+
+// E4 截断防御（D2「message=Content 截断文本」）：超 16KB 的错误文本按既有
+// maxTraceValueBytes 封顶——run.ErrorMsg 无截断机制，本层先兜（上游 boundToolSource
+// 实际恒 ≤2000 rune，双保险）。
+func TestRunNodeToolInvokeErrorTruncated(t *testing.T) {
+	tf := &stubToolSourceFactory{
+		defs:     []tool.ToolDef{{Name: "s5__search"}},
+		invokeFn: errToolInvoke(strings.Repeat("x", maxTraceValueBytes+100)),
+	}
+	e := newExecutor(&stubResolve{cfg: testResolveCfg()}, &stubClientFactory{},
+		&execRecorder{}, &stubRetrieve{}, tf, false)
+
+	_, err := e.runNode(context.Background(), "lookup", &workflowapi.ToolConfig{ToolID: 5}, newExecContext("in"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, mcpapi.ErrMCPToolCallFailed)
+	assert.NotContains(t, err.Error(), strings.Repeat("x", maxTraceValueBytes+100),
+		"超限错误文本按 16KB 封顶，不整段进 message")
+}
+
+// E5（清单 6）：toolSources 未注入（装配缺位）→ 同码 ErrMCPToolCallFailed
+// 「工具来源未注入」——fail-fast 不降级，也带节点定位。
+func TestRunNodeToolNilSource(t *testing.T) {
+	e := newExecutor(&stubResolve{cfg: testResolveCfg()}, &stubClientFactory{},
+		&execRecorder{}, &stubRetrieve{}, nil, false)
+
+	_, err := e.runNode(context.Background(), "lookup", &workflowapi.ToolConfig{ToolID: 5}, newExecContext("in"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, mcpapi.ErrMCPToolCallFailed, "环境限制类同码 → 500")
+	assert.Contains(t, err.Error(), "工具来源未注入")
+	assert.Contains(t, err.Error(), "node lookup:", "装配缺位也带节点定位")
 }
 
 // 未知 config（密封面外的兜底臂）：报错而非静默跳过。

@@ -65,6 +65,6 @@
 
 ## 4. 下阶段（明确不在本批）
 
-- **workflow 工具节点接 `mcpapi.InvokeTool`**：README §7 最后一项留待 workflow 批（工具节点目前仍走既有 MCP run 路径的规划不变，届时按统一 `tool.Source` 模型对齐）。
+- **workflow 工具节点接 `mcpapi`**：已交付（spec 016，2026-09-30）——tool 节点经 `toolSourceFactory` 窄面（`ToolSourceFor` 按 ToolID 解析）消费统一 `tool.Source`，fail-fast 错误分型；实现记录 [../workflow/impl_spec_16_tool_node_mcp.md](../workflow/impl_spec_16_tool_node_mcp.md)。README §7 旧草图名 `mcpapi.InvokeTool` 实即 `ToolSourceFor` 路径。
 - **前端 tool_call / tool_result 事件渲染**：本批前端零改动（契约预留值已生效）；控制台展示工具调用过程（折叠卡片样式）留待前端批。
 - **MCP 会话复用升级**（README §5.2 设计点 2）：chat 每轮对话多次工具调用、per-call 握手开销是否可忽略，待真实 MCP server 手测后再评估 singleflight 重建。

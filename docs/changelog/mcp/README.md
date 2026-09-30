@@ -67,6 +67,8 @@ Go client 与 Spring server 之间不存在语言层集成，兼容性完全是*
 
 〔2026-09-29 chat 批修订〕chat 工具循环定稿为**全局统一工具模型**架构（[chat_tool_loop_spec.md](chat_tool_loop_spec.md)），§5.3 初版「chat 侧 toToolInfo」的归属随之修订：转换不再在 chat，而是拆成两段各归其位——MCP→`tool.ToolDef` 在 mcp/service（`ToolSourceFor`），`ToolDef`→eino ToolInfo 在 platform/llm（eino 收敛，chat/workflow 零 eino）。
 
+〔2026-09-30 spec 016 交付〕workflow 工具节点落地：executor 经 `toolSourceFactory` 窄面（`ToolSourceFor` 按 ToolID 解析）消费 `tool.Source`，单次确定性调用 + fail-fast 错误分型，组合根注入 `mcpClientSvc`——实现记录见 [../workflow/impl_spec_16_tool_node_mcp.md](../workflow/impl_spec_16_tool_node_mcp.md)。
+
 ```
 internal/platform/tool    ← 全局统一工具契约（纯标准库）：ToolDef/ToolCall/
                              ToolResult/Source/Registry——MCP 与未来内置工具同一模型
@@ -76,7 +78,8 @@ internal/mcp/api          ← 纯契约，零 eino / SDK 类型（可 import 纯
 internal/platform/llm     ← 唯一 import eino 的地方：Message/Final 公开面 +
                              ToolDef→ToolInfo 转换（保护链 bulkhead/熔断/超时不动）
 internal/chat/service     ← ReAct 多轮循环：只见 tool.* 与 llm.*，零 eino / SDK
-internal/workflow         ← LLM 节点经 llm.Message/Final；工具节点接 mcpapi（workflow 批）
+internal/workflow         ← LLM 节点经 llm.Message/Final；工具节点经 toolSourceFactory
+                             窄面接 mcpapi.ToolSourceFor（spec 016 已交付）
 ```
 
 契约草图（方向性，非终稿；终稿随 api 契约 spec 定）：
@@ -110,9 +113,10 @@ chat 侧 import eino 的 `schema` 包属库依赖，不受业务域依赖清单�
 > 2026-09-29：前 3 项已交付（实现记录 [server_mgmt_impl.md](server_mgmt_impl.md)）。
 > 2026-09-29：chat 批（统一工具/消息模型 + ReAct 工具循环）spec 定稿并实施——[chat_tool_loop_spec.md](chat_tool_loop_spec.md)。
 > 2026-09-30：chat 批已交付（实现记录 [chat_tool_loop_impl.md](chat_tool_loop_impl.md)）：platform/tool 统一契约、llm 公开面 Hify 化、mcp `ToolSourceFor`、chat 多轮工具循环；workflow LLM 节点同步换型。零迁移、handler/SSE 零改动、未绑工具路径零变化。
+> 2026-09-30：workflow 批（spec 016）已交付——tool 节点经 `ToolSourceFor` 真实执行（实现记录 [../workflow/impl_spec_16_tool_node_mcp.md](../workflow/impl_spec_16_tool_node_mcp.md)）；下项旧草图名 `mcpapi.InvokeTool` 实即 `ToolSourceFor` 路径（D1 拍板）。
 
 - [x] go.mod 引入 `github.com/modelcontextprotocol/go-sdk` v1.3.x（v1.3.1）
 - [x] `mcp/api` 契约定稿（§5.3 草图基础上补 Req/Schema 与哨兵）
 - [x] `mcp/service` client + discover 翻页 upsert（§5.2 设计点 1/2 按修订执行）
 - [x] chat 侧工具循环接线（chat 批：`platform/tool` 统一模型 + `ToolSourceFor` + ReAct 多轮循环 + llm 公开面 Hify 化；转换归属按 §5.3 修订执行）
-- [ ] workflow 工具节点接 `mcpapi.InvokeTool`
+- [x] workflow 工具节点接 `mcpapi`（spec 016：`ToolSourceFor` 按 ToolID 解析 + 统一 `tool.Source` 执行，fail-fast 错误分型）

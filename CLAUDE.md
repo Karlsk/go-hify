@@ -1209,8 +1209,8 @@ HTTP 状态映射：
 | `MCP_SERVER_NOT_FOUND` | 404 | `mcpapi.ErrMCPServerNotFound` |
 | `MCP_SERVER_NAME_CONFLICT` | 409 | `mcpapi.ErrMCPServerNameConflict`（uq_mcp_servers_name 23505） |
 | `MCP_SERVER_IN_USE` | 409 | `mcpapi.ErrMCPServerInUse`（有 Agent 绑定该 Server 的工具：server 删除 → mcp_tools 级联删被 fk_agent_tools_tool_id RESTRICT 拦下 → 23503 按约束名分发翻译，mcp 批） |
-| `MCP_TOOL_NOT_FOUND` | 404 | `mcpapi.ErrMCPToolNotFound`（run 实调时工具不在 discover 入库清单）；`agentapi.ErrToolNotFound`（agent 侧绑定写入同码哨兵——mcp 预检缺失 404 / FK 兜底，mcp 批） |
-| `MCP_TOOL_CALL_FAILED` | 500 | `mcpapi.ErrMCPToolCallFailed`（连接 / 握手 / 工具返回 isError，对齐 WORKFLOW_EXECUTION_FAILED 定位） |
+| `MCP_TOOL_NOT_FOUND` | 404 | `mcpapi.ErrMCPToolNotFound`（run 实调时工具不在 discover 入库清单）；`agentapi.ErrToolNotFound`（agent 侧绑定写入同码哨兵——mcp 预检缺失 404 / FK 兜底，mcp 批）；workflow tool 节点执行时 Tools 预检空清单（工具已删 / server 停用静默过滤）同码透传，spec 016 |
+| `MCP_TOOL_CALL_FAILED` | 500 | `mcpapi.ErrMCPToolCallFailed`（连接 / 握手 / 工具返回 isError，对齐 WORKFLOW_EXECUTION_FAILED 定位；workflow tool 节点 Invoke IsError / 工具来源未注入同码，message=Content 截断，spec 016） |
 | `INTERNAL_ERROR` | 500 | `errs.ErrInternal`（兜底，不向前端泄露细节） |
 
 规则：
@@ -1277,12 +1277,14 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/015-workflow-run-history/plan.md](specs/015-workflow-run-history/plan.md)
-(feature: workflow 运行历史与节点轨迹查询——spec 015，纯只读查询篇：2 条 GET 路由
-（/workflows/{id}/runs 游标分页列表——keyset (created_at,id) 行值比较、摘要面不含
-input/output 大文本 + /workflows/{id}/runs/{runId} 详情含按执行序节点轨迹）+ 唯一新
-哨兵 RUN_NOT_FOUND（404——不存在与跨工作流同判不泄露）；前端详情页新增 WorkflowRunsPanel
-区块（列表分页 + el-drawer 运行详情 + 轨迹表失败节点按 error_node 高亮）；逐层照抄 chat
-游标先例（api 层 cursor 只是 string、page 工具全在 service 层）；零迁移（表在 00019/00020）、
-执行引擎与落库零改动、既有 8 端点零变化；spec 见 specs/015-workflow-run-history/spec.md)
+[specs/016-workflow-tool-node-mcp/plan.md](specs/016-workflow-tool-node-mcp/plan.md)
+(feature: workflow 工具节点接 MCP——spec 016，执行引擎补完篇：tool 节点从占位
+fail-fast 换真实执行——executor 定义 toolSourceFactory 窄接口（ToolSourceFor 按
+ToolID 解析），组合根注入 mcpClientSvc（New 增第 9 参，零重排）；调用链 =
+Tools 清单空→MCP_TOOL_NOT_FOUND 404 透传 / args 严格 {{var}} 渲染缺失→
+VALIDATION_FAILED 400 带 args.<k> 定位 / Invoke IsError→MCP_TOOL_CALL_FAILED 500
+（message=Content 截断）；输出 Content 落变量池 + node run Output（16KB 截断既有）；
+fail-fast 语义与 chat 的「错误即上下文」分野钉死；零迁移、零新哨兵、ToolConfig
+契约冻结（D5 拍板 A：args 值域仅字符串）、chat 管道零改动透传受益；spec 见
+specs/016-workflow-tool-node-mcp/spec.md)
 <!-- SPECKIT END -->

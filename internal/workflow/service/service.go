@@ -90,15 +90,15 @@ type workflowService struct {
 }
 
 // New 返回 api 接口；组合根将返回值注入 handler（及 chat 消费方）。clients /
-// execs / rags 是执行引擎依赖（spec 06）：llm.Manager、logging.ExecutionStore、
-// rag 服务按窄接口注入（结构化类型天然满足）；blockPrivate = O6 的
-// WORKFLOW_API_BLOCK_PRIVATE。
+// execs / rags / toolSources 是执行引擎依赖（spec 06 + 016）：llm.Manager、
+// logging.ExecutionStore、rag 服务、mcp 客户端服务按窄接口注入（结构化类型天然
+// 满足）；blockPrivate = O6 的 WORKFLOW_API_BLOCK_PRIVATE。
 func New(store Store, models providerapi.ModelService, kbs ragapi.KnowledgeBaseService,
 	cm cacheManager, clients llmClientFactory, execs executionWriter, rags ragRetriever,
-	blockPrivate bool) workflowapi.WorkflowService {
+	toolSources toolSourceFactory, blockPrivate bool) workflowapi.WorkflowService {
 	s := &workflowService{
 		store: store, models: models, kbs: kbs, cache: cm,
-		exec: newExecutor(models, clients, execs, rags, blockPrivate),
+		exec: newExecutor(models, clients, execs, rags, toolSources, blockPrivate),
 	}
 	s.exec.execChild = s.executeChild // workflow 节点缝接线（spec 08 §4.3）：executor 不持有 service 类型，避免环
 	return s

@@ -164,11 +164,13 @@ func Run(cfg *config.Config) error {
 	// workflow：CRUD + 状态动作 + 执行引擎（spec 06）。依赖既有实例零新建：modelSvc /
 	// ragSvc（条 9 预检 + 执行期 ResolveLLMConfig / Retrieve）+ ragCache（Cache 无状态、
 	// 按 NameWorkflow 命名空间隔离，spec 04 §5）+ llmManager / execStore（llm 节点走
-	// platform/llm 非流式调用并自记 executions，O2）+ WORKFLOW_API_BLOCK_PRIVATE（O6）。
+	// platform/llm 非流式调用并自记 executions，O2）+ mcpClientSvc（tool 节点按 ToolID
+	// 解析 tool.Source，spec 016——窄接口注入，零重排：mcp 已在 workflow 前构建）
+	// + WORKFLOW_API_BLOCK_PRIVATE（O6）。
 	execStore := logging.NewExecutionStore(gormDB) // executions 表写入（每次 LLM 调用一行）
 	workflowStore := workflowstore.New(gormDB)
 	workflowSvc := workflowsvc.New(workflowStore, modelSvc, ragSvc, ragCache,
-		llmManager, execStore, ragSvc, cfg.Workflow.APIBlockPrivate)
+		llmManager, execStore, ragSvc, mcpClientSvc, cfg.Workflow.APIBlockPrivate)
 	// workflow_runs 保留期清理（FR8）：WORKFLOW_RUNS_RETENTION_DAYS（默认 365）按
 	// created_at 批次 DELETE（node_runs 随 FK CASCADE 连带删）；<=0 由 Start 内 WARN
 	// 关闭。同 PartitionMaintainer 形态：启动首轮 + 每 24h 一轮，随 appCtx 退出。
