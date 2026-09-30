@@ -272,7 +272,7 @@ func TestStreamProviderBusyNoExecution(t *testing.T) {
 	st := newMemStore()
 	factory := &stubClientFactory{err: llm.ErrProviderBusy}
 	execs := &execRecorder{}
-	svc := New(st, &stubAgents{agent: testAgent(true)}, &stubProviders{cfg: testLLMConfig()}, factory, execs, &stubRags{}, nil).(*chatService)
+	svc := New(st, &stubAgents{agent: testAgent(true)}, &stubProviders{cfg: testLLMConfig()}, factory, execs, &stubRags{}, nil, nil).(*chatService)
 	convID := createConv(t, svc)
 
 	err := svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "x"}, func(chatapi.StreamEvent) error { return nil })

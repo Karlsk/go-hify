@@ -1,13 +1,18 @@
 package service
 
 // turn：发消息两模式（stream:true / stream:false）共用的编排——校验装配 → 落 user 消息 →
-// 组装多轮上下文 → platform/llm 流式调用 → 收尾落库（assistant 消息 / touch / executions）。
+// 组装多轮上下文 → platform/llm 流式调用 →（绑定工具时）多轮 ReAct 工具循环 → 收尾落库
+//（assistant 消息 / touch / executions）。工具侧编排（Registry 装配 / 工具轮执行）在 tools.go。
 //
 // 错误约定（与 api.ChatService.Stream 注释一致）：
 //   - 任何 emit 之前的失败以 error 返回——流式模式由 handler 回标准错误信封（未写 200 头）；
 //   - 流建立后的失败：流式模式经 ErrorEvent emit 后返回 nil（状态码不可改），
 //     一次输出模式直接返回翻译后的哨兵错误；
 //   - 客户端断连（emit 失败 / ctx 取消）：取消上游（省 token）、已生成部分照常落库、静默收尾。
+//
+// 轮次维度（工具循环新增）：round 0 首次 emit 前的失败走原路径标准信封；轮次 ≥1 的失败
+//（SSE 200 已提交——tool_call / tool_result 事件已发）一律走 error 事件 / 一次输出哨兵，
+// 已落的中间行保留（assistant(tool_calls) 后必有 tool 行，重放合法）。
 //
 // budget 护栏（每用户限流 + 每日预算）后置批次接线：届时在 setupConvAgent 之前检查、
 // 熔断时透传 errs.ErrRateLimited / errs.ErrBudgetExhausted。
@@ -18,28 +23,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/cloudwego/eino/schema"
-	"log/slog"
 
 	agentapi "github.com/Karlsk/go-hify/internal/agent/api"
 	chatapi "github.com/Karlsk/go-hify/internal/chat/api"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
+	"github.com/Karlsk/go-hify/internal/platform/tool"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
 )
 
 const (
-	// rowsPerTurnEstimate 一轮对话的行数估计（user + assistant(tool_calls) + tool 中间行 + 终答），
-	// 用于「倒序取最近 N 行」的窗口宽度；截断以 user 锚点整轮判定，估计偏小只会少带整轮、不会带半轮。
-	rowsPerTurnEstimate = 5
+	// rowsPerTurnEstimate 一轮对话的行数估计（user + assistant 中间行 + 若干 tool 行 + 终答；
+	// 工具循环批放宽到 8），用于「倒序取最近 N 行」的窗口宽度；截断以 user 锚点整轮判定，
+	// 估计偏小只会少带整轮、不会带半轮。
+	rowsPerTurnEstimate = 8
 	// titleMaxRunes 会话标题截断长度（首条用户消息生成）。
 	titleMaxRunes = 30
 	// ragInjectionTopK chat 检索注入取回片段数（需求给定钉值；rag cfg.TopK 默认 5 仅服务 HTTP 检索测试）。
@@ -60,8 +65,8 @@ type llmSetup struct {
 	client   *llm.Client
 }
 
-// SendMessage 一次输出模式（stream:false）：跑同一条编排，生成完毕返回最终 assistant 消息；
-// 错误走标准错误信封 + 正常 HTTP 状态码。
+// SendMessage 一次输出模式（stream:false）：跑同一条编排（含工具循环，中间行照常落库、
+// 不推送事件），生成完毕返回最终 assistant 消息；错误走标准错误信封 + 正常 HTTP 状态码。
 func (s *chatService) SendMessage(ctx context.Context, req chatapi.SendMessageReq) (*chatapi.AssistantReplySchema, error) {
 	return s.runTurn(ctx, req, nil)
 }
@@ -74,6 +79,9 @@ func (s *chatService) Stream(ctx context.Context, req chatapi.SendMessageReq, em
 
 // runTurn 两模式共用的发消息编排；emit 为 nil 即一次输出模式。
 // 返回的 error 只可能产生在任何 emit 之前（流式模式 handler 尚可回标准错误信封）。
+// 工具循环（chat_tool_loop_spec.md §5.1）：无工具（registry nil）时循环体只走一轮，
+// 与 v1 原路径完全一致；有工具时按「判定纪律：只看 len(ToolCalls) > 0」迭代，
+// 上限 maxToolRounds 后 nudge + 摘工具逼出文本终答（finish_reason=max_iterations）。
 func (s *chatService) runTurn(ctx context.Context, req chatapi.SendMessageReq, emit func(chatapi.StreamEvent) error) (*chatapi.AssistantReplySchema, error) {
 	setup, err := s.setupConvAgent(ctx, req.ConversationID)
 	if err != nil {
@@ -106,88 +114,114 @@ func (s *chatService) runTurn(ctx context.Context, req chatapi.SendMessageReq, e
 	}
 
 	// system prompt 现拼（不落库）：agent 原提示词 + 可选 RAG 检索注入（IO 在 buildSystemPrompt 内）。
+	// RAG 注入与工具互不干扰：一个改 system prompt，一个进 CallOptions.Tools，同一轮可同时生效。
 	sysPrompt, citations := s.buildSystemPrompt(ctx, setup.agent, req.Content)
 	if citations == nil {
 		citations = []chatapi.Citation{} // 空引用也返 []（reply 契约：列表字段不返 null）
 	}
+	reg := s.loadToolRegistry(ctx, setup.agent) // nil = 无工具：不查 mcp，原路径语义
 	msgs := assembleMessages(sysPrompt, history, req.Content)
-	start := time.Now()
-	stream, err := setup.client.Stream(ctx, msgs, callOptions(setup.agent))
-	if err != nil {
-		// 未触达上游（抢槽 / 熔断秒拒 / 工厂失败）不落 executions：error_class 七类 CHECK 无对应值，
-		// 且无上游交互可记；503 侧的结构化日志足够排障。
-		if isPreAttemptErr(err) {
-			return nil, translateLLMError(err)
-		}
-		s.recordExecution(ctx, setup, msgs, start, "", chatapi.Usage{}, "", err)
-		return nil, translateLLMError(err)
-	}
-
-	// citations 事件在流建立后、首个 delta 前发（emit 之前的失败以 error 返回——此时 handler
-	// 尚未写 200 头，还能回标准错误信封）；空引用不发。
-	if emit != nil && len(citations) > 0 {
-		if eerr := emit(chatapi.CitationsEvent(citations)); eerr != nil {
-			return nil, nil // 前端已断连：与 delta 同款处理，静默收尾（user 消息已落库无碍）
-		}
+	opts := callOptions(setup.agent)
+	if reg != nil {
+		opts.Tools = reg.Defs()
 	}
 
 	var (
-		content      strings.Builder
-		usage        chatapi.Usage
-		finishReason string
+		totalUsage   chatapi.Usage // 整轮累计（done / reply 用）；executions 每轮各记各的
+		replyContent string        // 终答，或失败轮的部分内容（已生成内容一律落库）
+		replyFinish  string
+		answered     bool // 是否经流式轮收尾（终答 / 部分）：决定落不落 assistant 行
 		consumeErr   error
 		clientGone   bool
 	)
-	for {
-		m, rerr := stream.Recv()
-		if rerr == io.EOF {
+	for round := 0; ; round++ {
+		if round > 0 && ctx.Err() != nil {
+			clientGone = true // 断连不空转：不再发起下一轮（已生成内容已在中间行里）
 			break
 		}
-		if rerr != nil {
-			consumeErr = rerr // 流中失败（首 token 后不重试，见 llm 重试纪律）
+		atLimit := round >= maxToolRounds
+		roundMsgs, roundOpts := msgs, opts
+		if atLimit {
+			// 上限触发：追加 nudge（瞬态不落库）+ 摘掉工具逼出文本终答
+			roundMsgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: maxToolRoundsNudge})
+			roundOpts = callOptions(setup.agent)
+		}
+		start := time.Now()
+		stream, err := setup.client.Stream(ctx, roundMsgs, roundOpts)
+		if err != nil {
+			// 未触达上游（抢槽 / 熔断秒拒 / 工厂失败）不落 executions：error_class 七类 CHECK 无对应值，
+			// 且无上游交互可记；503 侧的结构化日志足够排障。
+			if !isPreAttemptErr(err) {
+				s.recordExecution(ctx, setup, roundMsgs, start, "", chatapi.Usage{}, "", err)
+			}
+			if round == 0 {
+				return nil, translateLLMError(err) // 首 emit 前：标准错误信封（v1 原路径）
+			}
+			consumeErr = err // 轮次 ≥1：SSE 200 已提交，收尾走 error 事件
 			break
 		}
-		if m == nil {
-			continue // eino 约定错误帧返回 nil，正常流不该出现；防御跳过
-		}
-		if m.Content != "" {
-			content.WriteString(m.Content)
-			if emit != nil {
-				if eerr := emit(chatapi.DeltaEvent(m.Content)); eerr != nil {
-					clientGone = true // 前端断连：取消上游（省 token）、保留已生成内容
-					break
-				}
+
+		// citations 事件在流建立后、首个 delta 前发（仅首轮；emit 之前的失败以 error 返回——
+		// 此时 handler 尚未写 200 头，还能回标准错误信封）；空引用不发。
+		if round == 0 && emit != nil && len(citations) > 0 {
+			if eerr := emit(chatapi.CitationsEvent(citations)); eerr != nil {
+				_ = stream.Close() // 取消上游（省 token）+ 释放槽位
+				return nil, nil    // 前端已断连：静默收尾（user 消息已落库无碍）
 			}
 		}
-		if m.ResponseMeta != nil { // usage / finish 通常在尾帧
-			if u := m.ResponseMeta.Usage; u != nil {
-				usage = chatapi.Usage{Input: int64(u.PromptTokens), Output: int64(u.CompletionTokens)}
+
+		res, rerr, gone := consumeStream(stream, emit)
+		_ = stream.Close() // 幂等：EOF 已自动收尾，错误 / 断连路径显式释放槽位
+		totalUsage.Input += res.usage.Input
+		totalUsage.Output += res.usage.Output
+		if rerr != nil || gone {
+			callErr := rerr
+			if callErr == nil {
+				callErr = errClientGone
 			}
-			if m.ResponseMeta.FinishReason != "" {
-				finishReason = m.ResponseMeta.FinishReason
+			s.recordExecution(ctx, setup, roundMsgs, start, res.content, res.usage, res.finishReason, callErr)
+			replyContent, answered = res.content, true // 部分内容照常落库
+			consumeErr, clientGone = rerr, gone
+			break
+		}
+		s.recordExecution(ctx, setup, roundMsgs, start, res.content, res.usage, res.finishReason, nil)
+
+		// 判定纪律：只看 ToolCalls（finish_reason 各厂字符串不同，仅遥测）。atLimit / reg==nil
+		// 兜底：无工具可用仍幻觉出调用（理论不可达）按终答收尾，不再进循环。
+		if len(res.toolCalls) == 0 || atLimit || reg == nil {
+			replyContent, replyFinish, answered = res.content, res.finishReason, true
+			if atLimit {
+				replyFinish = finishReasonMaxIterations
 			}
+			break
+		}
+
+		// ---- 工具轮：中间行落库（两模式一致）+ 事件（仅流式）+ 结果喂回下一轮 ----
+		appendMsgs, gone := s.runToolRound(ctx, setup.conv.ID, reg, res, emit)
+		msgs = append(msgs, appendMsgs...)
+		if gone {
+			clientGone = true // 断连：静默收尾（中间行已落库，不再进下一轮）
+			break
 		}
 	}
-	_ = stream.Close() // 幂等：EOF 已自动收尾，错误 / 断连路径显式释放槽位
 
-	reply := &chatapi.AssistantReplySchema{Content: content.String(), Usage: usage, FinishReason: finishReason, Citations: citations}
+	reply := &chatapi.AssistantReplySchema{Content: replyContent, Usage: totalUsage, FinishReason: replyFinish, Citations: citations}
 
-	// ---- 收尾（顺序：assistant 落库 → touch → executions → done / error 事件）----
+	// ---- 收尾（顺序：assistant 落库 → touch → done / error 事件）----
 
-	// 已生成内容一律落库（含失败 / 断连的部分内容）：下轮上下文完整是硬需求
-	if assistant := s.persistAssistant(ctx, setup.conv.ID, reply.Content, citations); assistant != nil {
-		reply.MessageID = strconv.FormatUint(assistant.ID, 10)
+	// 已生成内容一律落库（含失败 / 断连的部分内容）：下轮上下文完整是硬需求。
+	// 工具轮中断（断连在工具阶段 / 轮次 ≥1 建流失败）answered=false：本轮终答不存在，
+	// 中间行已落库即完整上下文，不追加空 assistant 行。
+	if answered {
+		if assistant := s.persistAssistant(ctx, setup.conv.ID, reply.Content, citations); assistant != nil {
+			reply.MessageID = strconv.FormatUint(assistant.ID, 10)
+		}
 	}
 	if terr := s.store.TouchConversation(ctx, setup.conv.ID); terr != nil {
 		slog.WarnContext(ctx, "chat: touch conversation failed", "conversation_id", setup.conv.ID, "err", terr)
 	}
 
 	if consumeErr != nil || clientGone {
-		callErr := consumeErr
-		if callErr == nil {
-			callErr = errClientGone
-		}
-		s.recordExecution(ctx, setup, msgs, start, reply.Content, usage, finishReason, callErr)
 		if clientGone || errors.Is(consumeErr, context.Canceled) {
 			return nil, nil // 客户端已断：ErrorEvent 也写不出去，静默收尾
 		}
@@ -198,11 +232,51 @@ func (s *chatService) runTurn(ctx context.Context, req chatapi.SendMessageReq, e
 		return nil, translateLLMError(consumeErr) // 一次输出模式：标准错误信封
 	}
 
-	s.recordExecution(ctx, setup, msgs, start, reply.Content, usage, finishReason, nil)
 	if emit != nil {
 		_ = emit(chatapi.DoneEvent(reply.MessageID, reply.Usage, reply.FinishReason))
 	}
 	return reply, nil
+}
+
+// consumeResult 一轮流式消费的聚合产出（Stream.Final）：content 为聚合全文，
+// 错误 / 断连后为已收部分。
+type consumeResult struct {
+	content      string
+	usage        chatapi.Usage
+	finishReason string
+	toolCalls    []tool.ToolCall
+}
+
+// consumeStream 收流：delta 逐个 emit（emit 失败 = 前端断连，停止收流）；终态
+//（content / usage / finish / toolCalls）从 Stream.Final 聚合——工具调用增量在 llm 内部
+// 合并，不外露。返回（产出, 流中错误, 前端断连）。
+func consumeStream(stream *llm.Stream, emit func(chatapi.StreamEvent) error) (res consumeResult, consumeErr error, clientGone bool) {
+	for {
+		delta, rerr := stream.Recv()
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			consumeErr = rerr // 流中失败（首 token 后不重试，见 llm 重试纪律）
+			break
+		}
+		if delta == "" {
+			continue // 空帧（纯工具调用增量等）：不 emit
+		}
+		if emit != nil {
+			if eerr := emit(chatapi.DeltaEvent(delta)); eerr != nil {
+				clientGone = true // 前端断连：取消上游（省 token）、保留已生成内容
+				break
+			}
+		}
+	}
+	if f, ferr := stream.Final(); ferr == nil {
+		res.content = f.Content
+		res.usage = chatapi.Usage{Input: f.Usage.Input, Output: f.Usage.Output}
+		res.finishReason = f.FinishReason
+		res.toolCalls = f.ToolCalls
+	}
+	return res, consumeErr, clientGone
 }
 
 // setupConvAgent 装配前半：会话属主校验 → agent（存在且启用）。全部通过后才落 user 消息；
@@ -251,7 +325,7 @@ func (s *chatService) setupLLMClient(ctx context.Context, setup *llmSetup) error
 
 // runWorkflowTurn 管道路径（spec 07 §4.1 伪代码直译）：绑定 agent 的消息确定性先过
 // 工作流，终稿整段即本轮 assistant 回复。替代语义（O2）——buildSystemPrompt / RAG 检索 /
-// 模型循环不进入；全部失败发生在首次 emit 之前（O4），两模式统一标准错误信封。
+// 模型循环 / 工具循环不进入；全部失败发生在首次 emit 之前（O4），两模式统一标准错误信封。
 func (s *chatService) runWorkflowTurn(ctx context.Context, req chatapi.SendMessageReq, setup *llmSetup, emit func(chatapi.StreamEvent) error) (*chatapi.AssistantReplySchema, error) {
 	wfID, err := strconv.ParseUint(*setup.agent.WorkflowID, 10, 64)
 	if err != nil {
@@ -348,15 +422,15 @@ func truncateTurns(ms []Message, maxTurns int) []Message {
 // assembleMessages 组装发给 LLM 的消息序列：[system（已增强——agent 原提示词 + 可选
 // RAG 注入资料段）] + 截断后历史 + 当前用户消息。system prompt 不落库（每次现拼，
 // 改提示词 / 换 KB 绑定下一轮立即生效——data_flow 决策）。
-func assembleMessages(systemPrompt string, history []Message, content string) []*schema.Message {
-	msgs := make([]*schema.Message, 0, len(history)+2)
+func assembleMessages(systemPrompt string, history []Message, content string) []llm.Message {
+	msgs := make([]llm.Message, 0, len(history)+2)
 	if systemPrompt != "" {
-		msgs = append(msgs, schema.SystemMessage(systemPrompt))
+		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: systemPrompt})
 	}
 	for i := range history {
-		msgs = append(msgs, toEinoMessage(&history[i]))
+		msgs = append(msgs, toLLMMessage(&history[i]))
 	}
-	msgs = append(msgs, schema.UserMessage(content))
+	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: content})
 	return msgs
 }
 
@@ -464,28 +538,28 @@ func augmentSystemPrompt(base string, chunks []ragapi.RetrievedChunk) string {
 	return b.String()
 }
 
-// toEinoMessage 单条历史消息 → eino 消息。v1 历史只有 user / assistant；tool 中间行与
-// assistant.tool_calls 是工具循环批次的落库形态，此处一并转换（灰度后老会话可直接重放）。
-func toEinoMessage(m *Message) *schema.Message {
+// toLLMMessage 单条历史消息 → 统一消息模型。v1 历史只有 user / assistant；工具循环批起
+// assistant.tool_calls 中间行与 tool 行一并转换（messages 表已有 role 'tool'，老会话可直接重放）。
+// tool 行的调用引用存 ToolCalls[0]（{id, tool}）——回填 ToolCallID / ToolName
+//（部分供应商要求 tool 消息带工具名，见 platform/llm convert）。
+func toLLMMessage(m *Message) llm.Message {
 	switch m.Role {
 	case chatapi.RoleUser:
-		return schema.UserMessage(m.Content)
+		return llm.Message{Role: llm.RoleUser, Content: m.Content}
 	case chatapi.RoleTool:
-		return schema.ToolMessage(m.Content, firstToolCallID(m.ToolCalls))
+		id, name := toolRowRef(m.ToolCalls)
+		return llm.Message{Role: llm.RoleTool, Content: m.Content, ToolCallID: id, ToolName: name}
 	default: // assistant（未知 role 按 assistant 兜底，DB CHECK 之外不设防）
-		am := &schema.Message{Role: schema.Assistant, Content: m.Content}
+		am := llm.Message{Role: llm.RoleAssistant, Content: m.Content}
 		if len(m.ToolCalls) > 0 {
-			am.ToolCalls = make([]schema.ToolCall, 0, len(m.ToolCalls))
+			am.ToolCalls = make([]tool.ToolCall, 0, len(m.ToolCalls))
 			for _, tc := range m.ToolCalls {
 				id, _ := tc["id"].(string)
-				tool, _ := tc["tool"].(string)
-				am.ToolCalls = append(am.ToolCalls, schema.ToolCall{
-					ID:   id,
-					Type: "function",
-					Function: schema.FunctionCall{
-						Name:      tool,
-						Arguments: marshalArgs(tc["args"]),
-					},
+				name, _ := tc["tool"].(string)
+				am.ToolCalls = append(am.ToolCalls, tool.ToolCall{
+					ID:        id,
+					Name:      name,
+					Arguments: marshalArgs(tc["args"]),
 				})
 			}
 		}
@@ -493,31 +567,36 @@ func toEinoMessage(m *Message) *schema.Message {
 	}
 }
 
-// firstToolCallID tool 角色行的调用标识存在 ToolCalls[0]["id"]（messages 表无独立列，见 db 设计）。
-func firstToolCallID(toolCalls []map[string]any) string {
+// toolRowRef tool 角色行的调用引用存在 ToolCalls[0]["id"] / ["tool"]（messages 表无独立
+// 列，见 db 设计）：id 是回放锚点（对应 assistant.tool_calls 的调用 id），tool 名供
+// 需要工具名的供应商回填。
+func toolRowRef(toolCalls []map[string]any) (id, name string) {
 	if len(toolCalls) == 0 {
-		return ""
+		return "", ""
 	}
-	id, _ := toolCalls[0]["id"].(string)
-	return id
+	id, _ = toolCalls[0]["id"].(string)
+	name, _ = toolCalls[0]["tool"].(string)
+	return id, name
 }
 
-// marshalArgs eino FunctionCall.Arguments 是 JSON 字符串；空 / 非法值返 ""。
-func marshalArgs(v any) string {
+// marshalArgs 历史 tool_calls 的 args（jsonb 反序列化的 map）→ json.RawMessage；
+// 空 / 非法值返 nil（无参形态）。
+func marshalArgs(v any) json.RawMessage {
 	m, ok := v.(map[string]any)
 	if !ok || len(m) == 0 {
-		return ""
+		return nil
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
-		return ""
+		return nil
 	}
-	return string(b)
+	return b
 }
 
 // callOptions agent 配置 → LLM 调用时选项。Temperature 恒传（agent 有 DB DEFAULT 0.7，
 // 0 是合法的「严谨模式」值，不能用零值判断「未设置」）；MaxOutputTokens nil = 跟随模型默认；
-// TopP agent 无此配置不传。Tools 工具循环批次注入。
+// TopP agent 无此配置不传。Tools 不在此设（registry 有无由 runTurn 决定；上限轮的
+//「摘掉工具」靠重新调用本函数实现）。
 func callOptions(a *agentapi.AgentDetailSchema) *llm.CallOptions {
 	temp := float32(a.Temperature)
 	opts := &llm.CallOptions{Temperature: &temp}
@@ -541,9 +620,9 @@ func (s *chatService) persistAssistant(ctx context.Context, conversationID uint6
 // errClientGone emit 失败（前端断连）的内部标记，进 executions 时近似 Network。
 var errClientGone = errors.New("chat: client gone")
 
-// recordExecution 写运行日志（每次 LLM 调用一行，含失败——排障唯一线索）；
-// 失败只 WARN：executions 不是业务依赖，落库故障不应打断对话。
-func (s *chatService) recordExecution(ctx context.Context, setup *llmSetup, msgs []*schema.Message, start time.Time, output string, usage chatapi.Usage, finishReason string, callErr error) {
+// recordExecution 写运行日志（每次 LLM 调用一行——工具循环每轮各记各的，含失败——
+// 排障唯一线索）；失败只 WARN：executions 不是业务依赖，落库故障不应打断对话。
+func (s *chatService) recordExecution(ctx context.Context, setup *llmSetup, msgs []llm.Message, start time.Time, output string, usage chatapi.Usage, finishReason string, callErr error) {
 	e := &logging.Execution{
 		ConversationID:   &setup.conv.ID,
 		ModelID:          &setup.modelNum,
@@ -658,7 +737,7 @@ func makeTitle(content string) string {
 
 // summarizeMessages LLM 请求侧快照（executions.input）：[{role, content}]——排障需要
 // 真实输入；大文本依赖 TOAST，查询侧禁 SELECT *（数据库规范《大表处理策略》）。
-func summarizeMessages(msgs []*schema.Message) []map[string]any {
+func summarizeMessages(msgs []llm.Message) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, map[string]any{"role": string(m.Role), "content": m.Content})

@@ -111,6 +111,7 @@ internal/
     ├── page/                 # 统一分页：偏移分页（配置表）+ 游标分页（大列表 keyset，禁 OFFSET）
     ├── timex/                # 统一时间序列化：纯日期 Date（yyyy-MM-dd）；datetime 用 time.Time 默认 RFC 3339
     ├── schema/               # 各模块 api 契约共用响应基类 BaseSchema（id 字符串化 + 双时间戳；纯标准库，与 db mixin 对称）
+    ├── tool/                 # 全局统一工具契约：ToolDef/ToolCall/ToolResult/Source/Registry（纯标准库；MCP 与未来内置工具同一模型，见《统一工具与消息模型》）
     └── cache/                # 配置类缓存管理器：按名 TTL + 写时删 key（Cache-Aside）；全仓库 key 经 redisx.Key 加 hify: 前缀
 web/                          # Vue 3 前端，独立构建（目录结构、设计系统与约定见 web/README.md）
 deploy/                        # Docker Compose 部署：前后端 Dockerfile、nginx 配置、compose、备份脚本（用法见 deploy/README.md）
@@ -215,6 +216,84 @@ func (s *agentService) Create(ctx context.Context, req providerapi.CreateReq) er
 | handler 绕过本模块 api 接口直调本模块 service 具体类型 | handler 字段同样持有本模块 `api` 接口 |
 | store 操作他模块的表 / JOIN 他模块的表 | 每个 store 只操作本模块 model 声明的表；跨模块数据在 service 分次查询后组装 |
 | `*gin.Context` 传入 api 接口 / service | 传 `ctx context.Context` |
+
+### 统一工具与消息模型（platform/tool + platform/llm 公开面）
+
+业务编排层（chat ReAct 循环、workflow）**不依赖任何三方 LLM/MCP 库的类型**：eino（`cloudwego/eino`）收敛在 `platform/llm` 内部、go-sdk 收敛在 `mcp/service` 内部；业务层只见下面两套 Hify 自己的模型。设计定稿见 [docs/changelog/mcp/chat_tool_loop_spec.md](docs/changelog/mcp/chat_tool_loop_spec.md)。
+
+**统一工具契约（`internal/platform/tool`，全局——MCP 工具与未来内置工具同一模型）：**
+
+```go
+// ToolDef 发给 LLM 的工具定义；Name 是调用名，单次调用清单内唯一。
+type ToolDef struct {
+    Name        string          // MCP 侧派生 s{serverID}__{toolName}（sanitize [a-zA-Z0-9_-]，≤64）
+    Description string
+    InputSchema json.RawMessage // 参数 JSON Schema；顶层须为对象，空为 {}
+}
+
+// ToolCall LLM 发起的调用请求（模型输出，vendor 无关）。
+type ToolCall struct {
+    ID        string          // LLM 生成的调用 id；tool 结果消息回填的锚点
+    Name      string          // = ToolDef.Name
+    Arguments json.RawMessage // 空 / null / {} = 无参
+}
+
+// ToolResult 工具执行结果（回喂 LLM 的观察）。失败不走 error 中断对话——
+// IsError=true 且错误文本在 Content：错误即上下文，LLM 下一轮自纠。
+type ToolResult struct {
+    CallID  string
+    Name    string
+    Content string // 归一文本（MCP：TextContent 多条 "\n" 拼接）
+    IsError bool
+}
+
+// Source 工具来源：供出一组工具并执行调用。实现：mcp/service（MCP，经
+// mcpapi.ToolSourceFor 返回）；未来内置工具直接实现本接口，chat/workflow 零改动。
+type Source interface {
+    Tools(ctx context.Context) ([]ToolDef, error)   // 空切片 = 无工具；惰性加载
+    Invoke(ctx context.Context, call ToolCall) ToolResult // 恒返回结果：未知名/失败也是 IsError
+}
+
+// Registry 聚合各来源：构建时校验（InputSchema 合法 JSON 顶层对象、调用名唯一），
+// Invoke 按名路由。chat 每轮对话构建一次；构建失败调用方降级为无工具（WARN）。
+func NewRegistry(ctx context.Context, sources ...Source) (*Registry, error)
+```
+
+**统一消息模型（`platform/llm` 公开面；eino `schema.Message` 止步于该包内部）：**
+
+```go
+type Message struct {           // chat / workflow 组装上下文的唯一消息形态
+    Role       Role             // system / user / assistant / tool
+    Content    string
+    ToolCalls  []tool.ToolCall  // 仅 assistant 携带（工具调用请求）
+    ToolCallID string           // 仅 tool 消息：对应调用的 id
+    ToolName   string           // 仅 tool 消息：工具名（部分供应商要求回填）
+}
+
+type Usage struct { Input, Output int64 }
+
+type Final struct {             // 一次生成终态：Stream.Final()（chunk 聚合）与 Generate 返回同构
+    Content      string
+    Usage        Usage
+    FinishReason string         // 供应商原样透传（stop/tool_calls/STOP/…），仅遥测
+    ToolCalls    []tool.ToolCall
+}
+// Stream.Recv() (string, error)：内容 delta；工具调用增量由 llm 内部聚合进 Final。
+// CallOptions.Tools 是 []tool.ToolDef（不是 eino ToolInfo）；转换惰性缓存，
+// 坏 schema 在抢槽/熔断之前失败（不占槽、不进熔断计数）。
+```
+
+**纪律（grep 可验证）：**
+
+- `cloudwego/eino` 只出现在 `internal/platform/llm/`：`grep -rn 'cloudwego/eino' internal/ | grep -v platform/llm` 须为空（test 除外）；
+- `modelcontextprotocol/go-sdk` 只出现在 `internal/mcp/service/`；
+- 工具轮判定**只看 `len(ToolCalls) > 0`**，禁止 switch finish_reason 字符串（各厂字符串不同，vendor 差异留在 adapter）；
+| 禁止 | 正确做法 |
+|---|---|
+| 业务模块 import eino / go-sdk 任何包 | eino 只在 `platform/llm`、go-sdk 只在 `mcp/service` |
+| 各模块自定义「发给 LLM 的工具」结构再自行转换 | 全仓只有 `tool.ToolDef`；MCP→ToolDef 转换在 mcp/service，ToolDef→eino 转换在 platform/llm |
+| 工具调用失败抛 error 中断对话 | `ToolResult{IsError:true}` 喂回 LLM（错误即上下文） |
+| 流式消费时 switch finish_reason 判工具轮 | 只看 `len(Final.ToolCalls) > 0` |
 
 ### 模块内部结构（四层子包）
 

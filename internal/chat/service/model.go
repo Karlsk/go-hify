@@ -24,7 +24,7 @@ type Message struct {
 	ConversationID    uint64             `gorm:"not null"`
 	Role              string             `gorm:"not null"` // user / assistant / tool（CHECK 由迁移持有）
 	Content           string             `gorm:"not null"`
-	ToolCalls         []map[string]any   `gorm:"type:jsonb;serializer:json"` // assistant 中间行专用：[{id, tool, args}]；v1 无工具循环恒 '[]'
+	ToolCalls         []map[string]any   `gorm:"type:jsonb;serializer:json"` // 工具调用引用（工具循环批起启用）：assistant 中间行存本发调用清单 [{id, tool, args}]；tool 行存 ToolCalls[0]={id, tool} 作重放锚点（回填 ToolCallID/ToolName）；无工具消息恒 '[]'
 	Citations         []chatapi.Citation `gorm:"type:jsonb;serializer:json"` // assistant 行 RAG 引用来源（buildSystemPrompt 检索命中）；user/tool 行恒 '[]'
 }
 

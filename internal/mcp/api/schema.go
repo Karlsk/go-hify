@@ -237,3 +237,8 @@ type ListToolsReq struct {
 type GetToolsByIDsReq struct {
 	IDs []uint64
 }
+
+// ToolSourceReq 统一工具来源构造请求（chat 工具循环消费，chat_tool_loop_spec.md §4）。
+type ToolSourceReq struct {
+	ToolIDs []uint64 // agent 绑定的 mcp_tools.id（存在性已由 agent 模块校验）
+}

@@ -7,6 +7,8 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/Karlsk/go-hify/internal/platform/tool"
 )
 
 // factory 测试：四家 adapter 离线构造（不发网络请求）+ unknown kind 哨兵 + Streamer 适配透传。
@@ -57,7 +59,11 @@ func TestChatModelStreamer_PassesOptions(t *testing.T) {
 	s := chatModelStreamer{m: fake}
 	temp := float32(0.7)
 	topP := float32(0.9)
-	tools := []*schema.ToolInfo{{Name: "search"}}
+	tools := []tool.ToolDef{{
+		Name:        "search",
+		Description: "搜索",
+		InputSchema: []byte(`{"type":"object","properties":{"q":{"type":"string"}}}`),
+	}}
 	opts := &CallOptions{Tools: tools, Temperature: &temp, TopP: &topP, MaxTokens: 1024}
 
 	if _, err := s.Stream(context.Background(), nil, opts); err != nil {

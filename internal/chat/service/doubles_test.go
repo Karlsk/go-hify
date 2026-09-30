@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/authctx"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
+	"github.com/Karlsk/go-hify/internal/platform/tool"
+	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
@@ -437,6 +440,73 @@ func tailChunk(prompt, completion int, finish string) *schema.Message {
 	}
 }
 
+// toolCallChunk 工具调用决策帧（args 为 JSON 字符串；经 llm.Final 聚合为 ToolCalls）。
+func toolCallChunk(id, name, args string) *schema.Message {
+	return &schema.Message{
+		Role:      schema.Assistant,
+		ToolCalls: []schema.ToolCall{{ID: id, Type: "function", Function: schema.FunctionCall{Name: name, Arguments: args}}},
+	}
+}
+
+// ---- 工具来源 stub（工具循环测试） ----
+
+// stubToolSources toolSourceFactory stub：固定返回 source，记录调用与最近请求
+//（断言「按 agent 绑定 id 子集构造」）。
+type stubToolSources struct {
+	source  tool.Source
+	err     error // Tools() 报错的来源（Registry 构建失败降级测试用）
+
+	calls   int
+	lastReq mcpapi.ToolSourceReq
+}
+
+func (s *stubToolSources) ToolSourceFor(req mcpapi.ToolSourceReq) tool.Source {
+	s.calls++
+	s.lastReq = req
+	if s.source == nil && s.err != nil {
+		return errToolSource{err: s.err}
+	}
+	return s.source
+}
+
+// errToolSource 恒定报错的工具来源（Registry 构建失败路径）。
+type errToolSource struct{ err error }
+
+func (e errToolSource) Tools(context.Context) ([]tool.ToolDef, error) { return nil, e.err }
+func (e errToolSource) Invoke(_ context.Context, _ tool.ToolCall) tool.ToolResult {
+	return tool.ToolResult{IsError: true, Content: "unreachable"}
+}
+
+// stubToolSource 可编程单一工具来源：defs + invoke 回调。
+type stubToolSource struct {
+	defs   []tool.ToolDef
+	invoke func(call tool.ToolCall) tool.ToolResult
+}
+
+func (s *stubToolSource) Tools(context.Context) ([]tool.ToolDef, error) { return s.defs, nil }
+func (s *stubToolSource) Invoke(_ context.Context, call tool.ToolCall) tool.ToolResult {
+	if s.invoke == nil {
+		return tool.ToolResult{CallID: call.ID, Name: call.Name, Content: "ok"}
+	}
+	return s.invoke(call)
+}
+
+// testToolDef 合法工具定义（InputSchema 可过 eino 转换）。
+func testToolDef(name string) tool.ToolDef {
+	return tool.ToolDef{
+		Name:        name,
+		Description: "测试工具 " + name,
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+	}
+}
+
+// toolAgent 绑定工具的 agent（其余字段同 testAgent）。
+func toolAgent(toolIDs ...string) *agentapi.AgentDetailSchema {
+	a := testAgent(true)
+	a.ToolIDs = toolIDs
+	return a
+}
+
 // ---- 其他公共 helper ----
 
 func userCtx() context.Context {
@@ -468,6 +538,13 @@ func newTestService(t *testing.T, script func(call int) (*schema.StreamReader[*s
 // newServiceWithAgent 指定 agent 形态装配（停用 / 无提示词 / 自定义轮数等场景）。
 func newServiceWithAgent(t *testing.T, agent *agentapi.AgentDetailSchema, script func(call int) (*schema.StreamReader[*schema.Message], error)) *chatServiceForTest {
 	t.Helper()
+	return newServiceWithTools(t, agent, script, nil)
+}
+
+// newServiceWithTools 指定工具来源工厂装配（工具循环测试）；nil = 未注入（ToolIDs 空
+// 时不触碰 / 非空时降级无工具——两条降级路径各自的测试用）。
+func newServiceWithTools(t *testing.T, agent *agentapi.AgentDetailSchema, script func(call int) (*schema.StreamReader[*schema.Message], error), tools toolSourceFactory) *chatServiceForTest {
+	t.Helper()
 	st := newMemStore()
 	fs := &captureStreamer{script: script}
 	factory := &stubClientFactory{client: llm.NewClient("test", fastProfile(), fs)}
@@ -481,19 +558,21 @@ func newServiceWithAgent(t *testing.T, agent *agentapi.AgentDetailSchema, script
 		execs,
 		rags,
 		workflows,
+		tools,
 	)
-	return &chatServiceForTest{svc: svc.(*chatService), store: st, streamer: fs, factory: factory, execs: execs, rags: rags, workflows: workflows}
+	return &chatServiceForTest{svc: svc.(*chatService), store: st, streamer: fs, factory: factory, execs: execs, rags: rags, workflows: workflows, toolSources: tools}
 }
 
 // chatServiceForTest 聚合句柄，方便断言内部替身状态。
 type chatServiceForTest struct {
-	svc       *chatService
-	store     *memStore
-	streamer  *captureStreamer
-	factory   *stubClientFactory
-	execs     *execRecorder
-	rags      *stubRags
-	workflows *stubWorkflows
+	svc          *chatService
+	store        *memStore
+	streamer     *captureStreamer
+	factory      *stubClientFactory
+	execs        *execRecorder
+	rags         *stubRags
+	workflows    *stubWorkflows
+	toolSources  toolSourceFactory
 }
 
 // roles 把消息序列压成 "role:content" 串，断言上下文组装最直观。

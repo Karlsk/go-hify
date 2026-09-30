@@ -43,12 +43,12 @@ func TestGenerateSuccessReleasesSlot(t *testing.T) {
 	}))
 
 	for i := 0; i < 2; i++ { // 第二次能立即成功 = 槽位已随返回释放
-		m, err := c.Generate(context.Background(), nil, nil)
+		res, err := c.Generate(context.Background(), nil, nil)
 		if err != nil {
 			t.Fatalf("generate #%d: %v", i+1, err)
 		}
-		if m.Content != "answer" {
-			t.Fatalf("content = %q, want answer", m.Content)
+		if res.Content != "answer" {
+			t.Fatalf("content = %q, want answer", res.Content)
 		}
 	}
 }
@@ -63,12 +63,12 @@ func TestGenerateRetriesThenSucceeds(t *testing.T) {
 	})
 	c := NewClient("p", p, fs)
 
-	m, err := c.Generate(context.Background(), nil, nil)
+	res, err := c.Generate(context.Background(), nil, nil)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	if m.Content != "ok" || fs.calls.Load() != 3 {
-		t.Fatalf("content=%q calls=%d, want ok/3（2 次重试）", m.Content, fs.calls.Load())
+	if res.Content != "ok" || fs.calls.Load() != 3 {
+		t.Fatalf("content=%q calls=%d, want ok/3（2 次重试）", res.Content, fs.calls.Load())
 	}
 }
 

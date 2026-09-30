@@ -13,9 +13,10 @@ import (
 	"github.com/sony/gobreaker"
 )
 
-// Streamer 上游适配器的窄接口（Go 小接口惯例）。eino 各家 adapter 实现；
-// Stream 返回的 StreamReader 生命周期与传入 ctx 绑定，ctx 取消即打断 Recv。
-// opts 可为 nil（空选项）；工具与生成参数按调用传入（eino 调用时选项）。
+// Streamer 上游适配器的窄接口（Go 小接口惯例，**内部接口**——eino 类型只在本包
+// 与其实现间流动）。eino 各家 adapter 实现；Stream 返回的 StreamReader 生命周期
+// 与传入 ctx 绑定，ctx 取消即打断 Recv。opts 可为 nil（空选项）；工具与生成参数
+// 按调用传入（eino 调用时选项；opts.einoOptions 已由 Client 入口校验并缓存）。
 type Streamer interface {
 	Stream(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*schema.StreamReader[*schema.Message], error)
 	Generate(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*schema.Message, error)
@@ -67,9 +68,17 @@ type generateResult struct {
 	err error
 }
 
-// Stream 对外入口：返回受保护的流；错误已被分类（调用方用 Classify / errors.Is 判定）。
-// opts 可为 nil（空选项）。
-func (c *Client) Stream(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*Stream, error) {
+// Stream 对外入口（公开面是 Hify 类型：llm.Message 进、内容 delta 出；eino 转换
+// 在本边界一次完成）：返回受保护的流；错误已被分类（调用方用 Classify / errors.Is 判定）。
+// opts 可为 nil（空选项）。工具 schema 校验在抢槽 / 熔断之前——坏 ToolDef 不占槽位、
+// 不进熔断计数。
+func (c *Client) Stream(ctx context.Context, msgs []Message, opts *CallOptions) (*Stream, error) {
+	// 0. 惰性转换 + 校验（转换结果缓存在 opts 内，下游 Streamer 直接复用）
+	if _, err := opts.einoOptions(); err != nil {
+		return nil, fmt.Errorf("validate call options: %w", err)
+	}
+	emsgs := toEinoMessages(msgs)
+
 	// 1. 抢槽（5s fail-fast，不无限排队）
 	release, err := c.g.bh.acquire(ctx)
 	if err != nil {
@@ -81,7 +90,7 @@ func (c *Client) Stream(ctx context.Context, msgs []*schema.Message, opts *CallO
 
 	// 3. 过熔断器：整个重试循环在 Execute 内（重试过程中的失败不逐次计数）
 	res, cbErr := c.g.cb.Execute(func() (any, error) {
-		s, err := c.doStream(overallCtx, msgs, opts)
+		s, err := c.doStream(overallCtx, emsgs, opts)
 		if err == nil {
 			return streamResult{stream: s}, nil
 		}
@@ -112,6 +121,7 @@ func (c *Client) Stream(ctx context.Context, msgs []*schema.Message, opts *CallO
 }
 
 // doStream 重试循环（仅首 token 前）。每次尝试前检查 ctx：客户端断连/overall 到期不再重试。
+// msgs 是已转换的 eino 消息（Client.Stream 边界处一次转换）。
 func (c *Client) doStream(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*Stream, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.profile.MaxRetries; attempt++ {
@@ -167,11 +177,17 @@ func (c *Client) tryAttempt(ctx context.Context, msgs []*schema.Message, opts *C
 	}, nil
 }
 
-// Generate 对外入口：非流式单次生成（workflow LLM 节点等无 SSE 场景）。错误已分类。
-// 与 Stream 同一调用链（抢槽 → overall → 熔断 → 重试），但无 TTFT / idle 看门狗——
-// 非流式单次返回，overall 一层超时足够；usage 在返回消息的 ResponseMeta 里。
-// 槽位在函数返回时释放（无 wrapStream 概念）。opts 可为 nil。
-func (c *Client) Generate(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*schema.Message, error) {
+// Generate 对外入口（公开面 Hify 类型）：非流式单次生成（workflow LLM 节点等无 SSE
+// 场景），返回聚合终态 Final。错误已分类。与 Stream 同一调用链（抢槽 → overall →
+// 熔断 → 重试），但无 TTFT / idle 看门狗——非流式单次返回，overall 一层超时足够。
+// 槽位在函数返回时释放（无 wrapStream 概念）。opts 可为 nil（空选项）。
+func (c *Client) Generate(ctx context.Context, msgs []Message, opts *CallOptions) (*Final, error) {
+	// 0. 惰性转换 + 校验（同 Stream：坏 ToolDef 不进保护链）
+	if _, err := opts.einoOptions(); err != nil {
+		return nil, fmt.Errorf("validate call options: %w", err)
+	}
+	emsgs := toEinoMessages(msgs)
+
 	// 1. 抢槽（5s fail-fast，不无限排队）；非流式无流对象，返回即释放
 	release, err := c.g.bh.acquire(ctx)
 	if err != nil {
@@ -185,7 +201,7 @@ func (c *Client) Generate(ctx context.Context, msgs []*schema.Message, opts *Cal
 
 	// 3. 过熔断器（429 等不计熔断，同 Stream 的结果载体模式）
 	res, cbErr := c.g.cb.Execute(func() (any, error) {
-		m, err := c.doGenerate(overallCtx, msgs, opts)
+		m, err := c.doGenerate(overallCtx, emsgs, opts)
 		if err == nil {
 			return generateResult{msg: m}, nil
 		}
@@ -203,7 +219,11 @@ func (c *Client) Generate(ctx context.Context, msgs []*schema.Message, opts *Cal
 	}
 
 	r := res.(generateResult)
-	return r.msg, r.err
+	if r.err != nil {
+		return nil, r.err
+	}
+	out := einoFinal(r.msg)
+	return &out, nil
 }
 
 // doGenerate 非流式重试循环。非流式不存在"首 token 后"——调用失败即未产出任何 token，
@@ -273,35 +293,69 @@ func (c *Client) backoff(ctx context.Context, attempt int, err error) error {
 	}
 }
 
-// Stream 受保护的流式结果：Recv 读 chunk（首 chunk 已缓存）；Close 取消上游 + 释放槽位。
-// 流走到终点（EOF / 错误）自动清理一次——防调用方忘记 Close 泄漏槽位（16 槽耗尽 = 503 风暴）。
+// Stream 受保护的流式结果：Recv 读内容 delta（首 chunk 已缓存）；Close 取消上游 +
+// 释放槽位。流走到终点（EOF / 错误）自动清理一次——防调用方忘记 Close 泄漏槽位
+//（16 槽耗尽 = 503 风暴）。
+//
+// 聚合：Recv 顺手收集全部 eino chunk（含工具调用增量），Final() 一次性聚合为
+// llm.Final——content 拼接、tool_calls 按 Index 合并 / Arguments 拼接、usage 取
+// max、finish_reason 取最后非空（语义来自 eino ConcatMessages，复用其测试过的
+// 合并器，不自写）。消费方只拿 string delta，工具调用增量不外露。
 type Stream struct {
 	reader   *schema.StreamReader[*schema.Message]
 	first    *schema.Message
 	watchdog *idleWatchdog
 	ctx      context.Context         // attemptCtx：终点错误分类用（Cause 区分 TTFT/idle/断连）
 	cancel   context.CancelCauseFunc // 取消上游（客户端断连 → 省 token）
+	chunks   []*schema.Message       // 聚合素材（Recv 收集；nil 帧跳过不进聚合）
 	// 由 Client.Stream 在返回前注入：
 	release       func() // 槽位释放（幂等）
 	overallCancel context.CancelFunc
 	once          sync.Once
+	finalOnce     sync.Once
+	final         Final
+	finalErr      error
 }
 
-// Recv 返回下一个 chunk；io.EOF 表示流正常结束。
+// Recv 返回下一个内容 delta；io.EOF 表示流正常结束。
 // 首 chunk 后的错误同样经 classifyCtxErr 分类（idle 超时 → ClassTimeout），调用方统一用 Classify 判定。
-func (s *Stream) Recv() (*schema.Message, error) {
-	if s.first != nil {
-		m := s.first
-		s.first = nil
-		return m, nil
-	}
-	m, err := s.reader.Recv()
-	if err == nil {
+// eino 约定的 nil 帧（错误帧）在内部跳过，不外露。
+func (s *Stream) Recv() (string, error) {
+	for {
+		var m *schema.Message
+		if s.first != nil {
+			m, s.first = s.first, nil
+		} else {
+			var err error
+			m, err = s.reader.Recv()
+			if err != nil {
+				s.close() // 终点自动清理（槽位回到池子）
+				return "", classifyCtxErr(err, s.ctx)
+			}
+		}
+		if m == nil {
+			continue // eino 错误帧约定：跳过（不进聚合，也不给调用方）
+		}
+		s.chunks = append(s.chunks, m)
 		s.watchdog.Ping()
-		return m, nil
+		return m.Content, nil
 	}
-	s.close() // 终点自动清理（槽位回到池子）
-	return nil, classifyCtxErr(err, s.ctx)
+}
+
+// Final 聚合终态：已收到 chunk 的 content / usage / finish_reason / tool_calls。
+// EOF 后调用为常规路径；错误 / 断连后调用返回部分聚合（content 只含已到 chunk）。
+// 聚合失败（provider 病态输出：role 混杂 / 调用 id 冲突）返回 error 且 Final 为
+// 零值降级——已发出的 delta 不受影响，调用方记 WARN 即可。幂等（只算一次）。
+func (s *Stream) Final() (Final, error) {
+	s.finalOnce.Do(func() {
+		msg, err := schema.ConcatMessages(s.chunks)
+		if err != nil {
+			s.finalErr = fmt.Errorf("aggregate stream chunks: %w", err)
+			return
+		}
+		s.final = einoFinal(msg)
+	})
+	return s.final, s.finalErr
 }
 
 // Close 主动关闭：停止看门狗、取消上游调用（省 token）、释放槽位。幂等。

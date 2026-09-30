@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/cloudwego/eino/schema"
 	"github.com/stretchr/testify/assert"
 	"gorm.io/gorm"
 
@@ -18,6 +17,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/authctx"
 	"github.com/Karlsk/go-hify/internal/platform/db"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
+	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/page"
 )
 
@@ -25,7 +25,7 @@ import (
 func newCRUDService(agents agentGetter, providers llmConfigResolver) (*chatService, *memStore) {
 	st := newMemStore()
 	svc := New(st, agents, providers,
-		&stubClientFactory{client: nil}, &execRecorder{}, &stubRags{}, nil).(*chatService)
+		&stubClientFactory{client: nil}, &execRecorder{}, &stubRags{}, nil, nil).(*chatService)
 	return svc, st
 }
 
@@ -310,41 +310,45 @@ func TestToMessageSchemaCitations(t *testing.T) {
 	assert.Equal(t, cites, s.Citations)
 }
 
-func TestToEinoMessageVariants(t *testing.T) {
+func TestToLLMMessageVariants(t *testing.T) {
 	// user
-	assert.Equal(t, "user:hi", roles([]*schema.Message{toEinoMessage(&Message{Role: chatapi.RoleUser, Content: "hi"})}))
+	um := toLLMMessage(&Message{Role: chatapi.RoleUser, Content: "hi"})
+	assert.Equal(t, llm.RoleUser, um.Role)
+	assert.Equal(t, "hi", um.Content)
 
-	// tool 行：调用标识取 ToolCalls[0].id
-	tm := toEinoMessage(&Message{
+	// tool 行：调用引用取 ToolCalls[0]（id 回放锚点 + tool 名回填，Gemini 等供应商要求）
+	tm := toLLMMessage(&Message{
 		Role:      chatapi.RoleTool,
 		Content:   "3 rows",
 		ToolCalls: []map[string]any{{"id": "call_9", "tool": "q"}},
 	})
-	assert.Equal(t, schema.Tool, tm.Role)
+	assert.Equal(t, llm.RoleTool, tm.Role)
 	assert.Equal(t, "call_9", tm.ToolCallID)
+	assert.Equal(t, "q", tm.ToolName)
 
-	// assistant + tool_calls → eino ToolCall（Arguments 为 JSON 字符串）
-	am := toEinoMessage(&Message{
+	// assistant + tool_calls → 统一 ToolCall（Arguments 为 json.RawMessage）
+	am := toLLMMessage(&Message{
 		Role:      chatapi.RoleAssistant,
 		Content:   "",
 		ToolCalls: []map[string]any{{"id": "c1", "tool": "q", "args": map[string]any{"a": 1}}},
 	})
 	if assert.Len(t, am.ToolCalls, 1) {
-		assert.Equal(t, "q", am.ToolCalls[0].Function.Name)
-		assert.JSONEq(t, `{"a":1}`, am.ToolCalls[0].Function.Arguments)
+		assert.Equal(t, "c1", am.ToolCalls[0].ID)
+		assert.Equal(t, "q", am.ToolCalls[0].Name)
+		assert.JSONEq(t, `{"a":1}`, string(am.ToolCalls[0].Arguments))
 	}
 
 	// 未知 role 按 assistant 兜底
-	um := toEinoMessage(&Message{Role: "strange", Content: "x"})
-	assert.Equal(t, schema.Assistant, um.Role)
+	sm := toLLMMessage(&Message{Role: "strange", Content: "x"})
+	assert.Equal(t, llm.RoleAssistant, sm.Role)
 }
 
 func TestFetchRowsForTurns(t *testing.T) {
-	assert.Equal(t, 10, fetchRowsForTurns(1)) // 1×5+5
-	assert.Equal(t, 15, fetchRowsForTurns(2))
-	assert.Equal(t, 10, fetchRowsForTurns(0)) // 非法值按 1 处理
-	assert.Equal(t, 10, fetchRowsForTurns(-3))
-	assert.Equal(t, 505, fetchRowsForTurns(100))
+	assert.Equal(t, 16, fetchRowsForTurns(1)) // 1×8+8
+	assert.Equal(t, 24, fetchRowsForTurns(2))
+	assert.Equal(t, 16, fetchRowsForTurns(0)) // 非法值按 1 处理
+	assert.Equal(t, 16, fetchRowsForTurns(-3))
+	assert.Equal(t, 808, fetchRowsForTurns(100))
 }
 
 func TestMakeTitle(t *testing.T) {

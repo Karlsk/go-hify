@@ -22,13 +22,23 @@ type chatModelStreamer struct {
 }
 
 // Stream 实现 Streamer：生命周期与传入 ctx 绑定，ctx 取消即打断上游 Recv。opts 可为 nil。
+// einoOptions 的转换已在 Client 入口校验并缓存，此处错误路径理论不可达（防御直接
+// 持有 Streamer 的调用方）。
 func (a chatModelStreamer) Stream(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*schema.StreamReader[*schema.Message], error) {
-	return a.m.Stream(ctx, msgs, opts.einoOptions()...)
+	eopts, err := opts.einoOptions()
+	if err != nil {
+		return nil, err
+	}
+	return a.m.Stream(ctx, msgs, eopts...)
 }
 
 // Generate 实现 Streamer：非流式单次生成（workflow LLM 节点用）。opts 可为 nil。
 func (a chatModelStreamer) Generate(ctx context.Context, msgs []*schema.Message, opts *CallOptions) (*schema.Message, error) {
-	return a.m.Generate(ctx, msgs, opts.einoOptions()...)
+	eopts, err := opts.einoOptions()
+	if err != nil {
+		return nil, err
+	}
+	return a.m.Generate(ctx, msgs, eopts...)
 }
 
 // NewUpstreamFactory 构造注入 Manager 的 UpstreamFactory：

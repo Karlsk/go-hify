@@ -19,8 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino/schema"
-
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
@@ -150,11 +148,11 @@ func (e *executor) callLLM(ctx context.Context, key string, cfg *workflowapi.LLM
 	if err != nil {
 		return "", err // pre-attempt（busy / breaker / kind）：未打上游，不落 executions
 	}
-	msgs := make([]*schema.Message, 0, 2)
+	msgs := make([]llm.Message, 0, 2)
 	if system != "" {
-		msgs = append(msgs, &schema.Message{Role: schema.System, Content: system})
+		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: system})
 	}
-	msgs = append(msgs, &schema.Message{Role: schema.User, Content: prompt})
+	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: prompt})
 	opts := &llm.CallOptions{}
 	if cfg.Temperature != 0 { // 0 = 跟随模型默认（不设字段）
 		t := float32(cfg.Temperature)
@@ -221,7 +219,7 @@ func validateLLMOutput(output string, fields []workflowapi.SchemaField) error {
 // =nil 即 workflow 调用标识；失败也记（ErrorClass 兜底 Network）；落库失败只 WARN
 // 不阻断执行。system 非空时 Input 多记一个 system_prompt 键（spec 011，有值才加）。
 func (e *executor) recordExecution(ctx context.Context, nodeKey string, resolved *providerapi.LLMConfig,
-	modelID uint64, prompt, system string, start time.Time, reply *schema.Message, callErr error) {
+	modelID uint64, prompt, system string, start time.Time, reply *llm.Final, callErr error) {
 	input := map[string]any{"prompt": prompt}
 	if system != "" {
 		input["system_prompt"] = system
@@ -237,13 +235,9 @@ func (e *executor) recordExecution(ctx context.Context, nodeKey string, resolved
 		row.ErrorClass = &cls
 	} else if reply != nil {
 		row.Output = map[string]any{"content": reply.Content}
-		if reply.ResponseMeta != nil {
-			row.FinishReason = reply.ResponseMeta.FinishReason
-			if u := reply.ResponseMeta.Usage; u != nil {
-				row.PromptTokens, row.CompletionTokens = int64(u.PromptTokens), int64(u.CompletionTokens)
-				row.TotalTokens = row.PromptTokens + row.CompletionTokens
-			}
-		}
+		row.FinishReason = reply.FinishReason
+		row.PromptTokens, row.CompletionTokens = reply.Usage.Input, reply.Usage.Output
+		row.TotalTokens = row.PromptTokens + row.CompletionTokens
 	}
 	if err := e.execs.Create(ctx, row); err != nil {
 		slog.WarnContext(ctx, "workflow: record node execution failed", "node", nodeKey, "err", err)

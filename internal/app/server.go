@@ -177,10 +177,11 @@ func Run(cfg *config.Config) error {
 	// chat：对话引擎（依赖图最外层，零被依赖——将来可整体拆成独立服务）。
 	// 依赖方向：chat → agent（agentGetter）→ provider（llmConfigResolver）→ platform/llm（llmClientFactory）
 	//           chat → rag（ragRetriever，KB 检索注入）→ platform/logging（executionWriter）
-	//           chat → workflow（workflowExecutor，管道触发——绑定 agent 的消息先过工作流，spec 07）。
-	// v1 范围：会话 CRUD + 上下文组装（含 RAG 检索注入）+ SSE 两模式 + executions 落库；ToolIDs 读到不执行。
+	//           chat → workflow（workflowExecutor，管道触发——绑定 agent 的消息先过工作流，spec 07）
+	//           chat → mcp（toolSourceFactory，工具循环——按 agent 绑定工具构造 tool.Source，spec 批）。
+	// 工具循环（chat_tool_loop_spec.md）：绑工具 agent 走 ReAct 多轮；未绑走原路径零变化。
 	chatStore := chatstore.New(gormDB)
-	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore, ragSvc, workflowSvc)
+	chatSvc := chatsvc.New(chatStore, agentSvc, modelSvc, llmManager, execStore, ragSvc, workflowSvc, mcpClientSvc)
 
 	// ── ④ gin 引擎 + 中间件 + 路由（§组合根步骤 4）──────────────────
 	r := gin.New()

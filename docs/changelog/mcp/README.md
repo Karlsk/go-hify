@@ -65,14 +65,18 @@ Go client 与 Spring server 之间不存在语言层集成，兼容性完全是*
 
 ### 5.3 落地映射（依赖方向无新增）
 
+〔2026-09-29 chat 批修订〕chat 工具循环定稿为**全局统一工具模型**架构（[chat_tool_loop_spec.md](chat_tool_loop_spec.md)），§5.3 初版「chat 侧 toToolInfo」的归属随之修订：转换不再在 chat，而是拆成两段各归其位——MCP→`tool.ToolDef` 在 mcp/service（`ToolSourceFor`），`ToolDef`→eino ToolInfo 在 platform/llm（eino 收敛，chat/workflow 零 eino）。
+
 ```
-internal/mcp/service   ← 唯一 import go-sdk 的地方
-                          会话管理（复用/失效重建/健康探测）、discover 翻页 upsert、
-                          CallTool + 内容块归一
-internal/mcp/api       ← 纯契约，零 eino 类型（规则要求，也是本决策的自然形状）
-internal/chat/service  ← toToolInfo(mcpapi.ToolSchema) → *schema.ToolInfo 的唯一归属；
-                          工具循环 WithTools → ToolCalls → mcpapi.InvokeTool
-internal/workflow      ← 工具节点直接 mcpapi.InvokeTool，零 eino 参与
+internal/platform/tool    ← 全局统一工具契约（纯标准库）：ToolDef/ToolCall/
+                             ToolResult/Source/Registry——MCP 与未来内置工具同一模型
+internal/mcp/service      ← 唯一 import go-sdk 的地方；tool.Source 实现
+                            （ToolSourceFor：调用名派生 s{id}__{name} + 路由 + per-call 调用）
+internal/mcp/api          ← 纯契约，零 eino / SDK 类型（可 import 纯标准库的 platform/tool）
+internal/platform/llm     ← 唯一 import eino 的地方：Message/Final 公开面 +
+                             ToolDef→ToolInfo 转换（保护链 bulkhead/熔断/超时不动）
+internal/chat/service     ← ReAct 多轮循环：只见 tool.* 与 llm.*，零 eino / SDK
+internal/workflow         ← LLM 节点经 llm.Message/Final；工具节点接 mcpapi（workflow 批）
 ```
 
 契约草图（方向性，非终稿；终稿随 api 契约 spec 定）：
@@ -104,9 +108,11 @@ chat 侧 import eino 的 `schema` 包属库依赖，不受业务域依赖清单�
 
 > 2026-09-28：第一批（MCP Server 管理 + Agent 工具绑定）spec 已定稿——[db_model.md](db_model.md)（迁移 00021）+ [server_mgmt_spec.md](server_mgmt_spec.md)（契约与 client 设计）；下列前 3 项由该批承接，后 2 项留待 chat / workflow 批次。
 > 2026-09-29：前 3 项已交付（实现记录 [server_mgmt_impl.md](server_mgmt_impl.md)）。
+> 2026-09-29：chat 批（统一工具/消息模型 + ReAct 工具循环）spec 定稿并实施——[chat_tool_loop_spec.md](chat_tool_loop_spec.md)。
+> 2026-09-30：chat 批已交付（实现记录 [chat_tool_loop_impl.md](chat_tool_loop_impl.md)）：platform/tool 统一契约、llm 公开面 Hify 化、mcp `ToolSourceFor`、chat 多轮工具循环；workflow LLM 节点同步换型。零迁移、handler/SSE 零改动、未绑工具路径零变化。
 
 - [x] go.mod 引入 `github.com/modelcontextprotocol/go-sdk` v1.3.x（v1.3.1）
 - [x] `mcp/api` 契约定稿（§5.3 草图基础上补 Req/Schema 与哨兵）
 - [x] `mcp/service` client + discover 翻页 upsert（§5.2 设计点 1/2 按修订执行）
-- [ ] chat 侧 `toToolInfo` 转换 + 工具循环接线
+- [x] chat 侧工具循环接线（chat 批：`platform/tool` 统一模型 + `ToolSourceFor` + ReAct 多轮循环 + llm 公开面 Hify 化；转换归属按 §5.3 修订执行）
 - [ ] workflow 工具节点接 `mcpapi.InvokeTool`

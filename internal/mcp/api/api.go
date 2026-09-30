@@ -4,7 +4,11 @@
 // server_mgmt_spec.md §3），由组合根分别注入 handler 与上游模块（agent / chat）。
 package api
 
-import "context"
+import (
+	"context"
+
+	"github.com/Karlsk/go-hify/internal/platform/tool"
+)
 
 // MCPServerService 管理面接口：mcp handler 消费（CRUD + Discover + RunTool）。
 // 方法签名固定 (ctx context.Context, req XxxReq) (*XxxSchema, error)。
@@ -51,4 +55,11 @@ type MCPClientService interface {
 	// GetToolsByIDs 批量取工具 + 所属 server 启用标志（缺失 id 静默不在结果里，
 	// 存在性判定由调用方比对 id 集合）——agent 绑定校验「存在且 server 启用」的依据。
 	GetToolsByIDs(ctx context.Context, req GetToolsByIDsReq) ([]ToolCheck, error)
+
+	// ToolSourceFor 按绑定工具 id 子集返回统一工具来源（platform/tool.Source）。
+	// 工厂方法：构造无 IO，真实加载（查库）在返回的 Source.Tools / Invoke 的 ctx
+	// 上惰性发生；chat 每轮对话取一次、单轮内缓存复用（chat_tool_loop_spec.md §4）。
+	// 停用 server 的工具在 Tools() 清单里静默消失；Invoke 恒返回结果（失败也是
+	// IsError，错误即上下文喂回 LLM，不中断对话）。
+	ToolSourceFor(req ToolSourceReq) tool.Source
 }

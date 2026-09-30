@@ -259,9 +259,9 @@ func TestIdleTimeoutAfterFirstChunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
-	m, err := s.Recv() // 首 chunk 正常
-	if err != nil || m.Content != "hi" {
-		t.Fatalf("first chunk = (%v, %v)", m, err)
+	m, err := s.Recv() // 首 chunk 正常（公开面是 string delta）
+	if err != nil || m != "hi" {
+		t.Fatalf("first chunk = (%q, %v), want \"hi\"", m, err)
 	}
 	_, err = s.Recv() // 挂住 → idle 看门狗到点
 	requireClass(t, err, ClassTimeout)

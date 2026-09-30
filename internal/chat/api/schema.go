@@ -122,12 +122,19 @@ func DeltaEvent(content string) StreamEvent {
 	return StreamEvent{Type: EventDelta, Content: content}
 }
 
-// ToolCallEvent 触发工具调用（v1 预留：工具循环实现后启用）。
+// ToolCallEvent 触发工具调用（工具循环批次起启用；Args 空为 {}——无参形态）。
 func ToolCallEvent(id, tool string, args map[string]any) StreamEvent {
 	return StreamEvent{Type: EventToolCall, ID: id, Tool: tool, Args: args}
 }
 
-// ToolResultEvent 工具返回（v1 预留）。
+// ToolResultPayload tool_result 事件的载荷：Content 为截断后的结果文本（与落库 /
+// 回喂 LLM 同一份），IsError 标记执行失败（前端据此区分样式——错误即上下文，对话不中断）。
+type ToolResultPayload struct {
+	Content string `json:"content"`
+	IsError bool   `json:"is_error"`
+}
+
+// ToolResultEvent 工具返回（工具循环批次起启用，载荷为 ToolResultPayload）。
 func ToolResultEvent(id, tool string, result any) StreamEvent {
 	return StreamEvent{Type: EventToolResult, ID: id, Tool: tool, Result: result}
 }

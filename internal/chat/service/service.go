@@ -15,12 +15,14 @@ import (
 
 	agentapi "github.com/Karlsk/go-hify/internal/agent/api"
 	chatapi "github.com/Karlsk/go-hify/internal/chat/api"
+	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	"github.com/Karlsk/go-hify/internal/platform/authctx"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
 	"github.com/Karlsk/go-hify/internal/platform/page"
 	platformschema "github.com/Karlsk/go-hify/internal/platform/schema"
+	"github.com/Karlsk/go-hify/internal/platform/tool"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
 	workflowapi "github.com/Karlsk/go-hify/internal/workflow/api"
@@ -100,6 +102,13 @@ type (
 	workflowExecutor interface {
 		Execute(ctx context.Context, req workflowapi.ExecuteWorkflowReq) (*workflowapi.RunResultSchema, error)
 	}
+
+	// toolSourceFactory chat 用到的 mcp 能力（工具来源工厂——按 agent 绑定的工具 id
+	// 子集构造统一工具来源 tool.Source，mcpapi.MCPClientService 的单方法收窄；
+	// chat_tool_loop_spec.md §4）。
+	toolSourceFactory interface {
+		ToolSourceFor(req mcpapi.ToolSourceReq) tool.Source
+	}
 )
 
 // chatService 实现 chatapi.ChatService。
@@ -111,11 +120,13 @@ type chatService struct {
 	execs     executionWriter
 	rags      ragRetriever
 	workflows workflowExecutor
+	// toolSources 工具来源工厂（工具循环批次）；agent 未绑工具时全程不触碰
+	toolSources toolSourceFactory
 }
 
 // New 组装 chatService，返回 api 接口；由组合根注入 handler 与上游模块。
-func New(store Store, agents agentGetter, providers llmConfigResolver, clients llmClientFactory, execs executionWriter, rags ragRetriever, workflows workflowExecutor) chatapi.ChatService {
-	return &chatService{store: store, agents: agents, providers: providers, clients: clients, execs: execs, rags: rags, workflows: workflows}
+func New(store Store, agents agentGetter, providers llmConfigResolver, clients llmClientFactory, execs executionWriter, rags ragRetriever, workflows workflowExecutor, toolSources toolSourceFactory) chatapi.ChatService {
+	return &chatService{store: store, agents: agents, providers: providers, clients: clients, execs: execs, rags: rags, workflows: workflows, toolSources: toolSources}
 }
 
 // convCursorKey 会话列表 keyset 复合排序键（updated_at DESC, id DESC），经 page 编码为不透明 cursor。
