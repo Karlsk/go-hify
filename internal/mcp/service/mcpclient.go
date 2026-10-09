@@ -5,8 +5,9 @@ package service
 // （api 层零 SDK 依赖）。
 //
 // per-call 语义（server_mgmt_spec.md §4）：每次操作 新建 client → Connect（含
-// initialize 握手）→ 操作 → Close。本批调用方均为低频管理动作（discover / run），
-// 握手开销可忽略、无状态实现最简；会话复用（singleflight 重建）推迟到 chat 阶段。
+// initialize 握手）→ 操作 → Close。调用方含管理动作（discover / run）与 chat 热
+// 路径（工具循环 Invoke）；握手开销经实测不构成优化项——http/sse 本地 ~2ms、
+// stdio 见实测记录，会话复用已否决（README §5.2 设计点 2，sse_ctx_fix.md）。
 
 import (
 	"context"
@@ -52,11 +53,11 @@ type goSDKDialer struct{}
 // discover 实现 mcpDialer.discover：连接 → 翻页列工具（callTimeout 界定全程）。
 func (goSDKDialer) discover(ctx context.Context, sv *MCPServer) ([]MCPTool, time.Duration, error) {
 	start := time.Now()
-	session, err := connect(ctx, sv)
+	session, cancel, err := connect(ctx, sv)
 	if err != nil {
 		return nil, time.Since(start), err
 	}
-	defer func() { _ = session.Close() }()
+	defer func() { _ = session.Close(); cancel() }()
 
 	lctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -70,31 +71,59 @@ func (goSDKDialer) discover(ctx context.Context, sv *MCPServer) ([]MCPTool, time
 // call 实现 mcpDialer.call：连接 → 调工具（callTimeout 界定，含工具执行）→
 // 结果归一（TextContent 拼接、isError 转错误文本）。
 func (goSDKDialer) call(ctx context.Context, sv *MCPServer, toolName string, args json.RawMessage) (string, error) {
-	session, err := connect(ctx, sv)
+	session, cancel, err := connect(ctx, sv)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = session.Close() }()
+	defer func() { _ = session.Close(); cancel() }()
 
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	return callSession(cctx, session, toolName, args)
 }
 
-// connect 新建 client → Connect（transport 连接 + initialize 握手，connectTimeout
-// 界定）。session 的 Close 由调用方 defer（per-call 生命周期）。
-func connect(ctx context.Context, sv *MCPServer) (*mcp.ClientSession, error) {
+// connect 新建 client → Connect（transport 连接 + initialize 握手）。返回的
+// cancel 是会话 ctx 的收尾函数——所有权移交调用方，操作结束时随 Close 一并 defer。
+//
+// 会话 ctx 以 WithoutCancel 剥离请求侧取消 / 截止再作基座：go-sdk v1.3.1 的
+// SSE 传输把 GET /sse 长流绑在 Connect 传入的 ctx 上（sse.go NewRequestWithContext），
+// 若沿用「带 timeout 派生 ctx + 返回即 cancel」的写法，读流会在会话交到调用方
+// 手里之前被掐死——sse server 的 discover / run 全部失败（回归测试
+// mcpclient_connect_test.go；修复记录 sse_ctx_fix.md）。stdio 子进程寿命绑 Close、
+// streamable-http 每请求独立 POST，本不受 Connect ctx 取消影响，三传输同走此
+// 路径保持行为一致。请求断连仍能及时中止在途操作：ListTools / CallTool 的操作
+// ctx 派生自请求 ctx（discover / call 各自的 WithTimeout）。
+//
+// connectTimeout 语义由看门狗 timer 保留：只约束连接 + 握手段，Connect 返回即
+// 撤销（timer.Stop），不把 deadline 挂到会话余生——CallTool 慢工具是常态，单次
+// 操作的时间边界是 callTimeout。
+func connect(ctx context.Context, sv *MCPServer) (*mcp.ClientSession, context.CancelFunc, error) {
+	return connectWithTimeout(ctx, sv, connectTimeout)
+}
+
+// connectWithTimeout connect 的可测形态：握手超时注入，单测用短超时验证看门狗
+// （真实 connectTimeout 10s 量级不宜进测试）。
+func connectWithTimeout(ctx context.Context, sv *MCPServer, timeout time.Duration) (*mcp.ClientSession, context.CancelFunc, error) {
 	t, err := newTransport(sv)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	cctx, cancel := context.WithTimeout(ctx, connectTimeout)
-	defer cancel()
-	session, err := mcp.NewClient(clientImpl, nil).Connect(cctx, t, nil)
+	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	timer := time.AfterFunc(timeout, cancel) // 看门狗：握手超时掐断，Connect 返回即撤销
+	session, err := mcp.NewClient(clientImpl, nil).Connect(sctx, t, nil)
+	timer.Stop()
 	if err != nil {
-		return nil, fmt.Errorf("connect mcp server %q (%s): %w", sv.Name, sv.Transport, err)
+		cancel()
+		return nil, nil, fmt.Errorf("connect mcp server %q (%s): %w", sv.Name, sv.Transport, err)
 	}
-	return session, nil
+	if sctx.Err() != nil {
+		// 看门狗恰在握手成功瞬间触发（timer.Stop 返回 false 的窄竞态）：SSE 读流
+		// 已随 cancel 死亡，按超时处理，不把死会话交给调用方。
+		_ = session.Close()
+		cancel()
+		return nil, nil, fmt.Errorf("connect mcp server %q (%s): 握手超时（%v）", sv.Name, sv.Transport, timeout)
+	}
+	return session, cancel, nil
 }
 
 // newTransport 按注册的 transport 三分支构造（枚举与 00003 CHECK 对齐）。

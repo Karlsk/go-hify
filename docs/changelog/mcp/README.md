@@ -61,6 +61,7 @@ Go client 与 Spring server 之间不存在语言层集成，兼容性完全是*
    〔2026-09-28 修订〕server 管理批定稿为**运行期派生、不落库**：`callTool` 从绑定的 tool 行派生 `mcpServerId__toolName`（[db_model.md](db_model.md) §2.1），discover upsert 不生成 call_name 列；LLM 函数名前缀在 chat 阶段（下批）由消费方组装。
 2. **会话生命周期**：长驻进程对 Streamable HTTP server 保持 `ClientSession` 复用（避免每次调用重付 initialize 握手）；调用出错标记失效、重建用 `golang.org/x/sync/singleflight` 防并发重建风暴（该依赖已在树里）；后台健康探测对齐 provider `StartProber` 模式（组合根 `go Start(appCtx)`，随优雅关停退出）。
    〔2026-09-28 修订〕server 管理批按用户 spec 采用 **per-call client**（每次调用 新建 → initialize → 操作 → Close，[server_mgmt_spec.md](server_mgmt_spec.md) §4）：本批调用方均为低频管理动作（test / run / 绑定校验），握手开销可忽略，无状态实现最简。会话复用 + singleflight 重建推迟到 chat 阶段（每轮对话多次工具调用、延迟敏感时）再评估升级。
+   〔2026-10-09 修订〕chat 批交付后按本设计点要求完成真实 server 实测，**会话复用否决**：http/sse 握手 ~2ms（chat 工具间隙 10–46ms，握手只占零头）、本部署 stdio 不用（唯一 1.5s 级收益场景不存在），pool 的复杂度不划算；per-call 模式定稿。重开条件与完整实测数据见 [sse_ctx_fix.md](sse_ctx_fix.md) §6。同轮实测暴露并修复 **sse 传输 P0 bug**（go-sdk 把 `GET /sse` 长流绑在 Connect ctx 上，per-call 的 defer cancel 在握手完成瞬间掐死读流 → sse server 的 discover/run/chat 全部 30s 超时；看门狗 timer + cancel 所有权移交修复，回归测试 `mcpclient_connect_test.go`）。
 3. **discover 时试跑 schema 转换**：转换失败的标记 `enabled=false` + 失败原因入库（可逆下架模式）——管理员加 server 时就暴露问题，而不是用户聊到一半才发现工具坏了。
 
 ### 5.3 落地映射（依赖方向无新增）
@@ -114,6 +115,7 @@ chat 侧 import eino 的 `schema` 包属库依赖，不受业务域依赖清单�
 > 2026-09-29：chat 批（统一工具/消息模型 + ReAct 工具循环）spec 定稿并实施——[chat_tool_loop_spec.md](chat_tool_loop_spec.md)。
 > 2026-09-30：chat 批已交付（实现记录 [chat_tool_loop_impl.md](chat_tool_loop_impl.md)）：platform/tool 统一契约、llm 公开面 Hify 化、mcp `ToolSourceFor`、chat 多轮工具循环；workflow LLM 节点同步换型。零迁移、handler/SSE 零改动、未绑工具路径零变化。
 > 2026-09-30：workflow 批（spec 016）已交付——tool 节点经 `ToolSourceFor` 真实执行（实现记录 [../workflow/impl_spec_16_tool_node_mcp.md](../workflow/impl_spec_16_tool_node_mcp.md)）；下项旧草图名 `mcpapi.InvokeTool` 实即 `ToolSourceFor` 路径（D1 拍板）。
+> 2026-10-09：sse 传输 P0 修复 + 设计点 2（会话复用）实测否决收口——[sse_ctx_fix.md](sse_ctx_fix.md)。
 
 - [x] go.mod 引入 `github.com/modelcontextprotocol/go-sdk` v1.3.x（v1.3.1）
 - [x] `mcp/api` 契约定稿（§5.3 草图基础上补 Req/Schema 与哨兵）
