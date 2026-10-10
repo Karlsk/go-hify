@@ -4,9 +4,12 @@
        出口经 getGraph() 转回图配置——画布节点的 data.config 与配置节点共享引用，
        检查器（T014）改 config 即改配置单源；节点位置存 positions Map（父组件
        会话级持有，往返保留，不序列化进配置）。起始节点 = entry（start_node_key）：
-       面板「起始节点」下拉直接指定（2026-09-23 裁定：取消画布伪「开始」节点；双击
-       节点与检查器「设为起始」按钮为等价入口），首个拖入默认、删除迁移，
+       面板「起始节点」下拉直接指定（2026-09-23 裁定：取消画布伪「开始」节点承担
+       entry；双击节点与检查器「设为起始」按钮为等价入口），首个拖入默认、删除迁移，
        hf-wf-node--start class 在画布上标识起始节点。
+       spec 018 FR-001 恢复画布伪「开始」节点为入参配置锚点（部分反转上述裁定）：
+       画布左上固定悬浮锚点（不进 Vue Flow nodes——不可拖/删/连线、不进序列化是
+       构造性保证），点击开检查器 schema 面板；entry 语义不变（三入口照旧）。
        只读态（readonly，spec 010）：面板 / 检查器不渲染、编辑交互全禁，
        平移缩放保留（FR-005）；fill = 高度铺满父容器（编辑 / 编排整页形态）。 -->
   <div class="canvas-editor" :class="{ 'canvas-editor--fill': fill, 'canvas-editor--readonly': readonly }">
@@ -38,16 +41,23 @@
         </el-select>
       </div>
 
-      <!-- 伪节点面板入口（FR-002）：点击置伪节点上下文 → 检查器切 schema 面板
-           （入参/出参行表单）；伪节点不进 nodes 数组、不进图主体序列化 -->
-      <button type="button" class="canvas-editor__palette-schema" @click="openSchemaPanel">
-        入参 / 出参
-      </button>
-
       <p class="canvas-editor__palette-hint">拖入画布 · 下拉 / 双击节点 / 检查器按钮指定起始</p>
     </aside>
 
     <div class="canvas-editor__flow" @dragover.prevent @drop="onDrop">
+      <!-- 伪「开始」节点锚点（spec 018 FR-001，部分反转 2026-09-23 裁定）：固定悬浮、
+           点击开 schema 面板（entry 语义不变，不画到首节点的边）；不进 nodes 数组
+           与序列化是构造性保证（非 Vue Flow 节点）；readonly 态仅作信息展示 -->
+      <button
+        type="button"
+        class="canvas-editor__start-anchor"
+        :class="{ 'canvas-editor__start-anchor--static': readonly }"
+        :title="graphKind === 'chat' ? '单一入参 {{input}}（用户消息）' : '点击配置工作流入参'"
+        @click="!readonly && openSchemaPanel()"
+      >
+        <span class="canvas-editor__start-title">开始</span>
+        <span class="canvas-editor__start-sub">{{ startNodeBadge }}</span>
+      </button>
       <VueFlow
         v-model:nodes="flowNodes"
         v-model:edges="flowEdges"
@@ -205,7 +215,7 @@ onPaneClick(() => {
 // ---- 伪节点面板（FR-002）：sentinel 上下文不进 nodes 数组、不进图主体序列化 ----
 
 /** 打开伪节点面板：置伪节点上下文（sentinel InspectorNode），检查器切 schema 面板模式
- *  （2026-09-23 裁定：画布伪「开始」节点取消，面板入口移到左侧面板按钮） */
+ *  （spec 018 FR-001：入口 = 画布「开始」锚点，替代原左面板按钮） */
 function openSchemaPanel(): void {
   selectedNode.value = {
     id: START_NODE_ID,
@@ -213,6 +223,13 @@ function openSchemaPanel(): void {
   }
   selectedEdge.value = null
 }
+
+/** 开始锚点副标签（spec 018 FR-001）：task 型 = 入参数角标 / chat 型 = 单一入参说明 */
+const startNodeBadge = computed(() =>
+  props.graphKind === 'task'
+    ? `${props.inputSchema?.length ?? 0} 入参`
+    : '单一入参 {{input}}',
+)
 
 // ---- schema 同源透传（FR-002，contracts §3）：检查器面板编辑 → 宿主单源 ----
 
@@ -447,22 +464,6 @@ defineExpose({ getGraph })
   width: 100%;
 }
 
-/* 伪节点面板入口（FR-002）：检查器 schema 面板的打开按钮 */
-.canvas-editor__palette-schema {
-  margin-top: var(--hf-space-2);
-  padding: var(--hf-space-2) var(--hf-space-3);
-  border: 1px solid var(--hf-border-1);
-  border-radius: var(--hf-radius-sm);
-  background: var(--hf-bg-container);
-  color: var(--hf-text-1);
-  font-size: var(--hf-font-size-sm);
-  cursor: pointer;
-}
-
-.canvas-editor__palette-schema:hover {
-  border-color: var(--hf-primary-300);
-}
-
 .canvas-editor__palette-hint {
   margin: var(--hf-space-2) 0 0;
   color: var(--hf-text-3);
@@ -470,8 +471,46 @@ defineExpose({ getGraph })
   line-height: var(--hf-leading-normal);
 }
 
-/* 画布容器（Vue Flow 需要显式尺寸） */
+/* 伪「开始」节点锚点（spec 018 FR-001）：画布左上固定悬浮（非 Vue Flow 节点——
+   不进序列化/拖拽/连线/删除是构造性保证），视觉沿用节点主题（起始主色强调） */
+.canvas-editor__start-anchor {
+  position: absolute;
+  top: var(--hf-space-3);
+  left: var(--hf-space-3);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--hf-space-2) var(--hf-space-3);
+  border: 1px solid var(--hf-primary-600);
+  border-radius: var(--hf-radius-sm);
+  background: var(--hf-primary-50);
+  box-shadow: var(--hf-shadow-focus);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.canvas-editor__start-anchor--static {
+  cursor: default;
+  box-shadow: none;
+}
+
+.canvas-editor__start-title {
+  color: var(--hf-text-1);
+  font-size: var(--hf-font-size-sm);
+  font-weight: var(--hf-font-weight-semibold);
+}
+
+.canvas-editor__start-sub {
+  color: var(--hf-text-3);
+  font-size: var(--hf-font-size-xs);
+}
+
+/* 画布容器（Vue Flow 需要显式尺寸；relative 供开始锚点 absolute 定位） */
 .canvas-editor__flow {
+  position: relative;
   flex: 1;
   min-width: 0;
   height: 420px;

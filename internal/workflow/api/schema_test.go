@@ -187,6 +187,154 @@ func TestLLMConfigOutputSchemaValidate(t *testing.T) {
 	})
 }
 
+// ---- spec 018：SchemaField.default 与 EndConfig.output_fields 加法键（FR-006 / FR-009）----
+
+// TestSchemaFieldDefaultValidate default 保存期校验（spec 018 FR-006 / C1）：类型探针须
+// 匹配 field type（null 不匹配任何型被拒）；required 禁配 default（永不生效的矛盾配置）。
+func TestSchemaFieldDefaultValidate(t *testing.T) {
+	t.Run("三型各自匹配过", func(t *testing.T) {
+		assert.NoError(t, ValidateSchemaFields([]SchemaField{
+			{Name: "q", Type: "string", Default: json.RawMessage(`"关键词"`)},
+			{Name: "top", Type: "number", Default: json.RawMessage(`10`)},
+			{Name: "verbose", Type: "boolean", Default: json.RawMessage(`false`)},
+		}))
+	})
+	t.Run("required 禁配 default", func(t *testing.T) {
+		assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{
+			{Name: "q", Type: "string", Required: true, Default: json.RawMessage(`"x"`)},
+		}), "required")
+	})
+	t.Run("类型不符拒：string 配 number 值", func(t *testing.T) {
+		assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{
+			{Name: "q", Type: "string", Default: json.RawMessage(`10`)},
+		}), "default")
+	})
+	t.Run("类型不符拒：number 配 string 值", func(t *testing.T) {
+		assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{
+			{Name: "top", Type: "number", Default: json.RawMessage(`"10"`)},
+		}), "default")
+	})
+	t.Run("类型不符拒：boolean 配 string 值", func(t *testing.T) {
+		assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{
+			{Name: "v", Type: "boolean", Default: json.RawMessage(`"true"`)},
+		}), "default")
+	})
+	t.Run("null 不匹配任何型", func(t *testing.T) {
+		for _, typ := range []string{"string", "number", "boolean"} {
+			assert.ErrorContains(t, ValidateSchemaFields([]SchemaField{
+				{Name: "x", Type: typ, Default: json.RawMessage(`null`)},
+			}), "default", "type=%s", typ)
+		}
+	})
+	t.Run("无 default 存量零变化", func(t *testing.T) {
+		assert.NoError(t, ValidateSchemaFields([]SchemaField{
+			{Name: "q", Type: "string", Required: true},
+			{Name: "top", Type: "number"},
+		}))
+	})
+}
+
+// TestSchemaFieldDefaultSerialization default 序列化契约（spec 018 C1）：有值出键且
+// 原文保真往返（number 不经 float64 规约）；无值不出键（omitempty——存量 schema
+// 保存读回不引入新键）。
+func TestSchemaFieldDefaultSerialization(t *testing.T) {
+	t.Run("有值出键且原文保真往返", func(t *testing.T) {
+		fields := []SchemaField{{Name: "top", Type: "number", Default: json.RawMessage(`3.50`)}}
+		b, err := json.Marshal(fields)
+		assert.NoError(t, err)
+		assert.Contains(t, string(b), `"default":3.50`)
+		var back []SchemaField
+		assert.NoError(t, json.Unmarshal(b, &back))
+		assert.Equal(t, `3.50`, string(back[0].Default), "number 原文落位不规约")
+	})
+	t.Run("无值不出键", func(t *testing.T) {
+		b, err := json.Marshal([]SchemaField{{Name: "top", Type: "number"}})
+		assert.NoError(t, err)
+		assert.NotContains(t, string(b), "default")
+	})
+}
+
+// TestEndConfigOutputFieldsValidate 行级校验（spec 018 FR-009 / C2）：output 与
+// output_fields 互斥拒（二义终稿）；行 name 非空、节点内不重名；ref 恰为单一
+// {{var}}（点分下钻合法，字段名留运行期 strict）。空配置仍合法（存量零变化）。
+func TestEndConfigOutputFieldsValidate(t *testing.T) {
+	t.Run("合法映射过（含点分 ref）", func(t *testing.T) {
+		assert.NoError(t, EndConfig{OutputFields: []OutputField{
+			{Name: "summary", Ref: "{{llm1.summary}}"},
+			{Name: "limit", Ref: "{{input.limit}}"},
+			{Name: "raw", Ref: "{{tool1}}"},
+		}}.Validate())
+	})
+	t.Run("互斥拒：output 与 output_fields 并存", func(t *testing.T) {
+		assert.ErrorContains(t, EndConfig{Output: "{{reply}}", OutputFields: []OutputField{
+			{Name: "summary", Ref: "{{llm1.summary}}"},
+		}}.Validate(), "互斥")
+	})
+	t.Run("行 name 空拒", func(t *testing.T) {
+		assert.ErrorContains(t, EndConfig{OutputFields: []OutputField{{Name: "", Ref: "{{a}}"}}}.Validate(), "name")
+	})
+	t.Run("行 name 重名拒", func(t *testing.T) {
+		assert.ErrorContains(t, EndConfig{OutputFields: []OutputField{
+			{Name: "a", Ref: "{{x}}"}, {Name: "a", Ref: "{{y}}"},
+		}}.Validate(), "重名")
+	})
+	t.Run("ref 裸文本拒", func(t *testing.T) {
+		assert.ErrorContains(t, EndConfig{OutputFields: []OutputField{{Name: "a", Ref: "input"}}}.Validate(), "ref")
+	})
+	t.Run("ref 混排文本拒", func(t *testing.T) {
+		assert.ErrorContains(t, EndConfig{OutputFields: []OutputField{{Name: "a", Ref: "pre {{x}} post"}}}.Validate(), "ref")
+	})
+	t.Run("ref 双占位符拒", func(t *testing.T) {
+		assert.ErrorContains(t, EndConfig{OutputFields: []OutputField{{Name: "a", Ref: "{{x}}{{y}}"}}}.Validate(), "ref")
+	})
+	t.Run("ref 空串拒", func(t *testing.T) {
+		assert.ErrorContains(t, EndConfig{OutputFields: []OutputField{{Name: "a", Ref: ""}}}.Validate(), "ref")
+	})
+	t.Run("空配置与仅 output 仍合法（存量零变化）", func(t *testing.T) {
+		assert.NoError(t, EndConfig{}.Validate())
+		assert.NoError(t, EndConfig{Output: "{{reply}}"}.Validate())
+	})
+}
+
+// TestEndConfigOutputFieldsSerialization output_fields 序列化与解析契约（spec 018 C2）：
+// 带值出键且往返保值；空 / 缺省不出键；ParseNodeConfig(NodeEnd) 透传解析且行级校验
+// 挂在解析路径（坏 ref 保存期即拒）。
+func TestEndConfigOutputFieldsSerialization(t *testing.T) {
+	mapping := []OutputField{
+		{Name: "summary", Ref: "{{llm1.summary}}"},
+		{Name: "score", Ref: "{{llm1.score}}"},
+	}
+	t.Run("带值出键且往返保值", func(t *testing.T) {
+		b, err := json.Marshal(EndConfig{OutputFields: mapping})
+		assert.NoError(t, err)
+		assert.Contains(t, string(b), `"output_fields":[{"name":"summary","ref":"{{llm1.summary}}"},{"name":"score","ref":"{{llm1.score}}"}]`)
+		var c EndConfig
+		assert.NoError(t, json.Unmarshal(b, &c))
+		assert.Equal(t, mapping, c.OutputFields)
+	})
+	t.Run("空数组与缺省 marshal 不出键", func(t *testing.T) {
+		b, err := json.Marshal(EndConfig{})
+		assert.NoError(t, err)
+		assert.NotContains(t, string(b), "output_fields")
+		b, err = json.Marshal(EndConfig{OutputFields: []OutputField{}})
+		assert.NoError(t, err)
+		assert.NotContains(t, string(b), "output_fields")
+	})
+	t.Run("ParseNodeConfig 带 output_fields 解析透传", func(t *testing.T) {
+		cfg, err := ParseNodeConfig(NodeEnd, json.RawMessage(
+			`{"output_fields":[{"name":"summary","ref":"{{llm1.summary}}"}]}`))
+		assert.NoError(t, err)
+		c, ok := cfg.(*EndConfig)
+		assert.True(t, ok)
+		assert.Equal(t, []OutputField{{Name: "summary", Ref: "{{llm1.summary}}"}}, c.OutputFields)
+	})
+	t.Run("ParseNodeConfig 坏 ref 保存期拒", func(t *testing.T) {
+		_, err := ParseNodeConfig(NodeEnd, json.RawMessage(
+			`{"output_fields":[{"name":"a","ref":"裸文本"}]}`))
+		assert.ErrorContains(t, err, "ref")
+	})
+}
+
 func TestParseNodeConfig(t *testing.T) {
 	t.Run("llm happy", func(t *testing.T) {
 		cfg, err := ParseNodeConfig(NodeLLM, json.RawMessage(`{"model_id":"3","prompt":"判断意图：{{input}}","temperature":0}`))

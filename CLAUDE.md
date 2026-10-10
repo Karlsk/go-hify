@@ -1277,18 +1277,19 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/017-frontend-tool-events/plan.md](specs/017-frontend-tool-events/plan.md)
-(feature: chat 前端工具事件渲染——spec 017，纯前端增量篇：打开 tool_call/tool_result
-两帧的忽略分支为折叠卡片渲染 + 历史回放分组，流式与历史两路径同一形态——
-api/chat.ts 类型修正（result 收敛 ToolResultPayload{content,is_error}）+ switch 补
-两分发；useChat.ts ToolActivity 状态编排（running→done，流收尾残留卡标 interrupted，
-不可变整数组替换）+ loadMessages 历史分组（中间行/tool 行 id 配对归并进其后首个
-assistant 终答行、错误中断轮独立尾部气泡、MESSAGE_MAX 按原始行数截断）；新组件
-ToolActivityCard.vue（折叠/展开、状态图标、剥离 s<数字>__ 派生前缀进 title、
-args JSON + result 全文限高滚动）；MessageList.vue 气泡顶部卡片列 + v-memo 追加
-msg.toolActivities + 防御分支转「分组异常兜底」注释。三零边界：零后端改动、
-零新依赖（package.json 不动）、零新增设计 token（tokens.css 不动）；验收门 =
-cd web && npm run type-check && npm run build 全绿 + 手测六条人工项用户过；
-spec 见 specs/017-frontend-tool-events/spec.md，上位契约
-docs/changelog/chat/tool_events_frontend_spec.md F1–F5 冻结)
+[specs/018-workflow-start-end-nodes/plan.md](specs/018-workflow-start-end-nodes/plan.md)
+(feature: workflow 画布开始/结束节点与入参默认值——spec 018：① 画布伪开始节点（复用
+__start__ 哨兵恢复渲染、固定坐标不可删、点击开既有 schema 面板、左面板按钮移除，
+entry 语义零改动）；② end 输出映射——EndConfig 加法键 output_fields[{name,ref}]（与
+output 互斥拒），buildOutput 按引用构造终稿（声明类型优先、json.Marshal 转义），
+多 end 各自映射、图级 output_schema=并集、required 自动推导（全部映射 end 都产出=
+required），类型推导在前端三来源（input_schema/llm output_schema/子工作流
+output_schema，裸引用 string），R10 覆盖 ref 基名；③ SchemaField 加 default
+（json.RawMessage、required 禁配、类型探针校验），assembleInputJSON 子工作流补默认 +
+顶层 normalizeInputJSON 归一化（只补默认不新增拒绝）+ 试运行预填（清空「optional 且有
+default」的行从提交对象省略=用默认，无默认 optional 行空值照传零回归）。三零边界：零迁移（恒 21 applied）、零新依赖、零新错误码、
+chat/store/handler/组合根零改动；验收门 = go 全量测试 + workflow 覆盖率 ≥80% +
+web type-check/build 全绿 + 手测四场景用户过；spec 见
+specs/018-workflow-start-end-nodes/spec.md（2026-10-09 定稿 + clarify：多 end 放开、
+required 自动推导）)
 <!-- SPECKIT END -->

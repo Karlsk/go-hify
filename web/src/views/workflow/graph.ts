@@ -296,7 +296,8 @@ export function detailToGraphConfig(d: WorkflowDetail): GraphConfig {
 
 const SCHEMA_FIELD_TYPES: readonly string[] = ['string', 'number', 'boolean']
 
-/** 行表单校验：name trim 非空、不重名、type 限三值；错误文案带行号（1 起）。
+/** 行表单校验：name trim 非空、不重名、type 限三值；default 类型匹配且 required 禁配
+ *  （spec 018 FR-006 前端预检，对齐后端 ValidateSchemaFields）；错误文案带行号（1 起）。
  *  type 运行时可能越界（非法历史数据回填——TS 类型不设防，axios 不校验）。 */
 export function schemaFieldsError(fields: SchemaField[]): string | null {
   const seen = new Set<string>()
@@ -309,8 +310,146 @@ export function schemaFieldsError(fields: SchemaField[]): string | null {
     if (!SCHEMA_FIELD_TYPES.includes(f.type)) {
       return `第 ${i + 1} 行字段：type 必须是 string/number/boolean（当前值：${String(f.type)}）`
     }
+    if (f.default !== undefined) {
+      if (f.required) return `第 ${i + 1} 行字段：${name} 为必填，不能配置默认值`
+      const ok =
+        (f.type === 'string' && typeof f.default === 'string') ||
+        (f.type === 'number' && typeof f.default === 'number') ||
+        (f.type === 'boolean' && typeof f.default === 'boolean')
+      if (!ok) return `第 ${i + 1} 行字段：${name} 默认值类型须为 ${f.type}`
+    }
   }
   return null
+}
+
+// ---- spec 018：end 输出映射 → 图级 output_schema 并集推导（纯函数） ----
+
+/** 推导结果：schema = 全部映射 end 字段并集；conflict 非空 = 同名不同型冲突（调用方
+ *  保存期拦截——运行期 validateOutputSchema 兜底） */
+export interface DerivedOutputSchema {
+  schema: SchemaField[]
+  conflict?: string
+}
+
+/** 单一 {{var}} 引用 → 变量名与点分字段（宽容解析：非规范形态交由后端 R10 / 行级校验拒） */
+function splitRef(ref: string): { base: string; field?: string } {
+  const inner = ref.replace(/^\{\{/, '').replace(/\}\}$/, '').trim()
+  const dot = inner.indexOf('.')
+  return dot < 0 ? { base: inner } : { base: inner.slice(0, dot), field: inner.slice(dot + 1) }
+}
+
+/** 类型源收集（deriveOutputSchema / deriveRefType 共用）：input + 各 llm 节点
+ *  config.output_schema + 各 workflow 节点绑定的子工作流 output_schema（键 = 基名） */
+function buildTypeSources(
+  nodes: readonly GraphNode[],
+  inputSchema?: SchemaField[],
+  subflowSchemas?: Record<string, SchemaField[]>,
+): Map<string, Map<string, string>> {
+  const rowsToMap = (rows: unknown): Map<string, string> => {
+    const m = new Map<string, string>()
+    if (Array.isArray(rows)) {
+      for (const r of rows) {
+        if (typeof r?.name === 'string' && r.name && typeof r?.type === 'string') {
+          m.set(r.name, r.type)
+        }
+      }
+    }
+    return m
+  }
+  const sources = new Map<string, Map<string, string>>()
+  if (inputSchema?.length) sources.set('input', rowsToMap(inputSchema))
+  for (const n of nodes) {
+    if (n.type === 'llm' && Array.isArray(n.config.output_schema)) {
+      sources.set(n.key, rowsToMap(n.config.output_schema))
+    } else if (n.type === 'workflow' && typeof n.config.workflow_id === 'string') {
+      const sub = subflowSchemas?.[n.config.workflow_id]
+      if (sub) sources.set(n.key, rowsToMap(sub))
+    }
+  }
+  return sources
+}
+
+/** 单个 ref 的类型推导（映射行类型列显示用；与 deriveOutputSchema 同源规则：
+ *  三来源查表、裸引用与查不到 → string） */
+export function deriveRefType(
+  ref: string,
+  nodes: readonly GraphNode[],
+  inputSchema?: SchemaField[],
+  subflowSchemas?: Record<string, SchemaField[]>,
+): string {
+  const { base, field } = splitRef(ref)
+  if (!field) return 'string'
+  return buildTypeSources(nodes, inputSchema, subflowSchemas).get(base)?.get(field) ?? 'string'
+}
+
+/**
+ * 并集推导（FR-004 / T012）：扫全部 end 节点 config.output_fields——同名同型合并、
+ * 同名不同型返回 conflict；required 自动推导（全部映射 end 都产出 = required）；
+ * type 推导三来源 + 兜底：{{input.x}} → inputSchema、{{llmKey.field}} → 该 llm 节点
+ * config.output_schema、{{workflowKey.field}} → subflowSchemas[workflow_id]（键 =
+ * 子工作流 id 字符串，NodeInspector 编辑期喂入既有 subflowSchemaCache）、裸引用与
+ * 查不到来源 → string。description 从 currentSchema 按字段名承继（后端 OutputField
+ * 契约只有 {name,ref}，描述落在图级 schema 行）。analyze F1：推导只在检查器编辑时
+ * 执行——节点删除/更名不自动重推导（stale 由运行期校验兜底、重开映射编辑器即刷新）。
+ */
+export function deriveOutputSchema(
+  nodes: readonly GraphNode[],
+  inputSchema?: SchemaField[],
+  subflowSchemas?: Record<string, SchemaField[]>,
+  currentSchema?: SchemaField[],
+): DerivedOutputSchema {
+  const mappingEnds = nodes.filter(
+    (n) => n.type === 'end' && Array.isArray(n.config.output_fields),
+  )
+  if (mappingEnds.length === 0) return { schema: [] }
+
+  const sources = buildTypeSources(nodes, inputSchema, subflowSchemas)
+
+  // description 承继：currentSchema 按名取
+  const descOf = new Map<string, string>()
+  for (const f of currentSchema ?? []) {
+    if (f.name && f.description) descOf.set(f.name, f.description)
+  }
+
+  interface FieldAcc {
+    type: string
+    producedBy: number
+  }
+  const acc = new Map<string, FieldAcc>()
+  let conflict: string | undefined
+  for (const n of mappingEnds) {
+    const rows = n.config.output_fields as Array<{ name?: unknown; ref?: unknown }>
+    const seenInNode = new Set<string>() // 行内重名后端保存期拒，此处跳过重复行保守合并
+    for (const row of rows) {
+      const name = typeof row?.name === 'string' ? row.name.trim() : ''
+      const ref = typeof row?.ref === 'string' ? row.ref : ''
+      if (!name || seenInNode.has(name)) continue
+      seenInNode.add(name)
+      const { base, field } = splitRef(ref)
+      const type = field ? (sources.get(base)?.get(field) ?? 'string') : 'string'
+      const prev = acc.get(name)
+      if (!prev) {
+        acc.set(name, { type, producedBy: 1 })
+      } else {
+        if (prev.type !== type && !conflict) {
+          conflict = `输出字段 ${name} 在多个结束节点推导类型冲突（${prev.type} / ${type}）`
+        }
+        prev.producedBy++
+      }
+    }
+  }
+
+  const schema: SchemaField[] = []
+  acc.forEach((v, name) => {
+    schema.push({
+      name,
+      type: v.type as SchemaField['type'],
+      required: v.producedBy === mappingEnds.length,
+      description: descOf.get(name) ?? '',
+    })
+  })
+  schema.sort((a, b) => a.name.localeCompare(b.name))
+  return { schema, conflict }
 }
 
 // ---- 编辑提交组装（spec 010：PUT 整图替换；data-model 不变量 5） ----

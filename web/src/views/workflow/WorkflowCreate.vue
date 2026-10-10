@@ -1,8 +1,10 @@
 <template>
   <!-- 工作流创建第一步（spec 010 两步式重构，FR-012）：纯基础表单——名称 / 描述 /
-       类型 + task 型 I/O Schema 表单行编辑（SchemaFieldsEditor，FR-013 第一步侧；
-       chat 型不显示）。画布 / JSON 编排整体移至第二步（/workflows/create/orchestrate）。
-       回填：hasForm 时从草稿 store 读回（「上一步内容保留」的第一步侧，FR-014）。
+       类型 + task 型入参 Schema 表单行编辑（SchemaFieldsEditor，FR-013 第一步侧；
+       chat 型不显示）。spec 018 FR-005 入口收敛：出参不再在此编辑（唯一入口 =
+       第二步画布 end 节点「输出映射」——没画图时配出参本是空谈）。画布 / JSON
+       编排整体移至第二步（/workflows/create/orchestrate）。回填：hasForm 时从
+       草稿 store 读回（「上一步内容保留」的第一步侧，FR-014）。
        「创建工作流」= 本地校验（name 必填 + task 型 schemaFieldsError，拦截不发
        请求）→ store.saveForm → 跳第二步；创建请求发生在第二步。 -->
   <div>
@@ -51,16 +53,12 @@
           </span>
         </el-form-item>
 
-        <!-- task 型独有：I/O Schema 行编辑（FR-013；chat 型不显示） -->
+        <!-- task 型独有：入参 Schema 行编辑（FR-013；chat 型不显示）。出参在第二步
+             画布 end 节点「输出映射」配置（spec 018 FR-005 入口收敛） -->
         <template v-if="form.type === 'task'">
           <el-form-item label="入参 Schema">
             <div class="workflow-create__schema">
               <SchemaFieldsEditor v-model="form.inputSchema" />
-            </div>
-          </el-form-item>
-          <el-form-item label="出参 Schema">
-            <div class="workflow-create__schema">
-              <SchemaFieldsEditor v-model="form.outputSchema" />
             </div>
           </el-form-item>
         </template>
@@ -96,7 +94,6 @@ const form = reactive({
   description: store.description,
   type: store.type,
   inputSchema: [...store.inputSchema],
-  outputSchema: [...store.outputSchema],
 })
 
 const rules: FormRules = {
@@ -121,10 +118,10 @@ async function goOrchestrate(): Promise<void> {
   )
   if (!valid) return
 
-  // task 型：Schema 字段行本地校验（SC-004 前端拦截，错误文案含行号）
+  // task 型：入参 Schema 字段行本地校验（SC-004 前端拦截，错误文案含行号）；
+  // 出参 schema 不在第一步编辑（end 映射产出，第二步保存时校验）
   if (form.type === 'task') {
-    const err =
-      schemaFieldsError(form.inputSchema) ?? schemaFieldsError(form.outputSchema)
+    const err = schemaFieldsError(form.inputSchema)
     if (err) {
       notifyError(err)
       return
@@ -136,7 +133,6 @@ async function goOrchestrate(): Promise<void> {
     description: form.description,
     type: form.type,
     inputSchema: form.inputSchema,
-    outputSchema: form.outputSchema,
   })
   void router.push('/workflows/create/orchestrate')
 }

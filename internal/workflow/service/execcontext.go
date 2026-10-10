@@ -34,6 +34,12 @@ type execContext struct {
 	steps     []nodeStep
 	pendingIn map[string]string // 当前节点入参摘要：executor 分支写、walk record 时取走
 
+	// outputTypes 图级 output_schema 的字段名 → 声明类型表（spec 018 R4）：end 节点
+	// output_fields 值处理依据（string marshal 转义 / number+boolean 原 JSON 文本）。
+	// Execute / executeChild 从 wf.OutputSchema 装配；nil = 未声明或存量损坏（fail-open），
+	// buildOutputFields 走「可解析 JSON 则原样」回退规则。
+	outputTypes map[string]string
+
 	// 嵌套执行透传（spec 08）：depth 顶层=0（executeChild 递增、超 maxNestLevel 拒）；
 	// trial / conversationID / messageID 子 run 行与把关跟随父；childRunIDs 直接子
 	// run id 集（callWorkflow 落、收尾 UpdateParentRunIDs 批量回填 parent_run_id）。

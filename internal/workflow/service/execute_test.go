@@ -10,6 +10,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -805,4 +806,97 @@ func TestExecuteNestedParentWriteFailSkipsBackfill(t *testing.T) {
 	assert.Empty(t, res.RunID)
 	assert.Equal(t, 3, env.createRunCalls, "子 1 次 + 父重试 1 次")
 	assert.Empty(t, env.backfills, "父行未落库 → 跳过回填")
+}
+
+// ---- spec 018：顶层入参归一化与 optional 默认值（FR-007 / FR-008）----
+
+// TestNormalizeInputJSON 纯函数表驱动（FR-008 / R5）：合法 JSON 对象补缺失 optional
+// 默认后重序列化（已有字段原文不动）；非合法 JSON / 非对象 / 无可补 → 原文返回
+//（只补默认不新增拒绝，D5 边界）；required 缺失不补（保存期已拒 required+default，
+// 运行期防御同守）。
+func TestNormalizeInputJSON(t *testing.T) {
+	schema := []workflowapi.SchemaField{
+		{Name: "q", Type: "string", Required: true},
+		{Name: "limit", Type: "number", Default: json.RawMessage(`10`)},
+		{Name: "verbose", Type: "boolean", Default: json.RawMessage(`false`)},
+		{Name: "note", Type: "string", Default: json.RawMessage(`"n"`)},
+	}
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"缺失带默认 optional 补全", `{"q":"查"}`, `{"limit":10,"note":"n","q":"查","verbose":false}`},
+		{"字段已在场不覆盖", `{"q":"查","limit":5}`, `{"limit":5,"note":"n","q":"查","verbose":false}`},
+		{"未声明字段带不管", `{"q":"查","extra":1}`, `{"extra":1,"limit":10,"note":"n","q":"查","verbose":false}`},
+		{"非合法 JSON 原样返回", `纯文本入参`, `纯文本入参`},
+		{"数组原样返回", `[1,2]`, `[1,2]`},
+		{"数字原样返回", `42`, `42`},
+		{"带引号字符串原样返回", `"文本"`, `"文本"`},
+		{"null 原样返回", `null`, `null`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, normalizeInputJSON(tt.input, schema))
+		})
+	}
+	t.Run("空 schema 原样返回", func(t *testing.T) {
+		assert.Equal(t, `{"q":"查"}`, normalizeInputJSON(`{"q":"查"}`, nil))
+	})
+	t.Run("required 缺失不补（防御）", func(t *testing.T) {
+		got := normalizeInputJSON(`{}`, []workflowapi.SchemaField{
+			{Name: "q", Type: "string", Required: true, Default: json.RawMessage(`"兜底"`)},
+		})
+		assert.Equal(t, `{}`, got, "required 字段的 default 不生效（保存期已拒配置）")
+	})
+}
+
+// TestExecuteTaskInputDefault 顶层 task 型声明 schema：input 为合法 JSON 对象且缺
+// 带默认 optional 字段 → 归一化补默认进变量池（{{input.limit}} 渲染 10），run 轨迹
+// 记归一化后 input（实际执行值可追溯）。
+func TestExecuteTaskInputDefault(t *testing.T) {
+	nodes := []WorkflowNode{
+		{NodeKey: "classify", Type: "llm", Name: "带默认",
+			Config: `{"model_id":"3","prompt":"limit={{input.limit}}"}`},
+		{NodeKey: "finish", Type: "end", Config: `{"output":"{{classify}}"}`},
+	}
+	edges := []WorkflowEdge{{SourceNodeKey: "classify", TargetNodeKey: "finish"}}
+	env := newExecEnv(t, "published", nodes, edges, singleGen("ok"))
+	env.st.getByIDFn = func(id uint64) (*Workflow, error) {
+		wf := &Workflow{Name: "task 默认值", StartNodeKey: "classify", Status: "published", Type: "task",
+			InputSchema: strPtr(`[{"name":"q","type":"string","required":true},{"name":"limit","type":"number","default":10}]`)}
+		wf.ID = id
+		return wf, nil
+	}
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 9, Input: `{"q":"查"}`})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", res.Output)
+	require.Len(t, env.lastNodeRuns, 2)
+	assert.Contains(t, env.lastNodeRuns[0].Input, `"prompt":"limit=10"`, "模板按补默认后的 input 渲染")
+	assert.Contains(t, env.lastRun.Input, `\"limit\":10`, "run 轨迹记归一化后 input（wrapTraceJSON 内嵌转义形态）")
+}
+
+// TestExecuteTaskInputNonJSONPassthrough task 型声明 schema 但 input 为非 JSON 纯文本 →
+// 归一化放行原文（只补默认不新增拒绝），{{input}} 全文渲染、执行正常。
+func TestExecuteTaskInputNonJSONPassthrough(t *testing.T) {
+	nodes := []WorkflowNode{
+		{NodeKey: "classify", Type: "llm", Name: "纯文本",
+			Config: `{"model_id":"3","prompt":"x={{input}}"}`},
+		{NodeKey: "finish", Type: "end", Config: `{"output":"{{classify}}"}`},
+	}
+	edges := []WorkflowEdge{{SourceNodeKey: "classify", TargetNodeKey: "finish"}}
+	env := newExecEnv(t, "published", nodes, edges, singleGen("ok"))
+	env.st.getByIDFn = func(id uint64) (*Workflow, error) {
+		wf := &Workflow{Name: "纯文本放行", StartNodeKey: "classify", Status: "published", Type: "task",
+			InputSchema: strPtr(`[{"name":"q","type":"string","required":true}]`)}
+		wf.ID = id
+		return wf, nil
+	}
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 9, Input: `纯文本入参`})
+	require.NoError(t, err, "非 JSON input 照旧放行不新增拒绝")
+	assert.Equal(t, "ok", res.Output)
+	require.Len(t, env.lastNodeRuns, 2)
+	assert.Contains(t, env.lastNodeRuns[0].Input, `"prompt":"x=纯文本入参"`, "全文渲染不受归一化影响")
 }

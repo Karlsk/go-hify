@@ -436,9 +436,14 @@ func (e *executor) callAPI(ctx context.Context, cfg *workflowapi.ApiCallConfig, 
 	return string(body), nil
 }
 
-// buildOutput end 节点：output 模板渲染终稿；空 output = 取最后执行节点的输出
-//（与「无出边 = 隐式结束」语义一致）；无步骤（end 即首节点）返回空串。
+// buildOutput end 节点终稿（spec 018 扩展）：output_fields 非空（映射模式）优先——
+// buildOutputFields 按引用构造 JSON 对象（Marshal 转义，字符串含引号 / 换行安全）；
+// 否则走既有 output 模板路径（高级模式）：空 output = 取最后执行节点的输出（与
+// 「无出边 = 隐式结束」语义一致）；无步骤（end 即首节点）返回空串。
 func (e *executor) buildOutput(cfg *workflowapi.EndConfig, c *execContext) (string, error) {
+	if len(cfg.OutputFields) > 0 {
+		return e.buildOutputFields(cfg.OutputFields, c)
+	}
 	if cfg.Output == "" {
 		if len(c.steps) == 0 {
 			return "", nil
@@ -451,6 +456,67 @@ func (e *executor) buildOutput(cfg *workflowapi.EndConfig, c *execContext) (stri
 		return "", fmt.Errorf("%w: %v", errs.ErrValidationFailed, err)
 	}
 	return out, nil
+}
+
+// buildOutputFields 映射模式终稿构造（spec 018 FR-009 / R6）：逐字段 lookup(ref) 取池值
+//（含一级下钻，缺失 = strict 图缺陷），按 ec.outputTypes 声明类型处理值——声明 string
+// 按字符串落位（json.Marshal 转义）；声明 number / boolean 须可解析为对应 JSON 型
+//（原文 RawMessage 落位，解析失败 = 声明与实际不符的图缺陷）；字段未声明类型回退
+// 「可解析 JSON 则原样、否则按字符串」。整对象 Marshal 产出（map 按 key 排序，确定性
+// 序列化），既有 validateOutputSchema 兜底校验。nodeIn 记映射摘要（对齐既有 output
+// 模板原文形态——记录渲染前配置，排障可复现）。
+func (e *executor) buildOutputFields(fields []workflowapi.OutputField, c *execContext) (string, error) {
+	inTrace, err := json.Marshal(fields)
+	if err != nil {
+		return "", fmt.Errorf("marshal output_fields: %w", err) // 防御兜底：结构体序列化不会失败
+	}
+	c.setNodeIn(map[string]string{"output_fields": string(inTrace)})
+	obj := make(map[string]any, len(fields))
+	for _, f := range fields {
+		m := singleVarRE.FindStringSubmatch(f.Ref)
+		if m == nil { // 理论不可达（保存期 EndConfig.Validate 已挡），运行时兜底归图缺陷
+			return "", fmt.Errorf("%w: output_fields 字段 %s ref 非法 %q", errs.ErrValidationFailed, f.Name, f.Ref)
+		}
+		v, ok := c.lookup(m[1])
+		if !ok {
+			return "", fmt.Errorf("%w: variable %q not defined", errs.ErrValidationFailed, m[1])
+		}
+		switch c.outputTypes[f.Name] {
+		case "string":
+			obj[f.Name] = v
+		case "number":
+			if !isJSONNumberText(v) {
+				return "", fmt.Errorf("%w: output 字段 %s 声明 number 但值不可解析: %q", errs.ErrValidationFailed, f.Name, v)
+			}
+			obj[f.Name] = json.RawMessage(v)
+		case "boolean":
+			if v != "true" && v != "false" {
+				return "", fmt.Errorf("%w: output 字段 %s 声明 boolean 但值不可解析: %q", errs.ErrValidationFailed, f.Name, v)
+			}
+			obj[f.Name] = json.RawMessage(v)
+		default: // 未声明（nil 表或字段不在 schema）：可解析 JSON 则原样、否则按字符串
+			if json.Valid([]byte(v)) && v != "null" {
+				obj[f.Name] = json.RawMessage(v)
+			} else {
+				obj[f.Name] = v
+			}
+		}
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "", fmt.Errorf("marshal output object: %w", err) // 防御兜底：值均为合法 JSON 类型
+	}
+	return string(b), nil
+}
+
+// isJSONNumberText 值原文是否为合法 JSON number 字面量。null 对非指针类型是无操作
+// 成功（json.Number 解码不报错），显式排除。
+func isJSONNumberText(v string) bool {
+	if v == "null" {
+		return false
+	}
+	var n json.Number
+	return json.Unmarshal([]byte(v), &n) == nil
 }
 
 // route 游走出边选择（db_model 决策 #4）：按声明顺序找首条 `*cond == result` 的条件

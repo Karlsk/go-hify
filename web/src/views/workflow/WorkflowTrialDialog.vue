@@ -200,7 +200,12 @@ watch(
   (open) => {
     if (!open) return
     inputText.value = ''
-    fieldValues.value = {}
+    // spec 018 FR-011：B 态按 input_schema[].default 预填（可改可清空）
+    const prefilled: Record<string, string | number | boolean> = {}
+    for (const f of props.workflow?.input_schema ?? []) {
+      if (f.default !== undefined) prefilled[f.name] = f.default
+    }
+    fieldValues.value = prefilled
     result.value = null
     errorMsg.value = ''
     running.value = false
@@ -241,9 +246,18 @@ async function run(): Promise<void> {
     } catch {
       return // scroll-to-error 已定位首个缺失行
     }
-    input = JSON.stringify(
-      Object.fromEntries(schemaFields.value.map((f) => [f.name, fieldValues.value[f.name]])),
-    )
+    // spec 018 FR-011 组装规则：「optional 且配了 default」的行清空（undefined / ''）
+    // → 从提交对象省略（清空 = 使用默认，由后端顶层归一化补回）；未配 default 的
+    // optional 行空值照传 ""（现状——省略会令 strict 渲染报变量未定义，analyze F2）。
+    const entries: [string, string | number | boolean][] = []
+    for (const f of schemaFields.value) {
+      const v = fieldValues.value[f.name]
+      if (!f.required && f.default !== undefined && (v === undefined || v === '')) {
+        continue
+      }
+      entries.push([f.name, v as string | number | boolean])
+    }
+    input = JSON.stringify(Object.fromEntries(entries))
   } else {
     const text = inputText.value.trim()
     if (!text) {

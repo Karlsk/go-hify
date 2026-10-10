@@ -6,12 +6,12 @@
        按供应商分组）；子工作流下拉前端过滤 task 型。 -->
   <aside class="node-inspector">
     <!-- 伪节点面板模式（FR-002，contracts §2）：伪节点上下文（sentinel）时替代节点表单——
-         task 型 = 入参/出参两段 Schema 行表单（复用 SchemaFieldsEditor 语义与行校验，
-         编辑 emit 同源上行宿主单源）；chat 型 = 单一 input 说明（只读） -->
+         task 型 = 入参 Schema 行表单（spec 018 FR-005：出参收敛至 end 节点映射模式，
+         本面板不再编辑 output_schema）；chat 型 = 单一 input 说明（只读） -->
     <div v-if="isStartPanel" class="node-inspector__body">
       <div class="node-inspector__header">
         <span class="node-inspector__type">开始</span>
-        <p class="node-inspector__hint">工作流入参 / 出参契约（子工作流节点引用本工作流的字段面）</p>
+        <p class="node-inspector__hint">工作流入参契约（子工作流节点引用本工作流的字段面）</p>
       </div>
 
       <template v-if="graphKind === 'chat'">
@@ -31,18 +31,10 @@
             :disabled="readonly"
             @update:model-value="(rows: SchemaField[]) => emit('update:inputSchema', rows)"
           />
+          <p class="node-inspector__hint">
+            出参在结束节点的「输出映射」中配置；伪节点不进图主体序列化（JSON 模式与提交载荷均不可见）
+          </p>
         </div>
-        <div class="node-inspector__field">
-          <span class="node-inspector__label">出参 Output</span>
-          <SchemaFieldsEditor
-            :model-value="outputSchema ?? []"
-            :disabled="readonly"
-            @update:model-value="(rows: SchemaField[]) => emit('update:outputSchema', rows)"
-          />
-        </div>
-        <p class="node-inspector__hint">
-          伪节点不进图主体序列化（JSON 模式与提交载荷均不可见）；schema 由页面表单同源持有
-        </p>
       </template>
     </div>
 
@@ -117,7 +109,99 @@
       </template>
 
       <template v-else-if="nodeType === 'end'">
-        <div class="node-inspector__field">
+        <!-- spec 018 FR-003/FR-004：task 型 end 双模式——映射模式（output_fields，逐字段
+             引用变量构造终稿 JSON 对象）与高级模式（output 自由模板）互斥；chat 型保持
+             单一 output 模板（无 output_schema，映射不适用） -->
+        <template v-if="graphKind === 'task'">
+          <div class="node-inspector__field">
+            <el-radio-group
+              :model-value="endMode"
+              :disabled="readonly"
+              size="small"
+              @update:model-value="(v: string | number | boolean | undefined) => switchEndMode(v === 'advanced' ? 'advanced' : 'mapping')"
+            >
+              <el-radio-button value="mapping">输出映射</el-radio-button>
+              <el-radio-button value="advanced">高级模板</el-radio-button>
+            </el-radio-group>
+            <p class="node-inspector__hint">
+              映射：逐字段引用变量，终稿为 JSON 对象（字段类型自动推导）；
+              高级模板：自由 <code>{{ INPUT_REF_TEXT }}</code> 风格模板
+            </p>
+          </div>
+
+          <div v-if="endMode === 'mapping'" class="node-inspector__field">
+            <span class="node-inspector__label">输出字段映射</span>
+            <div v-if="mappingRows.length > 0" class="node-inspector__map-grid node-inspector__map-header">
+              <span>字段名</span>
+              <span>引用变量</span>
+              <span>类型</span>
+              <span>描述</span>
+              <span><!-- 删除列占位 --></span>
+            </div>
+            <div
+              v-for="(row, i) in mappingRows"
+              :key="i"
+              class="node-inspector__map-grid node-inspector__map-row"
+            >
+              <el-input
+                :model-value="row.name"
+                :disabled="readonly"
+                placeholder="字段名"
+                @update:model-value="(v: string) => onMapFieldInput(i, 'name', v)"
+              />
+              <el-select
+                :model-value="row.ref"
+                :disabled="readonly"
+                placeholder="选择变量"
+                filterable
+                @update:model-value="(v: string) => onMapFieldInput(i, 'ref', v)"
+              >
+                <el-option-group v-for="g in variableGroups" :key="g.group" :label="g.group">
+                  <el-option
+                    v-for="o in g.options"
+                    :key="o.insert"
+                    :label="o.label"
+                    :value="o.insert"
+                  />
+                </el-option-group>
+              </el-select>
+              <span class="node-inspector__map-type" :title="`推导类型（来源：${rowRefSource(row.ref)}）`">
+                {{ rowType(row.ref) }}
+              </span>
+              <el-input
+                :model-value="row.description"
+                :disabled="readonly"
+                placeholder="描述（可选）"
+                @update:model-value="(v: string) => onMapFieldInput(i, 'description', v)"
+              />
+              <el-button v-if="!readonly" link type="danger" @click="removeMappingRow(i)">
+                <el-icon><Delete /></el-icon>
+              </el-button>
+              <span v-else><!-- 只读态删除列占位 --></span>
+            </div>
+            <el-button v-if="!readonly" plain @click="addMappingRow">
+              <el-icon><Plus /></el-icon>
+              添加字段
+            </el-button>
+            <p v-if="mappingError" class="node-inspector__error">{{ mappingError }}</p>
+            <p v-else class="node-inspector__hint">
+              类型由被引变量推导；全部结束节点都产出的字段为必填——图级出参 schema 随映射自动同步
+            </p>
+          </div>
+
+          <div v-else class="node-inspector__field">
+            <span class="node-inspector__label">Output</span>
+            <TemplateField
+              v-model="output"
+              :variables="variableGroups"
+              :disabled="readonly"
+              :rows="3"
+              placeholder="{{var}} 模板，如 {{reply}}（可选）"
+            />
+          </div>
+        </template>
+
+        <div v-else class="node-inspector__field">
           <span class="node-inspector__label">Output</span>
           <TemplateField
             v-model="output"
@@ -359,6 +443,7 @@ import { getModelList, getProviderList, type ModelItem } from '@/api/provider'
 import {
   getWorkflowDetail,
   getWorkflowList,
+  type EndNodeConfig,
   type LLMNodeConfig,
   type SchemaField,
 } from '@/api/workflow'
@@ -369,11 +454,15 @@ import TemplateField, {
 import SchemaFieldsEditor from './SchemaFieldsEditor.vue'
 import {
   ancestorsOf,
+  canvasToGraphNodes,
+  deriveOutputSchema,
+  deriveRefType,
   formatAuthorization,
   isStartContextNode,
   nodeTypeLabel,
   parseAuthorization,
   type AuthPreset,
+  type GraphNode,
   type InspectorEdge,
   type InspectorGraphContext,
   type InspectorNode,
@@ -492,6 +581,147 @@ const edgeCondition = computed<string>({
     if (props.edge) props.edge.label = value
   },
 })
+
+// ---- spec 018：end 节点映射模式（task 型，FR-003 / FR-004） ----
+
+/** 映射行编辑面（description 承载于图级 output_schema 行——后端 OutputField 契约无此键） */
+interface MappingRow {
+  name: string
+  ref: string
+  description: string
+}
+
+const mappingRows = ref<MappingRow[]>([])
+const endMode = ref<'mapping' | 'advanced'>('mapping')
+const mappingError = ref('')
+
+/** 图级 GraphNode 视图（deriveOutputSchema 输入；config 引用共享单源） */
+const graphNodes = computed<GraphNode[]>(() => canvasToGraphNodes(props.graph?.nodes ?? []))
+
+/** 子工作流 output_schema 查表（deriveOutputSchema 第三参；cacheVersion 驱动响应） */
+const subflowSchemaMap = computed<Record<string, SchemaField[]>>(() => {
+  cacheVersion.value
+  const m: Record<string, SchemaField[]> = {}
+  subflowSchemaCache.forEach((v, id) => {
+    m[id] = v.output
+  })
+  return m
+})
+
+/** 行类型推导列（与 deriveOutputSchema 同源规则） */
+function rowType(ref: string): string {
+  return deriveRefType(ref, graphNodes.value, props.inputSchema, subflowSchemaMap.value)
+}
+
+/** 行类型来源说明（悬浮提示）：input / 上游 llm / 子工作流 / 裸引用 */
+function rowRefSource(ref: string): string {
+  const inner = ref.replace(/^\{\{/, '').replace(/\}\}$/, '').trim()
+  const dot = inner.indexOf('.')
+  const base = dot < 0 ? inner : inner.slice(0, dot)
+  if (dot < 0) return '裸引用，恒为 string'
+  if (base === 'input') return 'input_schema'
+  const node = graphNodes.value.find((n) => n.key === base)
+  if (!node) return '未知来源，兜底 string'
+  if (node.type === 'llm') return 'llm 输出字段声明'
+  if (node.type === 'workflow') return '子工作流出参'
+  return '无类型声明，恒为 string'
+}
+
+/** 反解析重建（FR-003）：初始模式 = 有 output_fields → 映射 / 仅 output → 高级 /
+ *  全新 → 映射；行集回填 config.output_fields（description 自当前 output_schema 承继） */
+function rebuildEndForm(): void {
+  mappingError.value = ''
+  if (nodeType.value !== 'end') return
+  const cfg = props.node?.data?.config as Partial<EndNodeConfig> | undefined
+  const fields = Array.isArray(cfg?.output_fields) ? cfg.output_fields : []
+  if (fields.length > 0) endMode.value = 'mapping'
+  else if (typeof cfg?.output === 'string' && cfg.output) endMode.value = 'advanced'
+  else endMode.value = 'mapping'
+  const descOf = new Map(
+    (props.outputSchema ?? []).map((f) => [f.name, f.description ?? ''] as const),
+  )
+  mappingRows.value = fields.map((r) => ({
+    name: typeof r?.name === 'string' ? r.name : '',
+    ref: typeof r?.ref === 'string' ? r.ref : '',
+    description: descOf.get(typeof r?.name === 'string' ? r.name : '') ?? '',
+  }))
+}
+
+/** 行编辑 → config.output_fields + 图级 output_schema 并集同步（FR-004）。
+ *  冲突拦截（同名不同型跨 end）：不写 config、红字提示——冲突行永不进保存载荷，
+ *  修正后写入。空行不产出（编辑中空行留草稿，受控回路同 headerRows）。 */
+function syncMappingToConfig(): void {
+  const cfg = props.node?.data?.config
+  if (!cfg) return
+  const hadFields = Array.isArray(cfg.output_fields)
+  const rows = mappingRows.value.filter((r) => r.name.trim())
+  const wouldBe = { ...cfg }
+  if (rows.length > 0) {
+    wouldBe.output_fields = rows.map((r) => ({ name: r.name.trim(), ref: r.ref }))
+  } else {
+    delete wouldBe.output_fields
+  }
+  const wouldNodes = graphNodes.value.map((n) =>
+    n.key === props.node?.id ? { ...n, config: wouldBe } : n,
+  )
+  const derived = deriveOutputSchema(
+    wouldNodes,
+    props.inputSchema,
+    subflowSchemaMap.value,
+    props.outputSchema,
+  )
+  if (derived.conflict) {
+    mappingError.value = `${derived.conflict}（修正后才会写入配置）`
+    return
+  }
+  mappingError.value = ''
+  if (rows.length > 0) cfg.output_fields = wouldBe.output_fields
+  else delete cfg.output_fields
+  if (rows.length > 0 || hadFields) {
+    // description 落图级 schema 行（OutputField 契约无此键）；承继行保留原描述
+    const descOf = new Map(
+      mappingRows.value
+        .filter((r) => r.name.trim() && r.description)
+        .map((r) => [r.name.trim(), r.description] as const),
+    )
+    emit(
+      'update:outputSchema',
+      derived.schema.map((f) => ({ ...f, description: descOf.get(f.name) ?? f.description })),
+    )
+  }
+}
+
+function onMapFieldInput(index: number, field: keyof MappingRow, value: string): void {
+  const row = mappingRows.value[index]
+  if (!row) return
+  row[field] = value
+  syncMappingToConfig()
+}
+
+function addMappingRow(): void {
+  mappingRows.value = [...mappingRows.value, { name: '', ref: '', description: '' }]
+}
+
+function removeMappingRow(index: number): void {
+  mappingRows.value = mappingRows.value.filter((_, i) => i !== index)
+  syncMappingToConfig()
+}
+
+/** 模式切换（互斥）：映射 ← → 高级模板，切换即清另一形态 config 键（后端并存拒）；
+ *  切到高级保留当前 outputSchema 不动（手写 schema / 历史值不误清，JSON 模式可改） */
+function switchEndMode(next: 'mapping' | 'advanced'): void {
+  if (next === endMode.value) return
+  endMode.value = next
+  const cfg = props.node?.data?.config
+  if (!cfg || props.readonly) return
+  if (next === 'mapping') {
+    delete cfg.output
+    syncMappingToConfig()
+  } else {
+    delete cfg.output_fields
+    mappingError.value = ''
+  }
+}
 
 /** 连线信息展示：source → target（FR-001 删除前的身份确认） */
 const edgeLabel = computed(
@@ -792,9 +1022,13 @@ function removeHeaderRow(index: number): void {
 }
 
 // 选中节点切换即重建 headers 行与 Auth 区（config.headers 引用共享，行编辑不换节点对象）
+// + end 映射模式行集（spec 018）
 watch(
   () => props.node,
-  () => rebuildApiForm(),
+  () => {
+    rebuildApiForm()
+    rebuildEndForm()
+  },
   { immediate: true },
 )
 
@@ -1054,6 +1288,30 @@ function setSubflowInputValue(name: string, value: string): void {
 .node-inspector__subflow-name {
   color: var(--hf-text-1);
   font-size: var(--hf-font-size-xs);
+  word-break: break-all;
+}
+
+/* end 映射行（spec 018）：字段名 / 引用变量 / 类型（只读）/ 描述 / 删除 */
+.node-inspector__map-grid {
+  display: grid;
+  grid-template-columns: minmax(64px, 1fr) minmax(80px, 1.2fr) 56px minmax(60px, 1fr) 28px;
+  gap: var(--hf-space-1);
+  align-items: center;
+}
+
+.node-inspector__map-header {
+  color: var(--hf-text-2);
+  font-size: var(--hf-font-size-xs);
+}
+
+.node-inspector__map-row {
+  margin-bottom: var(--hf-space-1);
+}
+
+.node-inspector__map-type {
+  color: var(--hf-text-3);
+  font-size: var(--hf-font-size-xs);
+  text-align: center;
   word-break: break-all;
 }
 

@@ -103,8 +103,19 @@ func (s *workflowService) Execute(ctx context.Context, req workflowapi.ExecuteWo
 	ctx, cancel := context.WithTimeoutCause(ctx, workflowTimeout, errWorkflowTimeout)
 	defer cancel()
 
+	// 顶层入参归一化（spec 018 FR-008）：task 型声明 input_schema 时补缺失 optional
+	// 默认（只补默认不新增拒绝——非 JSON / 非对象 / 含未声明字段照旧放行；schema 损坏
+	// fail-open 原文）。归一化产物同入变量池与 run 轨迹（实际执行值可追溯）。
+	input := req.Input
+	if wf.Type == string(workflowapi.WorkflowTypeTask) && wf.InputSchema != nil {
+		if fields, err := schemaFields(wf.InputSchema); err == nil {
+			input = normalizeInputJSON(input, fields)
+		}
+	}
+
 	started := time.Now()
-	ec := newExecContext(req.Input)
+	ec := newExecContext(input)
+	ec.outputTypes = outputTypeMap(wf.OutputSchema) // spec 018 R4：end 映射模式值处理依据
 	ec.trial = req.Trial // 嵌套透传（spec 08）：子把关 trial 跟随、子 run 引用透传
 	ec.conversationID = req.ConversationID
 	ec.messageID = req.MessageID
@@ -125,7 +136,7 @@ func (s *workflowService) Execute(ctx context.Context, req workflowapi.ExecuteWo
 	// 仍败则结果照返、RunID 置空、ERROR 日志带 trace_id——轨迹可丢，执行结果不可丢。
 	writeCtx := context.WithoutCancel(ctx)
 	meta := runMeta{trigger: "console", trial: req.Trial, conversationID: req.ConversationID,
-		messageID: req.MessageID, input: req.Input}
+		messageID: req.MessageID, input: input}
 	if req.ConversationID != nil {
 		meta.trigger = "chat" // 进程内调用方（FR1 下游消费者；O7b trigger 显式传参）
 	}
@@ -353,6 +364,7 @@ func (s *workflowService) executeChild(ctx context.Context, workflowID uint64, f
 
 	// 子池全新起步（FR5）：只含自身 input（组装出的 JSON 文本），不继承父 vars。
 	ec := newExecContext(assembled)
+	ec.outputTypes = outputTypeMap(wf.OutputSchema) // spec 018 R4：子图 end 映射同样按子 schema 定型
 	ec.depth = depth
 	ec.trial = parent.trial
 	ec.conversationID = parent.conversationID
@@ -427,7 +439,10 @@ func assembleInputJSON(fields map[string]string, schemaText *string) (string, er
 			if f.Required {
 				return "", fmt.Errorf("缺少 required 字段 %s", f.Name)
 			}
-			continue // optional 缺省省略
+			if len(f.Default) > 0 { // spec 018 FR-007：optional 缺失且有默认 → 补默认（原文落位）
+				obj[f.Name] = f.Default
+			}
+			continue // optional 无默认缺省省略
 		}
 		switch f.Type {
 		case "string":
@@ -469,6 +484,56 @@ func assembleInputJSON(fields map[string]string, schemaText *string) (string, er
 		return "", err // 防御兜底：map[string]any 全为合法 JSON 值，不会失败
 	}
 	return string(b), nil
+}
+
+// normalizeInputJSON 顶层 task 型入参归一化（spec 018 FR-008，纯函数）：input 为合法
+// JSON 对象时对「缺失且带 default 的 optional 字段」补默认后重序列化；非合法 JSON /
+// 非对象（数组 / 数字 / 字符串 / null）/ 无可补字段 → 原文返回（只补默认不新增拒绝，
+// D5 拍板——strict 校验留给运行期模板渲染与未来虚拟工具 spec）。map 重序列化按 key
+// 排序（Go 标准库保证），{{input.x}} 下钻是解析型取值、键序无关；required 字段的
+// default 不生效（保存期已拒 required+default，运行期防御同守）。
+func normalizeInputJSON(input string, fields []workflowapi.SchemaField) string {
+	if len(fields) == 0 {
+		return input
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(input), &obj); err != nil || obj == nil {
+		return input
+	}
+	changed := false
+	for _, f := range fields {
+		if f.Required || len(f.Default) == 0 {
+			continue
+		}
+		if _, ok := obj[f.Name]; ok {
+			continue // 已在场不覆盖（显式传值优先）
+		}
+		obj[f.Name] = f.Default
+		changed = true
+	}
+	if !changed {
+		return input
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return input // 防御兜底：值来自已解析 JSON，不会失败
+	}
+	return string(b)
+}
+
+// outputTypeMap 图级 output_schema → 字段名到声明类型表（spec 018 R4）：Execute /
+// executeChild 装配进 execContext，end 节点映射模式按声明类型处理值。解析失败置 nil
+//（fail-open——存量 schema 损坏走「可解析 JSON 则原样」回退，不阻断执行）。
+func outputTypeMap(schemaText *string) map[string]string {
+	fields, err := schemaFields(schemaText)
+	if err != nil {
+		return nil
+	}
+	m := make(map[string]string, len(fields))
+	for _, f := range fields {
+		m[f.Name] = f.Type
+	}
+	return m
 }
 
 // validateOutputSchema 终稿按 output_schema 校验（spec 08 FR9，纯函数）：未声明

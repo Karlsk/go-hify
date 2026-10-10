@@ -576,6 +576,10 @@ func nodeTemplateRefs(n workflowapi.NodeReq) ([]string, error) {
 		}
 	case *workflowapi.EndConfig:
 		refs = templateRefs(v.Output)
+		// spec 018：映射模式各 ref 同受 R10 基名约束（slice 有序，天然确定性）。
+		for _, of := range v.OutputFields {
+			refs = append(refs, templateRefs(of.Ref)...)
+		}
 	case *workflowapi.WorkflowNodeConfig:
 		// inputs 值是 {{var}} 模板（spec 08 §4.1），R10 天然覆盖；键是子 schema 字段名
 		// 非变量引用，不查。

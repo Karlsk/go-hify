@@ -36,13 +36,34 @@ export interface WorkflowItem {
   created_at: string
 }
 
-/** task 型结构化 I/O 契约的字段（spec 08 §4.5 简化形态） */
+/** task 型结构化 I/O 契约的字段（spec 08 §4.5 简化形态；spec 018 加 default） */
 export interface SchemaField {
   name: string
   /** string / number / boolean */
   type: 'string' | 'number' | 'boolean'
   required: boolean
   description?: string
+  /** 可选默认值（spec 018 加法键）：仅 optional 字段可配（后端 required+default 保存期拒）；值类型 = type 对应的 JSON 值；子工作流传参与顶层归一化按此补全 */
+  default?: string | number | boolean
+}
+
+/** end 节点输出映射行（spec 018 加法键 EndConfig.output_fields 元素） */
+export interface EndOutputField {
+  name: string
+  /** 单一 {{var}} 引用（点分下钻合法），禁混排文本 */
+  ref: string
+}
+
+/**
+ * end 节点 config 的类型面（对齐后端 EndConfig；spec 018 起含加法键 output_fields）。
+ * 映射模式（output_fields，后端按引用构造终稿 JSON 对象）与高级模式（output，自由
+ * {{var}} 模板）互斥——后端并存保存期拒。config 仍是 Record 透传（同 LLMNodeConfig）。
+ */
+export interface EndNodeConfig {
+  /** 高级模式模板；与 output_fields 互斥 */
+  output?: string
+  /** 映射模式（spec 018）：字段名 → 单一 {{var}} 引用；与 output 互斥 */
+  output_fields?: EndOutputField[]
 }
 
 /**

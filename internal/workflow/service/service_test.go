@@ -569,6 +569,40 @@ func TestValidateTemplateRefsBaseName(t *testing.T) {
 	})
 }
 
+// ---- spec 018：R10 覆盖 end.output_fields 各 ref（FR-009 / R7）----
+
+// TestValidateTemplateRefsOutputFields end 映射模式 ref 同受 R10 基名约束：祖先 /
+// input（含点分下钻）过；非祖先 / 错字基名拒（报错带节点 key 与完整 ref）。
+// 纯函数直测，零 IO。
+func TestValidateTemplateRefsOutputFields(t *testing.T) {
+	llm := workflowapi.NodeReq{Key: "classify", Type: workflowapi.NodeLLM,
+		Config: json.RawMessage(`{"model_id":"3","prompt":"意图"}`)}
+	endCfg := func(fields string) workflowapi.NodeReq {
+		return workflowapi.NodeReq{Key: "final", Type: workflowapi.NodeEnd,
+			Config: json.RawMessage(fmt.Sprintf(`{"output_fields":%s}`, fields))}
+	}
+	edges := []workflowapi.EdgeReq{{SourceNodeKey: "classify", TargetNodeKey: "final"}}
+
+	t.Run("祖先与 input 过（含点分下钻与裸引用）", func(t *testing.T) {
+		nodes := []workflowapi.NodeReq{llm, endCfg(
+			`[{"name":"s","ref":"{{classify.summary}}"},{"name":"q","ref":"{{input.q}}"},{"name":"raw","ref":"{{classify}}"}]`)}
+		assert.NoError(t, validateTemplateRefs(nodes, edges))
+	})
+	t.Run("非祖先基名拒", func(t *testing.T) {
+		nodes := []workflowapi.NodeReq{llm, endCfg(`[{"name":"s","ref":"{{downstream}}"}]`)}
+		err := validateTemplateRefs(nodes, edges)
+		require.ErrorIs(t, err, errs.ErrValidationFailed)
+		assert.Contains(t, err.Error(), "final", "报错带节点 key")
+		assert.Contains(t, err.Error(), "downstream", "报错带引用名")
+	})
+	t.Run("错字基名点分拒（报错带完整 ref）", func(t *testing.T) {
+		nodes := []workflowapi.NodeReq{llm, endCfg(`[{"name":"s","ref":"{{clasify.summary}}"}]`)}
+		err := validateTemplateRefs(nodes, edges)
+		require.ErrorIs(t, err, errs.ErrValidationFailed)
+		assert.Contains(t, err.Error(), "clasify.summary")
+	})
+}
+
 // condition 比较式右侧 'literal' 是字面量非引用、不查：右侧占位符形态（下游 key）
 // 也不当作引用（与执行期 evalCondition 同一切分规则）。
 func TestCreateConditionLiteralNotScanned(t *testing.T) {

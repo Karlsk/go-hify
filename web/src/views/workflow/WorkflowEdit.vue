@@ -1,12 +1,12 @@
 <template>
   <!-- 工作流编辑页（US2 整页形态，fullBleed）：工具栏（返回 + 名称 / 描述内联 +
-       类型禁用单选「类型不可变，换型需删除重建」FR-010 + task 型 I/O Schema
-       抽屉入口 FR-008）+ GraphModeEditor 整页编排（画布默认可切 JSON，fill
-       铺满）。GET 回填（404 / 失败回列表）；脏态守卫双通道（路由离开确认 +
-       浏览器刷新 / 关闭拦截，FR-011）；保存链路（schema 校验 → getGraph →
-       buildUpdatePayload 不带 type → PUT，成功回详情页，FR-009）。
-       I/O Schema 单源（FR-002）：抽屉表单与伪节点面板绑同一页面 ref，一处改另一处同步；
-       selfWorkflowId 透传 = 子工作流下拉排除自身（FR-006）。 -->
+       类型禁用单选「类型不可变，换型需删除重建」FR-010）+ GraphModeEditor 整页
+       编排（画布默认可切 JSON，fill 铺满）。GET 回填（404 / 失败回列表）；脏态
+       守卫双通道（路由离开确认 + 浏览器刷新 / 关闭拦截，FR-011）；保存链路
+       （schema 校验 → getGraph → buildUpdatePayload 不带 type → PUT，成功回
+       详情页，FR-009）。I/O Schema 单源（FR-002）：spec 018 FR-005 入口收敛后
+       唯一编辑入口在画布——入参 = 开始节点面板、出参 = end 节点「输出映射」
+       （原 I/O Schema 抽屉移除）；selfWorkflowId 透传 = 子工作流下拉排除自身（FR-006）。 -->
   <div v-loading="loading" class="workflow-edit">
     <template v-if="detail">
       <header class="workflow-edit__toolbar">
@@ -27,9 +27,6 @@
         <el-tooltip content="类型不可变，换型需删除重建" placement="bottom">
           <el-icon class="workflow-edit__type-lock"><InfoFilled /></el-icon>
         </el-tooltip>
-        <el-button v-if="type === 'task'" @click="schemaDrawer = true">
-          I/O Schema
-        </el-button>
         <!-- 试运行（spec 013）：脏态先阻断（跑的是已保存版本）；入口语义见 openTrial -->
         <el-button @click="openTrial">试运行</el-button>
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
@@ -51,18 +48,6 @@
         />
       </main>
 
-      <!-- task 型 I/O Schema 抽屉：两个 SchemaFieldsEditor 编辑页面状态（v-model） -->
-      <el-drawer v-model="schemaDrawer" title="入参 / 出参 Schema" size="720px">
-        <section class="workflow-edit__schema">
-          <h4 class="workflow-edit__schema-title">入参（input_schema）</h4>
-          <SchemaFieldsEditor v-model="inputSchema" />
-        </section>
-        <section class="workflow-edit__schema">
-          <h4 class="workflow-edit__schema-title">出参（output_schema）</h4>
-          <SchemaFieldsEditor v-model="outputSchema" />
-        </section>
-      </el-drawer>
-
       <!-- 试运行对话框（spec 013）：detail 为 GET 已落库版本，不随画布编辑变化——
            「跑已保存版本」由数据源结构性保证（FR-003） -->
       <WorkflowTrialDialog v-model="trialVisible" :workflow="detail" />
@@ -76,7 +61,6 @@ import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { ArrowLeft, InfoFilled } from '@element-plus/icons-vue'
 import GraphModeEditor from './GraphModeEditor.vue'
-import SchemaFieldsEditor from './SchemaFieldsEditor.vue'
 import WorkflowTrialDialog from './WorkflowTrialDialog.vue'
 import {
   getWorkflowDetail,
@@ -109,8 +93,9 @@ const type = ref<WorkflowType>('chat')
 const inputSchema = ref<SchemaField[]>([])
 const outputSchema = ref<SchemaField[]>([])
 
-/** 伪节点面板 schema 编辑写回（FR-002）：面板与抽屉表单绑同一 ref（单源），
- *  脏态守卫 snapshot() 读的就是这两个 ref——面板编辑自动纳入离开确认 */
+/** schema 同源写回（FR-002 / spec 018 FR-005）：画布开始节点面板（入参）与
+ *  end 映射（出参）经 GraphModeEditor 事件上行写回这两个 ref——脏态守卫
+ *  snapshot() 读的就是它们，面板编辑自动纳入离开确认 */
 function onInputSchemaChange(rows: SchemaField[]): void {
   inputSchema.value = rows
 }
@@ -118,9 +103,6 @@ function onInputSchemaChange(rows: SchemaField[]): void {
 function onOutputSchemaChange(rows: SchemaField[]): void {
   outputSchema.value = rows
 }
-
-/** task 型 I/O Schema 抽屉开关 */
-const schemaDrawer = ref(false)
 
 /** 双模式图编排实例（getGraph / normalizedGraphText 出口，保存与脏态比对用） */
 const graphRef = ref<{
@@ -308,16 +290,5 @@ async function save(): Promise<void> {
   flex: 1;
   min-height: 0;
   padding: var(--hf-space-3);
-}
-
-.workflow-edit__schema {
-  margin-bottom: var(--hf-space-5);
-}
-
-.workflow-edit__schema-title {
-  margin: 0 0 var(--hf-space-2);
-  color: var(--hf-text-2);
-  font-size: var(--hf-font-size-sm);
-  font-weight: 600;
 }
 </style>

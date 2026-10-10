@@ -9,6 +9,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -576,6 +577,125 @@ func TestRunNodeEnd(t *testing.T) {
 	assert.Equal(t, "答案", out2)
 }
 
+// ---- spec 018：end 节点映射模式 buildOutputFields（FR-009 / R6）----
+
+// mappingCtx 映射模式用例公共池：input 带 limit/q，llm1 为 JSON 对象输出（summary 含
+// 引号与换行、score number、count 形似数字的字符串、ok boolean），tool1 纯文本输出。
+func mappingCtx() *execContext {
+	c := newExecContext(`{"limit":10,"q":"查"}`)
+	c.set("llm1", `{"summary":"含\"引号\"与\n换行","score":8.5,"count":"123","ok":true}`)
+	c.set("tool1", "纯文本输出")
+	return c
+}
+
+// TestRunNodeEndOutputFieldsBasic 基本构造 + 转义 + 声明类型优先（R6）：string 走
+// json.Marshal 转义（含引号 / 换行安全）；number 取原 JSON 文本；声明 string 的形似
+// 数字值落位带引号；nodeIn 记 output_fields 摘要。
+func TestRunNodeEndOutputFieldsBasic(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	c := mappingCtx()
+	c.outputTypes = map[string]string{"summary": "string", "score": "number", "count": "string"}
+
+	out, err := e.runNode(context.Background(), "finish", &workflowapi.EndConfig{OutputFields: []workflowapi.OutputField{
+		{Name: "summary", Ref: "{{llm1.summary}}"},
+		{Name: "score", Ref: "{{llm1.score}}"},
+		{Name: "count", Ref: "{{llm1.count}}"},
+	}}, c)
+	require.NoError(t, err)
+
+	var obj map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(out), &obj), "终稿为合法 JSON 对象（转义安全）")
+	var summary string
+	require.NoError(t, json.Unmarshal(obj["summary"], &summary))
+	assert.Equal(t, "含\"引号\"与\n换行", summary, "string 声明 → Marshal 转义保值")
+	assert.Equal(t, `8.5`, string(obj["score"]), "number 声明 → 原 JSON 文本")
+	assert.Equal(t, `"123"`, string(obj["count"]), "声明 string 的形似数字值带引号落位")
+
+	nodeIn := c.takeNodeIn()
+	assert.Contains(t, nodeIn["output_fields"], `"summary"`, "nodeIn 记映射摘要")
+}
+
+// TestRunNodeEndOutputFieldsFallback 未声明类型回退（R6）：可解析 JSON 则原样
+//（number / 对象）、否则按字符串；output_fields 非空时优先于 output 模板。
+func TestRunNodeEndOutputFieldsFallback(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	c := mappingCtx() // outputTypes 未装配（nil = 未声明，走回退）
+
+	out, err := e.runNode(context.Background(), "finish", &workflowapi.EndConfig{
+		Output: "{{tool1}}", // 保存期互斥已拒并存；此处证 output_fields 分支优先
+		OutputFields: []workflowapi.OutputField{
+			{Name: "raw_tool", Ref: "{{tool1}}"},
+			{Name: "numish", Ref: "{{llm1.count}}"},
+			{Name: "whole", Ref: "{{input}}"},
+		}}, c)
+	require.NoError(t, err)
+
+	var obj map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(out), &obj))
+	assert.Equal(t, `"纯文本输出"`, string(obj["raw_tool"]), "非 JSON 文本按字符串")
+	assert.Equal(t, `123`, string(obj["numish"]), "形似数字回退原样（可解析 JSON）")
+	assert.JSONEq(t, `{"limit":10,"q":"查"}`, string(obj["whole"]), "对象整体嵌入")
+}
+
+// TestRunNodeEndOutputFieldsBoolean 声明 boolean：真 bool 原文落位。
+func TestRunNodeEndOutputFieldsBoolean(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	c := mappingCtx()
+	c.outputTypes = map[string]string{"ok": "boolean"}
+
+	out, err := e.runNode(context.Background(), "finish", &workflowapi.EndConfig{OutputFields: []workflowapi.OutputField{
+		{Name: "ok", Ref: "{{llm1.ok}}"},
+	}}, c)
+	require.NoError(t, err)
+	assert.Equal(t, `{"ok":true}`, out)
+}
+
+// TestRunNodeEndOutputFieldsTypeMismatch 声明 number / boolean 而值不可解析 →
+// 图缺陷 400（声明与实际不符的第一现场）。
+func TestRunNodeEndOutputFieldsTypeMismatch(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	c := mappingCtx()
+	c.outputTypes = map[string]string{"raw_tool": "number"}
+
+	_, err := e.runNode(context.Background(), "finish", &workflowapi.EndConfig{OutputFields: []workflowapi.OutputField{
+		{Name: "raw_tool", Ref: "{{tool1}}"},
+	}}, c)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "node finish:")
+	assert.Contains(t, err.Error(), "raw_tool", "定位到字段")
+
+	c2 := mappingCtx()
+	c2.outputTypes = map[string]string{"x": "boolean"}
+	_, err = e.runNode(context.Background(), "finish", &workflowapi.EndConfig{OutputFields: []workflowapi.OutputField{
+		{Name: "x", Ref: "{{tool1}}"},
+	}}, c2)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "boolean")
+}
+
+// TestRunNodeEndOutputFieldsMissingVar 映射引用缺失变量 → strict 图缺陷（对齐 render）。
+func TestRunNodeEndOutputFieldsMissingVar(t *testing.T) {
+	e, _, _, _, _, _ := newTestExecutor(okGen("x"))
+	c := mappingCtx()
+
+	_, err := e.runNode(context.Background(), "finish", &workflowapi.EndConfig{OutputFields: []workflowapi.OutputField{
+		{Name: "x", Ref: "{{nope}}"},
+	}}, c)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "nope", "错误含变量名")
+	assert.Contains(t, err.Error(), "node finish:")
+
+	c2 := mappingCtx()
+	_, err = e.runNode(context.Background(), "finish", &workflowapi.EndConfig{OutputFields: []workflowapi.OutputField{
+		{Name: "x", Ref: "{{llm1.absent_field}}"},
+	}}, c2)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed, "点分字段缺失同样 strict")
+}
+
 // ---- tool 节点：解析 → 严格渲染 → 单次 Invoke → Content 即输出（spec 016 §5）----
 
 // 正常链路（spec 016 §7 清单 1，取代 spec 06 占位 fail-fast 断言）：ToolSourceFor
@@ -1097,4 +1217,41 @@ func TestExecuteNestedDepthExceeded(t *testing.T) {
 		{parentRunID: 8, childRunIDs: []uint64{7}},
 		{parentRunID: 9, childRunIDs: []uint64{8}},
 	}, env.backfills, "中间层逐层回填")
+}
+
+// ---- spec 018：assembleInputJSON optional 默认值补全（FR-007）----
+
+// TestAssembleInputJSONDefault optional 缺失且有 default → 键出现且值原文落位
+//（number 不规约）；显式传值优先于默认；无 default 维持现状省略。
+func TestAssembleInputJSONDefault(t *testing.T) {
+	t.Run("optional 缺失且有 default 补默认", func(t *testing.T) {
+		schema := strPtr(`[{"name":"query","type":"string","required":true},{"name":"top","type":"number","default":10}]`)
+		got, err := assembleInputJSON(map[string]string{"query": "q"}, schema)
+		require.NoError(t, err)
+		assert.Equal(t, `{"query":"q","top":10}`, got)
+	})
+	t.Run("default 原文落位不规约", func(t *testing.T) {
+		schema := strPtr(`[{"name":"top","type":"number","default":3.50}]`)
+		got, err := assembleInputJSON(map[string]string{}, schema)
+		require.NoError(t, err)
+		assert.Equal(t, `{"top":3.50}`, got, "number 默认原文保真（jsonb 已规约，组装侧不二次规约）")
+	})
+	t.Run("显式传值优先于 default", func(t *testing.T) {
+		schema := strPtr(`[{"name":"top","type":"number","default":10}]`)
+		got, err := assembleInputJSON(map[string]string{"top": "5"}, schema)
+		require.NoError(t, err)
+		assert.Equal(t, `{"top":5}`, got)
+	})
+	t.Run("string 与 boolean default", func(t *testing.T) {
+		schema := strPtr(`[{"name":"note","type":"string","default":"n"},{"name":"flag","type":"boolean","default":false}]`)
+		got, err := assembleInputJSON(map[string]string{}, schema)
+		require.NoError(t, err)
+		assert.Equal(t, `{"flag":false,"note":"n"}`, got)
+	})
+	t.Run("optional 缺失无 default 维持省略（存量行为）", func(t *testing.T) {
+		schema := strPtr(`[{"name":"query","type":"string","required":true},{"name":"top","type":"number"}]`)
+		got, err := assembleInputJSON(map[string]string{"query": "q"}, schema)
+		require.NoError(t, err)
+		assert.Equal(t, `{"query":"q"}`, got)
+	})
 }

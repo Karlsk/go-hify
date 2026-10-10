@@ -5,8 +5,10 @@
        不弹确认）+ 名称 / 类型只读展示（修改走上一步）+ 保存并创建（一次 POST
        带 type——与 PUT 双轨隔离，成功清草稿回列表，FR-012/015）。直访 / 刷新：
        草稿内存态归零 → 挂载即回第一步（FR-013）。
-       I/O Schema 单源（FR-002）：画布「入参 / 出参」面板直连第一步 store 字段（编辑即写回），
-       与图的离开时回写两条通道并行；创建无自身 id，不传 selfWorkflowId。 -->
+       I/O Schema 单源（FR-002；spec 018 FR-005 入口收敛）：入参 = 画布「开始」节点
+       面板（直连第一步 store 字段，编辑即写回）、出参 = end 节点「输出映射」（推导
+       schema 写回 store），与图的离开时回写两条通道并行；创建无自身 id，不传
+       selfWorkflowId。 -->
   <div v-if="store.hasForm" class="workflow-orchestrate">
     <header class="workflow-orchestrate__toolbar">
       <el-button @click="router.push('/workflows/create')">

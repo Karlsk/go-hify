@@ -466,3 +466,55 @@
 - [ ] 试运行 → 刷新 → 顶部记录 → 回看一致（SC-001 / US3）（§11.4）
 - [ ] 存量回归复测（SC-005）（§11.5）
 - [ ] 双门禁全绿（SC-004 / SC-005）：`cd web && npm run type-check && npm run build`
+
+## 12. spec 018 增补：画布开始/结束节点与入参默认值（开始锚点 + end 输出映射 + 默认值三处生效 + 入口收敛与存量回归）
+
+交付面：前端 `web/src/views/workflow/`（CanvasEditor 开始锚点与左面板按钮移除 / NodeInspector end 映射模式与开始面板收敛 / SchemaFieldsEditor 默认值列 / WorkflowCreate・WorkflowEdit 出参表单移除 / WorkflowTrialDialog 预填与清空省略 / graph.ts deriveOutputSchema 并集推导）+ `web/src/api/workflow.ts`（`SchemaField.default` / `EndNodeConfig`）；后端 jsonb 加法键（`SchemaField.default` + `EndConfig.output_fields`，零迁移零新错误码，契约见 [specs/018-workflow-start-end-nodes/contracts/jsonb-contract.md](../../specs/018-workflow-start-end-nodes/contracts/jsonb-contract.md)）。行为依据：[specs/018-workflow-start-end-nodes/spec.md](../../specs/018-workflow-start-end-nodes/spec.md)（FR-001~FR-011、SC-001~SC-006，含 Clarifications 多 end 放开与 required 自动推导）与 [quickstart.md](../../specs/018-workflow-start-end-nodes/quickstart.md) 场景 A~D。前置同 §0，追加造数：task 型工作流（`llm1` 声明输出字段 `summary`（string）/ `score`（number）→ end）；可选再造 condition 分流双 end 图验多 end。
+
+### 12.1 场景 A（US1）：画布开始节点（FR-001 / FR-002）
+
+1. task 型编辑页画布左上固定渲染「开始」锚点（主色边框 + 副标签「N 入参」）；不可拖动 / 删除 / 连线（悬浮锚点，非画布节点）；平移缩放画布锚点位置不动
+2. 点击锚点 → 检查器切「开始」面板：入参 Schema 行编辑（含默认值列）；**出参区不再出现**（12.4 入口收敛）
+3. 添加入参 `keyword`（string，必填）+ `limit`（number，可选，默认 10）→ 锚点副标签随动「2 入参」；保存后 `GET /workflows/{id}` 的 `nodes` 数组**无** `__start__`（序列化零泄漏）
+4. chat 型工作流锚点副标签 =「单一入参 {{input}}」，点击只读说明无编辑表单
+5. entry 三入口（面板下拉 / 双击节点 / 检查器「设为起始」）与起始角标全部照旧；左面板**无**「入参 / 出参」按钮（已移除）
+6. 详情只读页：锚点仅信息展示（无 pointer 光标、点击无面板）
+
+### 12.2 场景 B（US2）：end 输出映射 + 多 end 终稿（FR-003 / FR-004 / FR-009）
+
+1. task 型 end 节点检查器出现「输出映射 / 高级模板」模式切换；全新 end 默认映射模式
+2. 映射模式添加两行：`summary` 引用 `{{llm1.summary}}`（类型列推导 string）、`score` 引用 `{{llm1.score}}`（推导 number）；描述列可填；变量下拉 = 入参 / 上游节点 / 子流程出参三分组（既有 variableGroups）
+3. 保存 → Network 提交体：end `config.output_fields` = `[{"name":"score","ref":"{{llm1.score}}"},{"name":"summary","ref":"{{llm1.summary}}"}]`；图级 `output_schema` 同步为并集（`required: true`——唯一映射 end 两字段都产出）
+4. 试运行 → 终稿为合法 JSON 对象 `{"score":…,"summary":…}`；构造 summary 含双引号 / 换行的输入再跑 → 终稿仍合法（后端 json.Marshal 转义）
+5. 高级模式：切换后单一 Output 模板编辑（既有形态）；两模式互斥——切映射清 output 键 / 切高级清 output_fields 键（载荷验证只有一键）
+6. 存量自由模板 end（§8 造的工作流）→ 打开默认高级模式、原文呈现、试运行行为零变化
+7. 多 end：condition 分流到 end1（映射 summary/score）与 end2（映射 `route`→`{{input.route}}`）→ 试运行两分支终稿分别为各自 end 产出；图级 output_schema = 并集（`route` 仅 end2 产出 → `required: false`，summary/score 两端共有……若 end2 未产出 → false）——以实际映射行核对
+8. 冲突拦截：end2 加一行 `score` 引用 `{{llm1.summary}}`（string，与 end1 的 number 冲突）→ 面板红字「推导类型冲突…（修正后才会写入配置）」且 config/图级 schema 不更新（Network 无提交体变化）；修正类型后恢复写入
+9. chat 型 end 检查器 = 既有单一 Output 模板（无模式切换）
+
+### 12.3 场景 C（US3）：默认值三处生效（FR-006 / FR-007 / FR-008 / FR-010 / FR-011）
+
+1. 编辑面：入参行编辑默认值列——string 文本框 / number 数字输入 / boolean 三态下拉（无/true/false）；**必填行该列禁用占位「—」**；必填开关置位即清默认、类型切换即清默认
+2. 保存 → 提交体 `input_schema` 行含 `"default":10`（类型匹配）；required 行携 default / default 类型不符 → 保存 400 `VALIDATION_FAILED`（前端 schemaFieldsError 已先拦，文案含行号）
+3. 试运行预填：表单打开 `limit` 预填 10（可改）；清空 `limit` 只填 `keyword` → 提交体 `{"keyword":"…"}` **不含 limit 键** → 运行成功且输出可见 limit=10（顶层归一化补回；构造下游 `{{input.limit}}` 引用验证）
+4. 未配默认的 optional 行留空 → 提交体含 `"x":""`（空值照传，存量行为——strict 渲染渲染空串不报错）
+5. 子工作流补默认：父图 workflow 节点 Inputs 不给 `limit` → 子执行成功（assembleInputJSON 补默认；子图 `{{input.limit}}` 渲染 10）
+6. 顶层非 JSON 放行：task 型声明 schema 的工作流试运行输入非 JSON 纯文本 → 照旧执行不新增拒绝（`{{input}}` 全文渲染）
+
+### 12.4 场景 D（US4）：入口收敛与零回归（FR-005 / SC-004）
+
+1. 创建第一步：task 型仅「入参 Schema」表单（无出参）；出参只在第二步画布 end「输出映射」可配
+2. 编辑页：工具栏**无**「I/O Schema」按钮与抽屉；入参 = 开始锚点面板、出参 = end 映射（脏态守卫照常拦截两处编辑）
+3. JSON 模式：映射模式保存的 end 在 JSON 文本可见 `output_fields` 原文、可编辑；改 JSON 切回画布 → 检查器按反解析呈现（有 output_fields → 映射模式）
+4. 存量复测：§5 EC-1~11、§7 EC-12~23、§8.7、§10.5、§11 按原步骤抽测——列表 / 详情 / 编辑 / 试运行 / 运行历史零回归
+5. `make migrate-status` 恒 21 applied；本篇零迁移零新依赖
+6. TemplateField 值域双输入路径（spec 018 交付期修复，全部模板字段受益：Headers 值 / Prompt / System Prompt / URL / Body / Expression / 子流程入参）：上方「插入变量」为**小尺寸虚线 chip**（＋图标，次要动作观感）、textarea 为值编辑主体——两条路径均落 config：直接打字（如 header 值 `application/json`）保存后在 `config.headers` 原样可见；chip 下拉选变量 → `{{ref}}` 插入光标处
+
+### 12.5 通过标准增补（SC-001~SC-006）
+
+- [ ] 开始锚点渲染 / 点击配置 / 序列化零泄漏 / chat 只读（SC-001）（§12.1）
+- [ ] 映射构造合法 JSON + 转义 + 多 end 并集 + 冲突拦截 + 存量自由模板零变化（SC-002）（§12.2）
+- [ ] 默认值三处生效 + required 禁配拦截（SC-003）（§12.3）
+- [ ] 入口收敛 + 存量零回归 + JSON 双向一致（SC-004）（§12.4）
+- [ ] TemplateField 值域双输入路径（直接打字 + chip 插入）均落 config（§12.4.6）
+- [ ] 双门禁全绿（SC-005/SC-006）：`go build ./... && go vet ./... && go test ./... -race -count=1` + `go test ./internal/workflow/... -race -cover`（≥80%）+ `cd web && npm run type-check && npm run build`；改动面 grep：chat / store / handler / server.go / migrations / go.mod / package.json 零触碰

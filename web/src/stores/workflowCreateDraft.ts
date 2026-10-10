@@ -10,13 +10,14 @@ import { defineStore } from 'pinia'
 import type { SchemaField, WorkflowType } from '@/api/workflow'
 import type { GraphConfig } from '@/views/workflow/graph'
 
-/** 第一步表单快照（saveForm 整体写入） */
+/** 第一步表单快照（saveForm 整体写入）。outputSchema 不在第一步编辑（spec 018
+ *  FR-005 入口收敛：出参唯一入口 = 第二步画布 end 节点「输出映射」，经
+ *  saveOutputSchema 写回——saveForm 不得覆盖它） */
 export interface WorkflowFormDraft {
   name: string
   description: string
   type: WorkflowType
   inputSchema: SchemaField[]
-  outputSchema: SchemaField[]
 }
 
 export const useWorkflowCreateDraftStore = defineStore('workflowCreateDraft', {
@@ -25,6 +26,7 @@ export const useWorkflowCreateDraftStore = defineStore('workflowCreateDraft', {
     description: '',
     type: 'chat' as WorkflowType,
     inputSchema: [] as SchemaField[],
+    /** task 型出参（spec 018：由第二步画布 end 映射推导写回，第一步不再编辑） */
     outputSchema: [] as SchemaField[],
     /** 第二步图编排（null = 尚未进过第二步，初始用 PREFILL 深拷贝） */
     graph: null as GraphConfig | null,
@@ -34,19 +36,18 @@ export const useWorkflowCreateDraftStore = defineStore('workflowCreateDraft', {
     hasForm: (state) => state.name !== '',
   },
   actions: {
-    /** 第一步「创建工作流」：表单整体写入（含 task 型 schema），随后跳第二步 */
+    /** 第一步「创建工作流」：表单整体写入（outputSchema 不动——end 映射产出） */
     saveForm(form: WorkflowFormDraft) {
       this.name = form.name
       this.description = form.description
       this.type = form.type
       this.inputSchema = form.inputSchema
-      this.outputSchema = form.outputSchema
     },
-    /** 画布「入参 / 出参」面板编辑写回（FR-002 单源：与第一步表单同一字段，编辑即写回） */
+    /** 画布开始节点面板编辑写回（FR-002 单源：与第一步表单同一字段，编辑即写回） */
     saveInputSchema(rows: SchemaField[]) {
       this.inputSchema = rows
     },
-    /** 同上——出参 */
+    /** 画布 end 节点「输出映射」推导 schema 写回（spec 018 FR-004/FR-005） */
     saveOutputSchema(rows: SchemaField[]) {
       this.outputSchema = rows
     },

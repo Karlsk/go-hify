@@ -73,3 +73,4 @@ Thumbs.db
 # 本地密钥脚本（真实 key，禁入 Git）
 embedding-provider.sh
 
+.gstack/

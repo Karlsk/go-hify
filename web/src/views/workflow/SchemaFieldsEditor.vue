@@ -1,15 +1,18 @@
 <template>
-  <!-- Schema 字段行编辑器（spec 010 US3，FR-007 Schema 表单化）：v-model 双向
-       SchemaField[]，每行四控件（字段名 / 类型下拉三值 / 必填开关 / 描述）+ 行删除，
-       底部「添加字段」追加空行。非法历史数据（回填 type 不在三值内）由 el-select
-       原值显示语义兜底（显示原字符串不炸，重新选择即修正——Edge Case，research #8）。
-       组件本体不做提交校验：校验由宿主页提交前调 graph.ts schemaFieldsError
-       （错误文案含行号，SC-004）。行编辑一律 emit 新数组（不可变更新）。 -->
+  <!-- Schema 字段行编辑器（spec 010 US3，FR-007 Schema 表单化；spec 018 加默认值列）：
+       v-model 双向 SchemaField[]，每行五控件（字段名 / 类型下拉三值 / 必填开关 /
+       默认值〔仅 optional 行，按类型分型控件；boolean 三态下拉〕/ 描述）+ 行删除，
+       底部「添加字段」追加空行。required 置位即清默认（后端 required+default 保存期
+       拒，编辑期先行）；类型切换即清默认（值型随 type）。非法历史数据（回填 type 不在
+       三值内）由 el-select 原值显示语义兜底（显示原字符串不炸，重新选择即修正——
+       Edge Case，research #8）。组件本体不做提交校验：校验由宿主页提交前调 graph.ts
+       schemaFieldsError（错误文案含行号，SC-004）。行编辑一律 emit 新数组（不可变更新）。 -->
   <div class="schema-fields-editor">
     <div v-if="modelValue.length > 0" class="schema-fields-editor__header">
       <span>字段名</span>
       <span>类型</span>
       <span class="schema-fields-editor__center">必填</span>
+      <span>默认值</span>
       <span>描述</span>
       <span><!-- 删除列占位 --></span>
     </div>
@@ -29,7 +32,7 @@
         :model-value="field.type"
         :disabled="disabled"
         placeholder="类型"
-        @update:model-value="(v: string) => updateField(index, { type: v as SchemaField['type'] })"
+        @update:model-value="(v: string) => setType(index, v as SchemaField['type'])"
       >
         <el-option label="string" value="string" />
         <el-option label="number" value="number" />
@@ -39,9 +42,38 @@
         <el-switch
           :model-value="field.required"
           :disabled="disabled"
-          @update:model-value="(v: string | number | boolean) => updateField(index, { required: Boolean(v) })"
+          @update:model-value="(v: string | number | boolean) => setRequired(index, Boolean(v))"
         />
       </div>
+      <template v-if="!field.required">
+        <el-input
+          v-if="field.type === 'string'"
+          :model-value="typeof field.default === 'string' ? field.default : ''"
+          :disabled="disabled"
+          placeholder="空 = 无默认"
+          @update:model-value="(v: string) => updateField(index, { default: v || undefined })"
+        />
+        <el-input-number
+          v-else-if="field.type === 'number'"
+          :model-value="typeof field.default === 'number' ? field.default : undefined"
+          :disabled="disabled"
+          style="width: 100%"
+          @update:model-value="(v: number | undefined) => updateField(index, { default: v })"
+        />
+        <el-select
+          v-else-if="field.type === 'boolean'"
+          :model-value="typeof field.default === 'boolean' ? String(field.default) : ''"
+          :disabled="disabled"
+          placeholder="无"
+          @update:model-value="(v: string) => updateField(index, { default: v === '' ? undefined : v === 'true' })"
+        >
+          <el-option label="无" value="" />
+          <el-option label="true" value="true" />
+          <el-option label="false" value="false" />
+        </el-select>
+        <span v-else class="schema-fields-editor__center">—</span>
+      </template>
+      <span v-else class="schema-fields-editor__center">—</span>
       <el-input
         :model-value="field.description ?? ''"
         :disabled="disabled"
@@ -94,6 +126,16 @@ function updateField(index: number, patch: Partial<SchemaField>): void {
   )
 }
 
+/** 类型切换即清默认（spec 018：值型随 type，残留异型默认会被保存期校验拒） */
+function setType(index: number, type: SchemaField['type']): void {
+  updateField(index, { type, default: undefined })
+}
+
+/** required 置位即清默认（spec 018 FR-006：required 禁配 default，编辑期先行） */
+function setRequired(index: number, required: boolean): void {
+  updateField(index, required ? { required, default: undefined } : { required })
+}
+
 function addField(): void {
   emit('update:modelValue', [
     ...props.modelValue,
@@ -120,7 +162,7 @@ function removeField(index: number): void {
 .schema-fields-editor__header,
 .schema-fields-editor__row {
   display: grid;
-  grid-template-columns: minmax(120px, 1.2fr) 128px 72px minmax(160px, 2fr) 40px;
+  grid-template-columns: minmax(110px, 1.2fr) 108px 64px minmax(120px, 1fr) minmax(140px, 1.8fr) 40px;
   gap: var(--hf-space-2);
   align-items: center;
 }

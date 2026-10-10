@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"time"
 )
 
@@ -167,18 +168,52 @@ func (c ApiCallConfig) Validate() error {
 	return nil
 }
 
-// EndConfig 显式终止节点（可选）：buildOutput(end, context) 按 output 模板拼工作流
-// 终稿（执行器 spec 05）；空 output = 取最后执行节点的输出，与「无出边 = 隐式结束」
+// EndConfig 显式终止节点（可选）：buildOutput(end, context) 按配置构造工作流终稿
+// （执行器 spec 05）。两种互斥形态（spec 018）：映射模式 output_fields（字段名 → 单一
+// {{var}} 引用，buildOutput 按引用构造 JSON 对象，Marshal 转义安全）与高级模式 output
+//（自由 {{var}} 模板）；空 output = 取最后执行节点的输出，与「无出边 = 隐式结束」
 // 现行为一致。end 节点不得有出边（R9）；不强制每图必有 end——既有图不受影响
 // （2026-09-16 拍板新增）。
 type EndConfig struct {
-	Output string `json:"output,omitempty"` // {{var}} 模板，如 "{{reply}}"
+	Output       string        `json:"output,omitempty"`        // 高级模式：{{var}} 模板，如 "{{reply}}"
+	OutputFields []OutputField `json:"output_fields,omitempty"` // 映射模式（spec 018）：与 output 互斥；行级校验见 Validate
 }
 
 func (EndConfig) isNodeConfig() {}
 
-// Validate 跨字段校验；空配置即合法（output 可选）。
-func (c EndConfig) Validate() error { return nil }
+// OutputField end 节点输出映射行（spec 018）：Name = 终稿 JSON 对象字段名；Ref = 单一
+// {{var}} 引用（含一级点分下钻，如 {{llm1.summary}}），buildOutputFields 按引用取值构造。
+type OutputField struct {
+	Name string `json:"name"`
+	Ref  string `json:"ref"`
+}
+
+// singleVarRE 整串恰好一个 {{var}} 占位符（spec 018 EndConfig.Ref 形状校验；形态对齐
+// service 包 condition 求值的同名先例）。
+var singleVarRE = regexp.MustCompile(`^\{\{([^{}]+)\}\}$`)
+
+// Validate 行级校验（spec 018 FR-009 / C2）：output 与 output_fields 互斥（并存 = 终稿
+// 二义）；行 name 非空、节点内不重名；ref 恰为单一 {{var}}（点分字段名留运行期 strict，
+// 与 R10 基名切分同规则）。空配置仍合法（存量零变化）。
+func (c EndConfig) Validate() error {
+	if c.Output != "" && len(c.OutputFields) > 0 {
+		return fmt.Errorf("output 与 output_fields 不得同时配置（映射模式与高级模式互斥）")
+	}
+	seen := make(map[string]bool, len(c.OutputFields))
+	for _, f := range c.OutputFields {
+		if f.Name == "" {
+			return fmt.Errorf("output_fields 字段 name 必填")
+		}
+		if seen[f.Name] {
+			return fmt.Errorf("output_fields 字段重名: %s", f.Name)
+		}
+		seen[f.Name] = true
+		if !singleVarRE.MatchString(f.Ref) {
+			return fmt.Errorf("output_fields 字段 %s 的 ref 必须恰为单一 {{var}} 引用（当前 %q）", f.Name, f.Ref)
+		}
+	}
+	return nil
+}
 
 // WorkflowNodeConfig sub-workflow 嵌套节点（spec 08 §4.1 / §4.3）：引用一个 task 型
 // 工作流作为可组合任务函数。inputs 是「子 schema 字段 → 父图 {{var}} 模板」映射；
@@ -245,18 +280,22 @@ func ParseNodeConfig(t NodeType, raw json.RawMessage) (NodeConfig, error) {
 // ── 分型结构化契约（spec 08 §4.5：task 型简化 I/O schema）──
 
 // SchemaField task 型结构化 I/O 契约的字段（spec 08 §4.5 简化形态）：
-// [{name, type, required, description}]，type ∈ string / number / boolean；
-// 仅 task 型消费（chat 型携带非空 schema 由 service 强不变量拒）。
+// [{name, type, required, description, default?}]，type ∈ string / number / boolean；
+// 仅 task 型消费（chat 型携带非空 schema 由 service 强不变量拒）。default（spec 018
+// 加法）：optional 字段的可选默认值，值类型 = field type 对应的 JSON 值；子工作流传参
+//（assembleInputJSON）与顶层归一化（normalizeInputJSON）按此补全。
 type SchemaField struct {
-	Name        string `json:"name"`
-	Type        string `json:"type"` // string / number / boolean
-	Required    bool   `json:"required"`
-	Description string `json:"description"`
+	Name        string          `json:"name"`
+	Type        string          `json:"type"` // string / number / boolean
+	Required    bool            `json:"required"`
+	Description string          `json:"description"`
+	Default     json.RawMessage `json:"default,omitempty"` // 仅 optional 可配（required 禁配）；生效 = 缺失时补全
 }
 
 // ValidateSchemaFields 校验 schema 字段集形态（service 保存路径 Create / Update 调用，
 // HTTP 与直调共用；字段级规则全归此处，不打 binding tag——与节点 config 同理，
-// jsonb 形状由代码兜底）：name 非空不重名、type ∈ string/number/boolean。
+// jsonb 形状由代码兜底）：name 非空不重名、type ∈ string/number/boolean、default
+// 类型探针匹配 field type 且 required 禁配（spec 018 FR-006）。
 func ValidateSchemaFields(fields []SchemaField) error {
 	seen := make(map[string]bool, len(fields))
 	for _, f := range fields {
@@ -272,8 +311,36 @@ func ValidateSchemaFields(fields []SchemaField) error {
 		default:
 			return fmt.Errorf("schema 字段 %s type 非法: %q（限 string/number/boolean）", f.Name, f.Type)
 		}
+		if f.Required && len(f.Default) > 0 {
+			return fmt.Errorf("schema 字段 %s 为 required，不得配置 default", f.Name)
+		}
+		if len(f.Default) > 0 && !probeDefaultType(string(f.Default), f.Type) {
+			return fmt.Errorf("schema 字段 %s default 类型不符（声明 %s）", f.Name, f.Type)
+		}
 	}
 	return nil
+}
+
+// probeDefaultType default 原文按声明类型探针：解码进 any 判 Go 类型（number →
+// float64 / string → string / boolean → bool），精确区分 `"10"`（string）与 `10`
+//（number）——json.Number 解码字符串值不报错，不可用作判型。null → nil 不匹配任何型。
+func probeDefaultType(raw, typ string) bool {
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil || v == nil {
+		return false
+	}
+	switch typ {
+	case "string":
+		_, ok := v.(string)
+		return ok
+	case "number":
+		_, ok := v.(float64)
+		return ok
+	case "boolean":
+		_, ok := v.(bool)
+		return ok
+	}
+	return false
 }
 
 // ── 请求（api_contract §3 冻结；config 延迟解析）──
