@@ -320,6 +320,23 @@ func (s *workflowService) precheckRefs(ctx context.Context, nodes []workflowapi.
 				}
 				return fmt.Errorf("precheck node %q knowledge base %d: %w", n.Key, kr.KnowledgeBaseID, err)
 			}
+		case workflowapi.NodeReact:
+			// spec 020：model_id 存在性预检同 llm 先例；server_ids / tool_ids 不预检
+			//（执行期 fail-fast，同 tool 节点先例——server 停用 / 工具删除是运行期常态面）。
+			cfg, err := workflowapi.ParseNodeConfig(n.Type, n.Config)
+			if err != nil {
+				return fmt.Errorf("node %q: %w", n.Key, err)
+			}
+			rc, ok := cfg.(*workflowapi.ReactConfig)
+			if !ok {
+				return fmt.Errorf("node %q: unexpected config type %T", n.Key, cfg)
+			}
+			if _, err := s.models.Get(ctx, providerapi.GetModelReq{ID: rc.ModelID}); err != nil {
+				if errors.Is(err, providerapi.ErrModelNotFound) {
+					return fmt.Errorf("%w: node %q model_id %d", errs.ErrValidationFailed, n.Key, rc.ModelID)
+				}
+				return fmt.Errorf("precheck node %q model %d: %w", n.Key, rc.ModelID, err)
+			}
 		}
 	}
 	return nil
@@ -546,7 +563,9 @@ func ancestorsOf(key string, inEdges map[string][]string) map[string]bool {
 // 'literal' 是字面量非引用、不查（与执行期 evalCondition 同一切分规则）。
 func nodeTemplateRefs(n workflowapi.NodeReq) ([]string, error) {
 	switch n.Type {
-	case workflowapi.NodeTool, workflowapi.NodeKnowledgeRetrieval:
+	case workflowapi.NodeTool:
+		// tool args 支持 {{var}} 但 R10 不扫（存量 gap：既有已存图 args 带非祖先引用
+		// 保存期通过、执行期 strict 拒——加入 R10 会锁死存量坏图编辑路径，deferred 留痕）
 		return nil, nil
 	}
 	cfg, err := workflowapi.ParseNodeConfig(n.Type, n.Config)
@@ -580,6 +599,9 @@ func nodeTemplateRefs(n workflowapi.NodeReq) ([]string, error) {
 		for _, of := range v.OutputFields {
 			refs = append(refs, templateRefs(of.Ref)...)
 		}
+	case *workflowapi.KnowledgeRetrievalConfig:
+		// spec 020：query 模板入 R10（新键无存量包袱；空串 templateRefs 自然零引用）
+		refs = templateRefs(v.Query)
 	case *workflowapi.WorkflowNodeConfig:
 		// inputs 值是 {{var}} 模板（spec 08 §4.1），R10 天然覆盖；键是子 schema 字段名
 		// 非变量引用，不查。
@@ -591,6 +613,10 @@ func nodeTemplateRefs(n workflowapi.NodeReq) ([]string, error) {
 		for _, k := range inKeys {
 			refs = append(refs, templateRefs(v.Inputs[k])...)
 		}
+	case *workflowapi.ReactConfig:
+		// spec 020：react 双模板同受 R10（新节点无存量包袱，比 llm 现状的仅 prompt 更严）。
+		refs = templateRefs(v.Prompt)
+		refs = append(refs, templateRefs(v.SystemPrompt)...)
 	default:
 		return nil, fmt.Errorf("node %q: unexpected config type %T", n.Key, cfg)
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
 	"github.com/Karlsk/go-hify/internal/platform/logging"
+	"github.com/Karlsk/go-hify/internal/platform/reactloop"
 	"github.com/Karlsk/go-hify/internal/platform/tool"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	ragapi "github.com/Karlsk/go-hify/internal/rag/api"
@@ -102,6 +103,8 @@ func (e *executor) runNode(ctx context.Context, key string, cfg workflowapi.Node
 		out, err = e.callWorkflow(ctx, key, v, c)
 	case *workflowapi.ToolConfig:
 		out, err = e.callTool(ctx, key, v, c)
+	case *workflowapi.ReactConfig:
+		out, err = e.callReact(ctx, key, v, c)
 	default:
 		err = fmt.Errorf("unknown node config type %T", cfg)
 	}
@@ -237,24 +240,7 @@ func (e *executor) recordExecution(ctx context.Context, nodeKey string, resolved
 	if system != "" {
 		input["system_prompt"] = system
 	}
-	row := &logging.Execution{
-		ModelID:    &modelID,
-		ModelName:  resolved.ModelID, // 冗余快照：模型删除后记录仍可读
-		Input:      input,
-		DurationMs: int32(time.Since(start).Milliseconds()),
-	}
-	if callErr != nil {
-		cls := string(executionErrorClass(callErr))
-		row.ErrorClass = &cls
-	} else if reply != nil {
-		row.Output = map[string]any{"content": reply.Content}
-		row.FinishReason = reply.FinishReason
-		row.PromptTokens, row.CompletionTokens = reply.Usage.Input, reply.Usage.Output
-		row.TotalTokens = row.PromptTokens + row.CompletionTokens
-	}
-	if err := e.execs.Create(ctx, row); err != nil {
-		slog.WarnContext(ctx, "workflow: record node execution failed", "node", nodeKey, "err", err)
-	}
+	e.recordExecutionInput(ctx, nodeKey, resolved, modelID, input, start, reply, callErr)
 }
 
 // executionErrorClass 错误 → executions.error_class（chat 同款：llm.Classify 优先，
@@ -274,12 +260,24 @@ func isPreAttemptErr(err error) bool {
 		errors.Is(err, llm.ErrUnsupportedKind))
 }
 
-// retrieve knowledge_retrieval 节点：query 固定取 input（O1 终形），TopK 直传
-//（0 = rag service 取默认并 clamp，不在本层归一），结果格式化为编号段落文本落池。
+// retrieve knowledge_retrieval 节点：query 模板非空时 strict 渲染作检索问句
+//（spec 020 加法修订；渲染空串视同未配），空/缺省回退 input（O1 终形现状）；
+// TopK 直传（0 = rag service 取默认并 clamp，不在本层归一），结果格式化为编号段落
+// 文本落池。渲染缺失变量归图缺陷（先于检索 IO）。
 func (e *executor) retrieve(ctx context.Context, cfg *workflowapi.KnowledgeRetrievalConfig, c *execContext) (string, error) {
-	c.setNodeIn(map[string]string{"query": c.vars["input"]}) // query 固定 = input（O1）
+	query := c.vars["input"]
+	if cfg.Query != "" {
+		rendered, err := c.render(cfg.Query)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", errs.ErrValidationFailed, err)
+		}
+		if rendered != "" {
+			query = rendered
+		}
+	}
+	c.setNodeIn(map[string]string{"query": query}) // 记渲染后实际检索值
 	chunks, err := e.rags.Retrieve(ctx, ragapi.RetrieveReq{
-		Query: c.vars["input"],
+		Query: query,
 		TopK:  cfg.TopK,
 		KBIDs: []uint64{cfg.KnowledgeBaseID},
 	})
@@ -365,6 +363,174 @@ func (e *executor) callTool(ctx context.Context, key string, cfg *workflowapi.To
 		return "", fmt.Errorf("%w: %s", mcpapi.ErrMCPToolCallFailed, truncateUTF8(res.Content, maxTraceValueBytes))
 	}
 	return res.Content, nil
+}
+
+// callReact react 节点（spec 020 FR-003 / C2）：图内 mini-agent——prompts strict 渲染
+//（缺失变量图缺陷 400，先于一切下游 IO）→ 模型解析链同 callLLM → 工具集并集（两绑定
+// 均空 = reg nil 纯推理零 mcp 交互；非空 ToolSourceFor+NewRegistry，构建失败 %w 500、
+// 过滤后空清单 ErrMCPToolNotFound 404 fail-fast 同 callTool 先例）→ reactloop.Run
+// Generate 模式（MaxRounds 透传）→ 终答落池。HitLimit 非错误（终答照落）；每轮经
+// OnRound 自记 executions（ConversationID=nil 同 llm 节点标识）；OnToolCall/OnToolResult
+// 累积 tool_chain 进 nodeIn（workflow 无 messages 表的调用链排障补位，C3）。
+func (e *executor) callReact(ctx context.Context, key string, cfg *workflowapi.ReactConfig, c *execContext) (string, error) {
+	system := ""
+	if cfg.SystemPrompt != "" {
+		var err error
+		system, err = c.render(cfg.SystemPrompt)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", errs.ErrValidationFailed, err)
+		}
+	}
+	prompt, err := c.render(cfg.Prompt)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errs.ErrValidationFailed, err)
+	}
+	resolved, err := e.resolveLLM.ResolveLLMConfig(ctx, providerapi.ResolveLLMConfigReq{ModelID: cfg.ModelID})
+	if err != nil {
+		return "", err // 下游哨兵透传（MODEL_NOT_FOUND 等）
+	}
+	client, err := e.clients.Client(resolved.ProviderName, llm.UpstreamOptions{
+		Kind:    llm.ProviderKind(resolved.Kind),
+		BaseURL: resolved.BaseURL,
+		APIKey:  resolved.APIKey,
+		Model:   resolved.ModelID,
+	})
+	if err != nil {
+		return "", err // pre-attempt（busy / breaker / kind）：未打上游，不落 executions
+	}
+	var reg *tool.Registry
+	if len(cfg.ServerIDs) > 0 || len(cfg.ToolIDs) > 0 {
+		if e.toolSources == nil {
+			return "", fmt.Errorf("%w: 工具来源未注入", mcpapi.ErrMCPToolCallFailed)
+		}
+		src := e.toolSources.ToolSourceFor(mcpapi.ToolSourceReq{ToolIDs: cfg.ToolIDs, ServerIDs: cfg.ServerIDs})
+		reg, err = tool.NewRegistry(ctx, src)
+		if err != nil {
+			return "", fmt.Errorf("build react tool registry: %w", err)
+		}
+		if len(reg.Defs()) == 0 {
+			return "", mcpapi.ErrMCPToolNotFound // 绑定即意图：server 停用 / 工具删 fail-fast，不静默降级
+		}
+	}
+	msgs := make([]llm.Message, 0, 2)
+	if system != "" {
+		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: system})
+	}
+	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: prompt})
+	opts := &llm.CallOptions{}
+	if cfg.Temperature != 0 {
+		t := float32(cfg.Temperature)
+		opts.Temperature = &t
+	}
+	if reg != nil {
+		opts.Tools = reg.Defs()
+	}
+
+	// 观测闭包态：executions 逐轮计时近似点 + tool_chain 累积（args 截 200 rune 防膨胀）
+	type chainEntry struct {
+		Round   int    `json:"round"`
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Args    string `json:"args"`
+		IsError bool   `json:"is_error"`
+	}
+	var (
+		chain      = make([]chainEntry, 0, 4)
+		currentRnd int
+		roundStart = time.Now()
+		toolCalls  int
+	)
+	hooks := reactloop.Hooks{
+		OnRound: func(round int, _ []llm.Message, fin *llm.Final, callErr error) error {
+			roundCalls := 0
+			if fin != nil {
+				roundCalls = len(fin.ToolCalls)
+			}
+			e.recordReactExecution(ctx, key, resolved, cfg.ModelID, prompt, system,
+				round, roundCalls, roundStart, fin, callErr)
+			currentRnd = round
+			roundStart = time.Now()
+			return nil
+		},
+		OnToolCall: func(v reactloop.CallView) error {
+			toolCalls++
+			chain = append(chain, chainEntry{Round: currentRnd, ID: v.Call.ID, Name: v.Call.Name,
+				Args: truncateUTF8(string(v.Call.Arguments), 200)})
+			return nil
+		},
+		OnToolResult: func(v reactloop.CallView, result tool.ToolResult) error {
+			for i := range chain {
+				if chain[i].ID == v.Call.ID && chain[i].Round == currentRnd {
+					chain[i].IsError = result.IsError
+				}
+			}
+			return nil
+		},
+	}
+	res, runErr := reactloop.Run(ctx, client, reg, msgs, opts,
+		reactloop.Config{MaxRounds: cfg.MaxRounds}, hooks)
+
+	nodeIn := map[string]string{"prompt": prompt, "max_rounds": strconv.Itoa(cfg.MaxRounds)}
+	if system != "" {
+		nodeIn["system_prompt"] = system
+	}
+	nodeIn["rounds"] = strconv.Itoa(res.Rounds)
+	nodeIn["tool_calls"] = strconv.Itoa(toolCalls)
+	if len(chain) > 0 {
+		if b, merr := json.Marshal(chain); merr == nil {
+			nodeIn["tool_chain"] = string(b)
+		}
+	}
+	if res.HitLimit {
+		nodeIn["hit_limit"] = "true"
+	}
+	c.setNodeIn(nodeIn)
+
+	if res.Cancelled {
+		return "", ctx.Err() // 调用方取消 / 总超时：walk 层既有归一捕获
+	}
+	if res.Aborted {
+		return "", fmt.Errorf("%w: react loop aborted", workflowapi.ErrWorkflowExecutionFailed)
+	}
+	if runErr != nil {
+		return "", runErr // LLM 调用错误原样透传（分类 / 哨兵同 callLLM）
+	}
+	return res.Content, nil
+}
+
+// recordReactExecution react 节点逐轮 executions（C3）：Input 带轮次维度
+//（{prompt, system_prompt?, round, tool_calls}），其余形态同 recordExecution。
+func (e *executor) recordReactExecution(ctx context.Context, nodeKey string, resolved *providerapi.LLMConfig,
+	modelID uint64, prompt, system string, round, roundCalls int, start time.Time, reply *llm.Final, callErr error) {
+	input := map[string]any{"prompt": prompt, "round": round, "tool_calls": roundCalls}
+	if system != "" {
+		input["system_prompt"] = system
+	}
+	e.recordExecutionInput(ctx, nodeKey, resolved, modelID, input, start, reply, callErr)
+}
+
+// recordExecutionInput executions 行 builder（llm 与 react 节点共用）：ConversationID
+// =nil 即 workflow 调用标识；失败也记（ErrorClass 兜底 Network）；落库失败只 WARN。
+func (e *executor) recordExecutionInput(ctx context.Context, nodeKey string, resolved *providerapi.LLMConfig,
+	modelID uint64, input map[string]any, start time.Time, reply *llm.Final, callErr error) {
+	row := &logging.Execution{
+		ModelID:    &modelID,
+		ModelName:  resolved.ModelID, // 冗余快照：模型删除后记录仍可读
+		Input:      input,
+		DurationMs: int32(time.Since(start).Milliseconds()),
+	}
+	if callErr != nil {
+		cls := string(executionErrorClass(callErr))
+		row.ErrorClass = &cls
+	} else if reply != nil {
+		row.Output = map[string]any{"content": reply.Content}
+		row.FinishReason = reply.FinishReason
+		row.PromptTokens, row.CompletionTokens = reply.Usage.Input, reply.Usage.Output
+		row.TotalTokens = row.PromptTokens + row.CompletionTokens
+	}
+	if err := e.execs.Create(ctx, row); err != nil {
+		slog.WarnContext(ctx, "workflow: record node execution failed", "node", nodeKey, "err", err)
+	}
 }
 
 // buildAPIRequest api 节点纯渲染（无网络）：url / method / headers 值 / body 全链

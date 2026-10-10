@@ -474,3 +474,44 @@ curl -s -b /tmp/hify-jar -X POST localhost:8081/api/v1/workflows -H 'Content-Typ
 # 提取 id 后 GET / PUT / DELETE / publish / disable 见上文各步骤
 # 执行（12.1/12.2 需真实 LLM）：POST /workflows/{id}/execute，body {"input":"..."}，试运行加 ?trial=true，详见 §12
 ```
+
+## 13. spec 020 增补：react 节点 / ragNode 画布接入 / tool 节点表单（三场景 + 零回归）
+
+交付面：后端 `internal/platform/reactloop`（spec 019 循环，Generate 模式首个消费者）+ `internal/workflow/`（ReactConfig 新节点类型 / KnowledgeRetrievalConfig.query 加法键 / R10 与 precheck 新分支）+ `internal/mcp/`（ToolSourceReq.ServerIDs 并集 + ListToolsByServerIDs）+ 迁移 00022；前端画布 palette 五扩八与三新检查器表单。行为依据：[specs/020-workflow-react-node/spec.md](../../specs/020-workflow-react-node/spec.md)（FR-001~FR-010、SC-001~SC-005）与 [quickstart.md](../../specs/020-workflow-react-node/quickstart.md) 场景 A–D。前置同 §0，追加造数：enabled mcp server（≥1 工具）+ enabled KB（含已入库文档）+ 可用 chat 模型；`make migrate-up` 至 22 applied。
+
+### 13.1 场景 A（US1）：react 节点自主工具调用
+
+1. 画布拖入「ReAct 节点」：模型下拉 / MCP 服务多选 / MCP 工具分组多选 / 双模板 / 温度 / 轮数上限（0 = 默认 8）表单齐备；保存后详情 config 键集对齐 C1（model_id 字符串、server_ids 数字数组、无 max_rounds 键当留 0）
+2. `llm 分类 → react（绑一个 server）→ end 映射` 试运行：react 内 ≥1 轮工具调用后终答；end 终稿引用 `{{agent}}` 成功
+3. 运行详情：node_trace react 单行；node_runs react 行 input 含 `tool_chain`（逐调用 round/id/name/args/is_error）与 rounds / max_rounds；executions 表 react 内每轮 LLM 各一行（conversation_id NULL）
+4. max_rounds=1 + 诱导持续调用 → 第 2 轮 nudge 收尾、终答照落（不报错）
+5. 停用所绑 server 再试运行 → 失败 alert `MCP_TOOL_NOT_FOUND`、error_node = react 节点（fail-fast 不静默降级）
+6. prompt 填 `{{nope}}` 保存 → 400 带节点 key 与引用名（R10 双模板：system_prompt 同验）
+
+### 13.2 场景 B（US2）：ragNode 先提炼后检索
+
+1. 画布拖入「知识检索节点」：KB 下拉（仅 enabled）/ Top K / 检索问句 Query 表单齐备
+2. `llm1（提炼 topic）→ kr（query={{llm1.topic}}）→ llm2` 试运行：kr 的 nodeIn query = 渲染后问句（运行详情节点 input 可见）、llm2 据检索段落作答
+3. 存量无 query 的 kr 节点（JSON 模式造）试运行 → query 回退整段 input（升级前行为）
+4. query 填 `{{nope}}` 保存 → R10 400；query 渲染空串 → 回退 input 不报错
+
+### 13.3 场景 C（US3）：tool 节点画布闭环
+
+1. 画布拖入「工具节点」：工具下拉按 enabled server 分组单选；选中后 config.tool_id 字符串保形（JSON 模式核对）
+2. args 行 `q={{input}}` 保存试运行 → 工具收到渲染值；nodeIn args 同值
+3. 空键 args 行不产出、全空删 args 键（JSON 模式核对）
+4. 存量 JSON 形态 tool 节点进编辑页 → 表单回显工具名与 args 行如初
+
+### 13.4 场景 D（US4）：零回归
+
+1. chat 绑工具 Agent 多轮工具对话复跑（chat-manual-test §14 同款）→ 帧序 / 卡片 / 落库零差异（reactloop 换用 + ToolSourceReq 加法双证明）
+2. 既存七类节点存量图各跑一次 → 行为零变化；palette 既存类拖拽 / 起始三入口 / 开始锚点 / end 映射复测
+3. `make migrate-status` 22 applied；migrations/ 仅新增 00022
+
+### 13.5 通过标准增补（SC-001~SC-005）
+
+- [ ] react 全链（表单 / 并集 / 终答 / tool_chain / executions / 上限 / fail-fast / R10）（§13.1）
+- [ ] ragNode 表单 / query 渲染与回退 / R10（§13.2）
+- [ ] tool 表单 / 保形 / args 行 / 回显（§13.3）
+- [ ] chat 零差异 + 存量零回归 + 22 applied（§13.4）
+- [ ] 门禁：go 全量 + workflow/mcp 模块覆盖率 ≥80% + web type-check/build + grep 纪律（eino/go-sdk/依赖面）

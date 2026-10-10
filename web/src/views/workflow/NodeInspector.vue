@@ -108,6 +108,203 @@
         </div>
       </template>
 
+      <template v-else-if="nodeType === 'react'">
+        <!-- spec 020 FR-007：图内 mini-agent——模型 + 工具集并集（server 级 ∪ 工具级）
+             + 双模板 + 温度 + 轮数上限；模型下拉复用 llm 数据源模式 -->
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">模型</span>
+          <el-select
+            v-model="modelId"
+            :disabled="readonly"
+            :loading="modelLoading"
+            placeholder="选择 chat 模型"
+            filterable
+          >
+            <el-option-group v-for="g in modelGroups" :key="g.name" :label="g.name">
+              <el-option v-for="m in g.models" :key="m.id" :label="m.name" :value="m.id" />
+            </el-option-group>
+          </el-select>
+          <p v-if="!modelLoading && modelGroups.length === 0" class="node-inspector__hint">
+            暂无可用模型：请先在「提供商管理」配置并启用 chat 模型
+          </p>
+        </div>
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">MCP 服务（全部工具）</span>
+          <el-select
+            :model-value="reactServerIds"
+            :disabled="readonly"
+            :loading="mcpLoading"
+            multiple
+            collapse-tags
+            placeholder="按 server 绑定 = 其工具动态全量"
+            @update:model-value="(v: unknown) => (reactServerIds = toNumArray(v))"
+          >
+            <el-option v-for="s in mcpServerOptions" :key="s.id" :label="s.name" :value="s.numId" />
+          </el-select>
+        </div>
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">MCP 工具（单独勾选）</span>
+          <el-select
+            :model-value="reactToolIds"
+            :disabled="readonly"
+            :loading="mcpLoading"
+            multiple
+            collapse-tags
+            filterable
+            placeholder="与上方 server 并集（重叠自动去重）"
+            @update:model-value="(v: unknown) => (reactToolIds = toNumArray(v))"
+          >
+            <el-option-group v-for="g in reactToolGroups" :key="g.name" :label="g.name">
+              <el-option v-for="t in g.tools" :key="t.id" :label="t.name" :value="t.numId" />
+            </el-option-group>
+          </el-select>
+          <p class="node-inspector__hint">两者均空 = 纯推理单轮（不查 MCP）</p>
+        </div>
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">System Prompt</span>
+          <TemplateField
+            v-model="systemPrompt"
+            :variables="variableGroups"
+            :disabled="readonly"
+            :rows="3"
+            placeholder="角色设定（可选，空 = 不携带）"
+          />
+        </div>
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">Prompt</span>
+          <TemplateField
+            v-model="prompt"
+            :variables="variableGroups"
+            :disabled="readonly"
+            :rows="4"
+            placeholder="必填：支持 {{var}} 模板"
+          />
+        </div>
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">温度 / 轮数上限</span>
+          <div class="node-inspector__pair">
+            <el-input-number
+              :model-value="reactTemperature"
+              :disabled="readonly"
+              :min="0"
+              :max="2"
+              :step="0.1"
+              :precision="2"
+              placeholder="温度（空=模型默认）"
+              controls-position="right"
+              @update:model-value="(v: number | undefined) => (reactTemperature = v ?? undefined)"
+            />
+            <el-input-number
+              :model-value="reactMaxRounds"
+              :disabled="readonly"
+              :min="0"
+              :max="16"
+              :step="1"
+              placeholder="0 = 默认 8"
+              controls-position="right"
+              @update:model-value="(v: number | undefined) => (reactMaxRounds = v ?? undefined)"
+            />
+          </div>
+          <p class="node-inspector__hint">轮数上限 1-16（0 = 默认 8）：超限 nudge 收尾逼文本终答</p>
+        </div>
+      </template>
+
+      <template v-else-if="nodeType === 'knowledge_retrieval'">
+        <!-- spec 020 FR-008：ragNode 画布表单——KB 下拉 + top_k + query 模板
+             （空 = 回退检索整个入参，O1 加法修订零回归） -->
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">知识库</span>
+          <el-select
+            v-model="kbId"
+            :disabled="readonly"
+            :loading="kbLoading"
+            placeholder="选择知识库"
+            filterable
+          >
+            <el-option v-for="k in kbOptions" :key="k.id" :label="k.name" :value="k.id" />
+          </el-select>
+          <p v-if="!kbLoading && kbOptions.length === 0" class="node-inspector__hint">
+            暂无可用知识库：请先在「知识库管理」创建并启用
+          </p>
+        </div>
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">Top K</span>
+          <el-input-number
+            :model-value="krTopK"
+            :disabled="readonly"
+            :min="0"
+            :max="20"
+            :step="1"
+            controls-position="right"
+            @update:model-value="(v: number | undefined) => (krTopK = v ?? undefined)"
+          />
+          <p class="node-inspector__hint">0 = 跟随默认；1-20</p>
+        </div>
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">检索问句 Query</span>
+          <TemplateField
+            v-model="krQuery"
+            :variables="variableGroups"
+            :disabled="readonly"
+            :rows="2"
+            placeholder="空 = 检索整个入参 {{input}}；可 {{var}} 如上游提炼的问句"
+          />
+        </div>
+      </template>
+
+      <template v-else-if="nodeType === 'tool'">
+        <!-- spec 020 FR-009：tool 节点画布表单——mcp 工具分组单选（tool_id 字符串
+             保形）+ args 键值行（值域模板；空键行不产出、全空删键，headers 先例） -->
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">MCP 工具</span>
+          <el-select
+            :model-value="toolId || undefined"
+            :disabled="readonly"
+            :loading="mcpLoading"
+            placeholder="选择工具（按 server 分组）"
+            filterable
+            @update:model-value="(v: unknown) => (toolId = typeof v === 'string' ? v : '')"
+          >
+            <el-option-group v-for="g in reactToolGroups" :key="g.name" :label="g.name">
+              <el-option v-for="t in g.tools" :key="t.id" :label="t.name" :value="t.id" />
+            </el-option-group>
+          </el-select>
+        </div>
+        <div class="node-inspector__field">
+          <span class="node-inspector__label">Args</span>
+          <div
+            v-for="(row, i) in toolArgRows"
+            :key="i"
+            class="node-inspector__kv node-inspector__kv--stack"
+          >
+            <el-input
+              class="node-inspector__kv-name"
+              :model-value="row.key"
+              :disabled="readonly"
+              placeholder="参数名"
+              @update:model-value="(v: string) => onToolArgInput(i, 'key', v)"
+            />
+            <div class="node-inspector__kv-value">
+              <TemplateField
+                :model-value="row.value"
+                :variables="variableGroups"
+                :disabled="readonly"
+                :rows="2"
+                placeholder="值（可 {{var}}）"
+                @update:model-value="(v: string) => onToolArgInput(i, 'value', v)"
+              />
+            </div>
+            <el-button text type="danger" :disabled="readonly" @click="removeToolArgRow(i)">
+              <el-icon><Delete /></el-icon>
+            </el-button>
+          </div>
+          <el-button v-if="!readonly" text type="primary" @click="addToolArgRow">
+            <el-icon><Plus /></el-icon>
+            添加参数
+          </el-button>
+        </div>
+      </template>
+
       <template v-else-if="nodeType === 'end'">
         <!-- spec 018 FR-003/FR-004：task 型 end 双模式——映射模式（output_fields，逐字段
              引用变量构造终稿 JSON 对象）与高级模式（output 自由模板）互斥；chat 型保持
@@ -439,7 +636,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { Delete, Pointer, Plus } from '@element-plus/icons-vue'
+import { getMcpServerList, getMcpServer } from '@/api/mcp'
 import { getModelList, getProviderList, type ModelItem } from '@/api/provider'
+import { getKnowledgeBaseList } from '@/api/rag'
 import {
   getWorkflowDetail,
   getWorkflowList,
@@ -546,6 +745,43 @@ function useOptStrConfigField(key: string) {
   })
 }
 
+/** 可选数字型 config 字段工厂（spec 020：temperature / max_rounds）：undefined 删键 */
+function useOptNumConfigField(key: string) {
+  return computed<number | undefined>({
+    get: () => {
+      const v = props.node?.data?.config?.[key]
+      return typeof v === 'number' ? v : undefined
+    },
+    set: (value: number | undefined) => {
+      const cfg = props.node?.data?.config
+      if (!cfg) return
+      if (value === undefined || value === null) delete cfg[key]
+      else cfg[key] = value
+    },
+  })
+}
+
+/** 数字数组型 config 字段工厂（spec 020：server_ids / tool_ids——数字数组形态） */
+function useNumArrayConfigField(key: string) {
+  return computed<number[]>({
+    get: () => toNumArray(props.node?.data?.config?.[key]),
+    set: (value: number[]) => {
+      const cfg = props.node?.data?.config
+      if (!cfg) return
+      if (value.length > 0) cfg[key] = value
+      else delete cfg[key]
+    },
+  })
+}
+
+/** el-select multiple 值 → 数字数组（字符串 id 防御转换，非数字丢弃） */
+function toNumArray(v: unknown): number[] {
+  if (!Array.isArray(v)) return []
+  return v
+    .map((x) => (typeof x === 'number' ? x : Number(x)))
+    .filter((n) => Number.isFinite(n) && n > 0)
+}
+
 const modelId = useStrConfigField('model_id')
 const prompt = useStrConfigField('prompt')
 /** System Prompt（FR-004）：可选，空串删键对齐后端 omitempty */
@@ -556,6 +792,81 @@ const url = useStrConfigField('url')
 const method = useStrConfigField('method', 'GET')
 const body = useStrConfigField('body')
 const workflowId = useStrConfigField('workflow_id')
+
+// ---- spec 020：react 节点 config 读写（数字 / 数字数组 / 可选数字形态） ----
+
+const reactServerIds = useNumArrayConfigField('server_ids')
+const reactToolIds = useNumArrayConfigField('tool_ids')
+const reactTemperature = useOptNumConfigField('temperature')
+const reactMaxRounds = useOptNumConfigField('max_rounds')
+
+// ---- spec 020：ragNode config 读写（knowledge_base_id 字符串保形 / top_k / query） ----
+
+const kbId = useStrConfigField('knowledge_base_id')
+const krTopK = useOptNumConfigField('top_k')
+const krQuery = useOptStrConfigField('query')
+/** tool 节点工具选择（tool_id 字符串保形，spec 016 冻结键） */
+const toolId = useStrConfigField('tool_id')
+
+const kbOptions = ref<Array<{ id: string; name: string }>>([])
+const kbLoading = ref(false)
+
+async function loadKbOptions(): Promise<void> {
+  kbLoading.value = true
+  try {
+    const page = await getKnowledgeBaseList({ page: 1, page_size: 100 })
+    kbOptions.value = page.list.filter((k) => k.enabled).map((k) => ({ id: k.id, name: k.name }))
+  } catch {
+    // 拦截器已提示；空选项即反馈
+  } finally {
+    kbLoading.value = false
+  }
+}
+
+// ---- spec 020：tool 节点 args 键值行（config.args 单源，headers 先例同款 sync 模式） ----
+
+interface ArgRow {
+  key: string
+  value: string
+}
+
+const toolArgRows = ref<ArgRow[]>([])
+
+function rebuildToolArgsForm(): void {
+  const args = props.node?.data?.config?.args
+  if (nodeType.value !== 'tool' || typeof args !== 'object' || args === null) {
+    toolArgRows.value = []
+    return
+  }
+  toolArgRows.value = Object.entries(args as Record<string, unknown>).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : String(value),
+  }))
+}
+
+function syncToolArgsToConfig(): void {
+  const cfg = props.node?.data?.config
+  if (!cfg) return
+  const entries = toolArgRows.value.filter((r) => r.key.trim())
+  if (entries.length === 0) delete cfg.args
+  else cfg.args = Object.fromEntries(entries.map((r) => [r.key.trim(), r.value]))
+}
+
+function onToolArgInput(index: number, field: 'key' | 'value', value: string): void {
+  const row = toolArgRows.value[index]
+  if (!row) return
+  row[field] = value
+  syncToolArgsToConfig()
+}
+
+function addToolArgRow(): void {
+  toolArgRows.value.push({ key: '', value: '' })
+}
+
+function removeToolArgRow(index: number): void {
+  toolArgRows.value.splice(index, 1)
+  syncToolArgsToConfig()
+}
 
 /** llm 输出字段声明（FR-003）：读写 config.output_schema——读时非数组回退 []；
  *  写时原样写回（含未填名的编辑中空行——受控回路：行编辑器靠回读渲染新行），
@@ -1022,12 +1333,13 @@ function removeHeaderRow(index: number): void {
 }
 
 // 选中节点切换即重建 headers 行与 Auth 区（config.headers 引用共享，行编辑不换节点对象）
-// + end 映射模式行集（spec 018）
+// + end 映射模式行集（spec 018）+ tool args 行（spec 020）
 watch(
   () => props.node,
   () => {
     rebuildApiForm()
     rebuildEndForm()
+    rebuildToolArgsForm()
   },
   { immediate: true },
 )
@@ -1083,7 +1395,50 @@ async function loadWorkflowOptions(): Promise<void> {
 onMounted(() => {
   void loadModelOptions()
   void loadWorkflowOptions()
+  void loadMcpOptions()
+  void loadKbOptions()
 })
+
+// ---- spec 020：react / tool 节点的 MCP 数据源（enabled server + 分组工具） ----
+
+interface McpServerOption {
+  id: string
+  numId: number
+  name: string
+}
+interface McpToolOption {
+  id: string
+  numId: number
+  name: string
+}
+
+const mcpServerOptions = ref<McpServerOption[]>([])
+const reactToolGroups = ref<Array<{ name: string; tools: McpToolOption[] }>>([])
+const mcpLoading = ref(false)
+
+/** enabled server 列表 + 逐 server 工具分组（agent 绑定多选先例同款数据源模式） */
+async function loadMcpOptions(): Promise<void> {
+  mcpLoading.value = true
+  try {
+    const page = await getMcpServerList({ page: 1, page_size: 100 })
+    const servers = page.list.filter((s) => s.enabled)
+    mcpServerOptions.value = servers.map((s) => ({ id: s.id, numId: Number(s.id), name: s.name }))
+    const groups = await Promise.all(
+      servers.map(async (s) => {
+        const detail = await getMcpServer(s.id)
+        return {
+          name: s.name,
+          tools: (detail.tools ?? []).map((t) => ({ id: t.id, numId: Number(t.id), name: t.name })),
+        }
+      }),
+    )
+    reactToolGroups.value = groups.filter((g) => g.tools.length > 0)
+  } catch {
+    // 拦截器已提示；空选项即反馈
+  } finally {
+    mcpLoading.value = false
+  }
+}
 
 // ---- workflow 节点入参渲染（FR-006，research 决策 8）：行集来自子流程 input_schema ----
 
@@ -1296,6 +1651,14 @@ function setSubflowInputValue(name: string, value: string): void {
   display: grid;
   grid-template-columns: minmax(64px, 1fr) minmax(80px, 1.2fr) 56px minmax(60px, 1fr) 28px;
   gap: var(--hf-space-1);
+  align-items: center;
+}
+
+/* react 温度 / 轮数并排（spec 020） */
+.node-inspector__pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--hf-space-2);
   align-items: center;
 }
 

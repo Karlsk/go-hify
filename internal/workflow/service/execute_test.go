@@ -25,6 +25,7 @@ import (
 	mcpapi "github.com/Karlsk/go-hify/internal/mcp/api"
 	"github.com/Karlsk/go-hify/internal/platform/errs"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
+	"github.com/Karlsk/go-hify/internal/platform/reactloop"
 	"github.com/Karlsk/go-hify/internal/platform/tool"
 	providerapi "github.com/Karlsk/go-hify/internal/provider/api"
 	"github.com/Karlsk/go-hify/internal/platform/traceid"
@@ -899,4 +900,141 @@ func TestExecuteTaskInputNonJSONPassthrough(t *testing.T) {
 	assert.Equal(t, "ok", res.Output)
 	require.Len(t, env.lastNodeRuns, 2)
 	assert.Contains(t, env.lastNodeRuns[0].Input, `"prompt":"x=纯文本入参"`, "全文渲染不受归一化影响")
+}
+
+// ---- spec 020：react 节点图级（FR-003 / C2 / C3）----
+
+// reactGraph 单 react 节点 → end 引用其终答的最小图。
+func reactGraph(cfg string) ([]WorkflowNode, []WorkflowEdge) {
+	nodes := []WorkflowNode{
+		{NodeKey: "agent", Type: "react", Name: "自主", Config: cfg},
+		{NodeKey: "finish", Type: "end", Config: `{"output":"{{agent}}"}`},
+	}
+	edges := []WorkflowEdge{{SourceNodeKey: "agent", TargetNodeKey: "finish"}}
+	return nodes, edges
+}
+
+func reactToolCallMsg() *schema.Message {
+	return &schema.Message{Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{ID: "c1", Type: "function",
+			Function: schema.FunctionCall{Name: "s1__weather", Arguments: `{"city":"北京"}`}}},
+		ResponseMeta: &schema.ResponseMeta{FinishReason: "tool_calls",
+			Usage: &schema.TokenUsage{PromptTokens: 10, CompletionTokens: 0}}}
+}
+
+func reactFinalMsg(content string) *schema.Message {
+	return &schema.Message{Role: schema.Assistant, Content: content,
+		ResponseMeta: &schema.ResponseMeta{FinishReason: "stop",
+			Usage: &schema.TokenUsage{PromptTokens: 8, CompletionTokens: 4}}}
+}
+
+// ① 两轮工具循环：终答落池、并集请求透传、nodeIn tool_chain、executions 逐轮。
+func TestExecuteReactToolRounds(t *testing.T) {
+	nodes, edges := reactGraph(
+		`{"model_id":"3","prompt":"任务：{{input}}","server_ids":[1],"tool_ids":[7],"max_rounds":4}`)
+	env := newExecEnv(t, "published", nodes, edges,
+		func(_ context.Context, call int) (*schema.Message, error) {
+			if call == 1 {
+				return reactToolCallMsg(), nil
+			}
+			return reactFinalMsg("终答"), nil
+		})
+	env.tools.defs = []tool.ToolDef{{Name: "s1__weather", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	env.tools.invokeFn = okToolInvoke("晴")
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 9, Input: "天气"})
+	require.NoError(t, err)
+	assert.Equal(t, "终答", res.Output, "react 终答经 end 模板落终稿")
+
+	// 并集绑定透传 mcp 请求面
+	assert.Equal(t, []uint64{7}, env.tools.lastReq.ToolIDs)
+	assert.Equal(t, []uint64{1}, env.tools.lastReq.ServerIDs)
+	assert.Len(t, env.tools.invokes, 1)
+
+	// node_runs：react 单行，input 含 tool_chain 与轮数
+	require.Len(t, env.lastNodeRuns, 2)
+	reactIn := env.lastNodeRuns[0].Input
+	assert.Contains(t, reactIn, `"tool_chain"`)
+	assert.Contains(t, reactIn, "s1__weather")
+	assert.Contains(t, reactIn, `"rounds":"2"`, "nodeIn 值字符串化形态")
+	assert.Contains(t, reactIn, `"max_rounds":"4"`)
+	assert.Contains(t, env.lastNodeRuns[0].Output, `"output":"终答"`, "Output 走 wrapTraceJSON 包装")
+
+	// executions 逐轮两行：ConversationID=nil（workflow 标识）+ Input 含 round/tool_calls
+	require.Len(t, env.execs.rows, 2)
+	assert.Nil(t, env.execs.rows[0].ConversationID)
+	assert.Equal(t, 0, env.execs.rows[0].Input["round"])
+	assert.Equal(t, 1, env.execs.rows[0].Input["tool_calls"])
+	assert.Equal(t, 1, env.execs.rows[1].Input["round"])
+	assert.Equal(t, "终答", env.execs.rows[1].Output["content"])
+}
+
+// ② 绑定全空 = 纯推理单轮：零 mcp 交互。
+func TestExecuteReactPureReasoning(t *testing.T) {
+	nodes, edges := reactGraph(`{"model_id":"3","prompt":"推理：{{input}}"}`)
+	env := newExecEnv(t, "published", nodes, edges,
+		func(_ context.Context, call int) (*schema.Message, error) {
+			return reactFinalMsg("纯推理终答"), nil
+		})
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 9, Input: "q"})
+	require.NoError(t, err)
+	assert.Equal(t, "纯推理终答", res.Output)
+	assert.Equal(t, 0, env.tools.calls, "绑定全空零 mcp 交互")
+	assert.Equal(t, 1, env.streamer.calls, "单轮直答")
+}
+
+// ③ 并集过滤后空清单 → ErrMCPToolNotFound fail-fast（绑定即意图，不静默降级）。
+func TestExecuteReactEmptyToolSetFailFast(t *testing.T) {
+	nodes, edges := reactGraph(`{"model_id":"3","prompt":"{{input}}","server_ids":[5]}`)
+	env := newExecEnv(t, "published", nodes, edges,
+		func(_ context.Context, call int) (*schema.Message, error) {
+			return reactFinalMsg("不该到达"), nil
+		})
+	env.tools.defs = nil // server 停用 / 工具删 → 过滤后空清单
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 9, Input: "q"})
+	require.ErrorIs(t, err, mcpapi.ErrMCPToolNotFound)
+	assert.Equal(t, "failed", res.Status)
+	assert.Equal(t, "agent", res.NodeTrace[0].NodeKey)
+	assert.Equal(t, 0, env.streamer.calls, "fail-fast 先于 LLM 调用")
+}
+
+// ④ max_rounds=1 透传：共 2 次调用（1 工具轮 + 第 2 轮 nudge 收尾摘工具）。
+func TestExecuteReactMaxRounds(t *testing.T) {
+	nodes, edges := reactGraph(`{"model_id":"3","prompt":"{{input}}","tool_ids":[7],"max_rounds":1}`)
+	env := newExecEnv(t, "published", nodes, edges,
+		func(_ context.Context, call int) (*schema.Message, error) {
+			if call == 1 {
+				return reactToolCallMsg(), nil
+			}
+			return reactFinalMsg("收尾终答"), nil // 上限轮模型仍幻觉调用也强制收尾
+		})
+	env.tools.defs = []tool.ToolDef{{Name: "s1__weather", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	env.tools.invokeFn = okToolInvoke("晴")
+
+	res, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 9, Input: "q"})
+	require.NoError(t, err, "HitLimit 非错误")
+	assert.Equal(t, "收尾终答", res.Output)
+	assert.Equal(t, 2, env.streamer.calls)
+	assert.Contains(t, env.streamer.lastMsgs()[len(env.streamer.lastMsgs())-1].Content, reactloop.NudgeText,
+		"nudge 瞬态进收尾轮请求")
+	assert.Empty(t, env.streamer.lastOpts().Tools, "收尾轮摘工具")
+}
+
+// ⑤ prompt 渲染缺失变量 → 图缺陷 400 带 node 前缀，零 LLM / mcp 交互。
+func TestExecuteReactRenderMissing(t *testing.T) {
+	nodes, edges := reactGraph(`{"model_id":"3","prompt":"{{nope}}","tool_ids":[7]}`)
+	env := newExecEnv(t, "published", nodes, edges,
+		func(_ context.Context, call int) (*schema.Message, error) {
+			return reactFinalMsg("不该到达"), nil
+		})
+	env.tools.defs = []tool.ToolDef{{Name: "s1__weather", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+
+	_, err := env.svc.Execute(context.Background(), workflowapi.ExecuteWorkflowReq{ID: 9, Input: "q"})
+	require.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "node agent:")
+	assert.Contains(t, err.Error(), "nope")
+	assert.Equal(t, 0, env.streamer.calls)
+	assert.Equal(t, 0, env.tools.calls, "渲染先于 mcp 交互")
 }

@@ -51,3 +51,9 @@
 - 复活形态候选：`platform/tool/builtin` 静态注册表实现 tool.Source（纯逻辑工具）；依赖业务模块的工具（如知识库检索）由该模块实现 Source、组合根注入（依赖方向合法）。ToolConfig 加法键 `builtin` 与 tool_id 互斥拒为自然落点。
 - 触发：出现第一个真实内置工具需求（或 react 节点工具集需要非 MCP 来源）时重开本篇。
 - 关联：spec 019（reactloop）已为 builtin 预留统一消费面——tool.Source 进 Registry 即生效，循环零改动。
+
+## 10. tool 节点 args 入 R10 保存期校验——维持递延（spec 020 analyze 记录）
+
+- 现状 gap：tool args 值支持 {{var}} 但 R10 不扫（spec 016 遗留）——非祖先引用保存期通过、执行期 strict 渲染拒。
+- 不修理由（2026-10-10）：加入 R10 会使**存量已保存的坏配置无法再编辑保存**（保存期校验对 Update 同生效）——锁死编辑路径的回归风险 > 提前报错收益；执行期 strict 拒已带 `args.<k>` 定位，排障可用。
+- 触发重议：存量图清理完成后，或 args 编辑面升级为 schema 辅助行（按工具 input_schema 出候选）时一并收紧。

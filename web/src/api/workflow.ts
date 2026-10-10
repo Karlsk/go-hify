@@ -83,8 +83,45 @@ export interface LLMNodeConfig {
 }
 
 /**
- * 创建载荷的节点元素。type 为后端 NodeType 全集（7 类）字符串——前端画布面板
- * 只提供 5 类（llm/end/condition/api/workflow），手写 JSON 可携带其余（透传）。
+ * react 节点 config 的类型面（对齐后端 ReactConfig，spec 020）：图内 mini-agent——
+ * 模型 + 工具集（server 级 ∪ 工具级并集）+ ReAct 多轮。model_id 字符串保形（见文件头）；
+ * server_ids / tool_ids 为数字数组（后端无 ,string tag，agent 请求数字先例）。
+ */
+export interface ReactNodeConfig {
+  model_id: string
+  prompt: string
+  system_prompt?: string
+  temperature?: number
+  server_ids?: number[]
+  tool_ids?: number[]
+  /** 0 / 缺省 = 默认 8；1-16 合法（后端保存期校验） */
+  max_rounds?: number
+}
+
+/**
+ * knowledge_retrieval 节点 config 的类型面（对齐后端 KnowledgeRetrievalConfig；
+ * spec 020 加 query 加法键：空 = 回退检索整个入参）。knowledge_base_id 字符串保形。
+ */
+export interface KnowledgeRetrievalNodeConfig {
+  knowledge_base_id: string
+  /** 0 / 缺省 = 跟随默认；1-20 */
+  top_k?: number
+  /** {{var}} 模板；空 = 回退 {{input}}（spec 06 O1 加法修订） */
+  query?: string
+}
+
+/**
+ * tool 节点 config 的类型面（对齐后端 ToolConfig，spec 016 冻结）：tool_id 字符串
+ * 保形；args 值支持 {{var}} 模板。
+ */
+export interface ToolNodeConfig {
+  tool_id: string
+  args?: Record<string, string>
+}
+
+/**
+ * 创建载荷的节点元素。type 为后端 NodeType 全集（8 类，spec 020 加 react）字符串——
+ * 前端画布面板提供全部八类（spec 020 收口），手写 JSON 可携带其余（透传）。
  * config 外键字符串保形（见文件头）。
  */
 export interface WorkflowNodeData {
@@ -118,7 +155,7 @@ export interface CreateWorkflowData {
 /** 详情响应的节点（后端 NodeSchema：config 原样透传——库里 JSON 原文，未知键含在内） */
 export interface WorkflowDetailNode {
   key: string
-  /** 后端 7 类全集字符串（画布面板只提供 5 类，tool / knowledge_retrieval 照渲染） */
+  /** 后端 8 类全集字符串（spec 020 加 react；画布面板八类全提供） */
   type: string
   /** 后端恒序列化；空串合法（detailToGraphConfig 转换时省略键） */
   name: string

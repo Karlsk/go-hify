@@ -1255,3 +1255,53 @@ func TestAssembleInputJSONDefault(t *testing.T) {
 		assert.Equal(t, `{"query":"q"}`, got)
 	})
 }
+
+// ---- spec 020：retrieve query 模板加法修订（FR-005 / C5）----
+
+// query 非空 → strict 渲染作检索问句（nodeIn 记渲染值）。
+func TestRunNodeRetrieveQueryTemplate(t *testing.T) {
+	e, _, _, _, _, rags := newTestExecutor(okGen("x"))
+	rags.resp = nil
+	c := newExecContext("整段入参文本")
+	c.set("llm1", `{"topic":"支付失败原因"}`)
+
+	out, err := e.runNode(context.Background(), "kb",
+		&workflowapi.KnowledgeRetrievalConfig{KnowledgeBaseID: 7, TopK: 3, Query: "{{llm1.topic}}"}, c)
+	require.NoError(t, err)
+	assert.Equal(t, "支付失败原因", rags.lastReq.Query, "检索问句 = 渲染后模板")
+	assert.Equal(t, []uint64{7}, rags.lastReq.KBIDs)
+	in := c.takeNodeIn()
+	assert.Equal(t, "支付失败原因", in["query"], "nodeIn 记渲染后实际值")
+	assert.Equal(t, "", out, "空检索结果 = 空文本（既有形态）")
+}
+
+// query 空 / 缺省 / 渲染空串 → 回退 vars["input"]（O1 存量语义零回归）。
+func TestRunNodeRetrieveQueryFallback(t *testing.T) {
+	e, _, _, _, _, rags := newTestExecutor(okGen("x"))
+	c := newExecContext("整段入参文本")
+	c.set("llm1", `{"topic":""}`)
+
+	_, err := e.runNode(context.Background(), "kb",
+		&workflowapi.KnowledgeRetrievalConfig{KnowledgeBaseID: 7}, c)
+	require.NoError(t, err)
+	assert.Equal(t, "整段入参文本", rags.lastReq.Query, "缺省回退 input")
+
+	_, err = e.runNode(context.Background(), "kb2",
+		&workflowapi.KnowledgeRetrievalConfig{KnowledgeBaseID: 7, Query: "{{llm1.topic}}"}, c)
+	require.NoError(t, err)
+	assert.Equal(t, "整段入参文本", rags.lastReq.Query, "渲染空串视同未配回退 input")
+}
+
+// query 渲染缺失变量 → 图缺陷 400 带 node 前缀，零检索 IO。
+func TestRunNodeRetrieveQueryMissingVar(t *testing.T) {
+	e, _, _, _, _, rags := newTestExecutor(okGen("x"))
+	c := newExecContext("x")
+
+	_, err := e.runNode(context.Background(), "kb",
+		&workflowapi.KnowledgeRetrievalConfig{KnowledgeBaseID: 7, Query: "{{nope}}"}, c)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "node kb:")
+	assert.Contains(t, err.Error(), "nope")
+	assert.Equal(t, 0, rags.calls, "渲染先于检索 IO")
+}

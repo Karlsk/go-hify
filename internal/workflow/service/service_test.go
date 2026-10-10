@@ -1658,3 +1658,92 @@ func TestToNodeRun(t *testing.T) {
 	assert.Empty(t, s.ErrorMsg)
 	assert.Equal(t, 120, s.DurationMs)
 }
+
+// ---- spec 020：react 节点保存期（precheck model_id + R10 双模板，FR-004）----
+
+// TestValidateTemplateRefsReact R10 react 分支：prompt 与 system_prompt 双模板同受
+// 基名约束（祖先 / input 过；非祖先拒）。
+func TestValidateTemplateRefsReact(t *testing.T) {
+	reactCfg := func(prompt, system string) workflowapi.NodeReq {
+		return workflowapi.NodeReq{Key: "agent", Type: workflowapi.NodeReact,
+			Config: json.RawMessage(fmt.Sprintf(`{"model_id":"3","prompt":%q,"system_prompt":%q}`, prompt, system))}
+	}
+	graph := func(react workflowapi.NodeReq) ([]workflowapi.NodeReq, []workflowapi.EdgeReq) {
+		return []workflowapi.NodeReq{
+				{Key: "classify", Type: workflowapi.NodeLLM,
+					Config: json.RawMessage(`{"model_id":"3","prompt":"x"}`)},
+				react,
+			},
+			[]workflowapi.EdgeReq{{SourceNodeKey: "classify", TargetNodeKey: "agent"}}
+	}
+
+	t.Run("prompt 与 system_prompt 祖先+input 过", func(t *testing.T) {
+		nodes, edges := graph(reactCfg("任务：{{input}} 参考 {{classify}}", "角色 {{input.style}}"))
+		assert.NoError(t, validateTemplateRefs(nodes, edges))
+	})
+	t.Run("prompt 非祖先拒", func(t *testing.T) {
+		nodes, edges := graph(reactCfg("{{downstream}}", ""))
+		err := validateTemplateRefs(nodes, edges)
+		require.ErrorIs(t, err, errs.ErrValidationFailed)
+		assert.Contains(t, err.Error(), "downstream")
+	})
+	t.Run("system_prompt 非祖先拒（react 双模板从严）", func(t *testing.T) {
+		nodes, edges := graph(reactCfg("{{input}}", "{{downstream}}"))
+		err := validateTemplateRefs(nodes, edges)
+		require.ErrorIs(t, err, errs.ErrValidationFailed)
+		assert.Contains(t, err.Error(), "downstream")
+	})
+}
+
+// TestCreatePrecheckReactModel react 节点 model_id 保存期存在性预检（同 llm 先例）：
+// 不存在 → VALIDATION_FAILED 带节点 key 与 model_id；不动 store。
+func TestCreatePrecheckReactModel(t *testing.T) {
+	st := createOkStore()
+	svc := New(st, &stubModels{getFn: func(req providerapi.GetModelReq) (*providerapi.ModelSchema, error) {
+		return nil, providerapi.ErrModelNotFound
+	}}, nil, &recordCache{}, nil, nil, nil, nil, false)
+
+	_, err := svc.Create(context.Background(), workflowapi.UpsertReq{
+		Name: "react 预检", Type: workflowapi.WorkflowTypeTask, StartNodeKey: "agent",
+		Nodes: []workflowapi.NodeReq{
+			{Key: "agent", Type: workflowapi.NodeReact,
+				Config: json.RawMessage(`{"model_id":"999","prompt":"{{input}}"}`)},
+		},
+		Edges: []workflowapi.EdgeReq{},
+	})
+	require.ErrorIs(t, err, errs.ErrValidationFailed)
+	assert.Contains(t, err.Error(), "agent", "报错带节点 key")
+	assert.Contains(t, err.Error(), "999", "报错带 model_id")
+	assert.Empty(t, st.seq, "预检拒绝不动 store")
+}
+
+// ---- spec 020：R10 knowledge_retrieval.query 分支（FR-005）----
+
+func TestValidateTemplateRefsKrQuery(t *testing.T) {
+	krCfg := func(query string) workflowapi.NodeReq {
+		return workflowapi.NodeReq{Key: "kb", Type: workflowapi.NodeKnowledgeRetrieval,
+			Config: json.RawMessage(fmt.Sprintf(`{"knowledge_base_id":"7","query":%q}`, query))}
+	}
+	graph := func(kr workflowapi.NodeReq) ([]workflowapi.NodeReq, []workflowapi.EdgeReq) {
+		return []workflowapi.NodeReq{
+				{Key: "classify", Type: workflowapi.NodeLLM, Config: json.RawMessage(`{"model_id":"3","prompt":"x"}`)},
+				kr,
+			},
+			[]workflowapi.EdgeReq{{SourceNodeKey: "classify", TargetNodeKey: "kb"}}
+	}
+
+	t.Run("祖先与 input 过", func(t *testing.T) {
+		nodes, edges := graph(krCfg("{{classify.topic}} {{input}}"))
+		assert.NoError(t, validateTemplateRefs(nodes, edges))
+	})
+	t.Run("非祖先拒", func(t *testing.T) {
+		nodes, edges := graph(krCfg("{{downstream}}"))
+		err := validateTemplateRefs(nodes, edges)
+		require.ErrorIs(t, err, errs.ErrValidationFailed)
+		assert.Contains(t, err.Error(), "downstream")
+	})
+	t.Run("空 query 不扫（存量形态零变化）", func(t *testing.T) {
+		nodes, edges := graph(krCfg(""))
+		assert.NoError(t, validateTemplateRefs(nodes, edges))
+	})
+}

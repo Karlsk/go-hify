@@ -282,3 +282,88 @@ func TestToolSource_ConcurrentEnsureSingleLoad(t *testing.T) {
 	}
 	assert.Equal(t, 1, st.calls.listToolsByIDs, "并发下 ensure 只查库一次")
 }
+
+// ---- spec 020：ServerIDs 并集解析（FR-002 / C4）----
+
+// newToolSourceSvcWithServers 带 ServerIDs 的 Source 装配（stub store 记录两路查询）。
+func newToolSourceSvcWithServers(st Store, d mcpDialer, toolIDs, serverIDs []uint64) tool.Source {
+	s := &service{store: st, cache: &stubCache{}, dialer: d}
+	return s.ToolSourceFor(mcpapi.ToolSourceReq{ToolIDs: toolIDs, ServerIDs: serverIDs})
+}
+
+// 并集：toolIDs ∪ serverIDs 全量，重叠 tool 按 id 去重只解析一次。
+func TestToolSourceServerIDsUnion(t *testing.T) {
+	st := &stubStore{
+		listToolsByIDsFunc: func(_ context.Context, ids []uint64) ([]MCPTool, error) {
+			return []MCPTool{toolRow(7, 1, "fetch")}, nil
+		},
+		listToolsByServerIDsFunc: func(_ context.Context, ids []uint64) ([]MCPTool, error) {
+			assert.Equal(t, []uint64{1}, ids)
+			return []MCPTool{toolRow(7, 1, "fetch"), toolRow(8, 1, "search")}, nil // 7 与 toolIDs 重叠
+		},
+		listServersByIDs: func(_ context.Context, ids []uint64) ([]MCPServer, error) {
+			return []MCPServer{toolServerRow(1, true)}, nil
+		},
+	}
+	src := newToolSourceSvcWithServers(st, &stubDialer{}, []uint64{7}, []uint64{1})
+	defs, err := src.Tools(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, defs, 2, "重叠 tool 去重：并集 = {fetch, search}")
+	names := []string{defs[0].Name, defs[1].Name}
+	assert.Contains(t, names, "s1__fetch")
+	assert.Contains(t, names, "s1__search")
+}
+
+// 只传 ServerIDs：server 全量工具动态解析（不依赖 toolIDs 快照）。
+func TestToolSourceServerIDsOnly(t *testing.T) {
+	st := &stubStore{
+		listToolsByServerIDsFunc: func(_ context.Context, ids []uint64) ([]MCPTool, error) {
+			return []MCPTool{toolRow(7, 2, "a"), toolRow(8, 2, "b")}, nil
+		},
+		listServersByIDs: func(_ context.Context, ids []uint64) ([]MCPServer, error) {
+			return []MCPServer{toolServerRow(2, true)}, nil
+		},
+	}
+	src := newToolSourceSvcWithServers(st, &stubDialer{}, nil, []uint64{2})
+	defs, err := src.Tools(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, defs, 2)
+	assert.Equal(t, 0, st.calls.listToolsByIDs, "只传 ServerIDs 零 toolIDs 查询")
+}
+
+// 并集面停用 server 过滤同语义：server 停用 → 其工具（含 serverIDs 面）静默消失。
+func TestToolSourceServerIDsDisabledFilter(t *testing.T) {
+	st := &stubStore{
+		listToolsByServerIDsFunc: func(_ context.Context, ids []uint64) ([]MCPTool, error) {
+			return []MCPTool{toolRow(7, 3, "a")}, nil
+		},
+		listToolsByIDsFunc: func(_ context.Context, ids []uint64) ([]MCPTool, error) {
+			return []MCPTool{toolRow(9, 4, "b")}, nil
+		},
+		listServersByIDs: func(_ context.Context, ids []uint64) ([]MCPServer, error) {
+			return []MCPServer{toolServerRow(3, false), toolServerRow(4, true)}, nil
+		},
+	}
+	src := newToolSourceSvcWithServers(st, &stubDialer{}, []uint64{9}, []uint64{3})
+	defs, err := src.Tools(context.Background())
+	require.NoError(t, err)
+	require.Len(t, defs, 1, "停用 server 的工具静默消失（并集面同语义）")
+	assert.Equal(t, "s4__b", defs[0].Name)
+}
+
+// 只传 ToolIDs 路径逐字不变（chat 零影响证明）：serverIDs 空 = 零 server 批量查询。
+func TestToolSourceToolIDsOnlyUnchanged(t *testing.T) {
+	st := &stubStore{
+		listToolsByIDsFunc: func(_ context.Context, ids []uint64) ([]MCPTool, error) {
+			return []MCPTool{toolRow(7, 1, "fetch")}, nil
+		},
+		listServersByIDs: func(_ context.Context, ids []uint64) ([]MCPServer, error) {
+			return []MCPServer{toolServerRow(1, true)}, nil
+		},
+	}
+	src := newToolSourceSvc(st, &stubDialer{}, []uint64{7})
+	defs, err := src.Tools(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, defs, 1)
+	assert.Equal(t, 0, st.calls.listToolsByServerIDs, "只传 ToolIDs 零 server 批量查询")
+}

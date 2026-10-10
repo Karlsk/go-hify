@@ -139,6 +139,25 @@ func (s *Store) ListToolsByServer(ctx context.Context, serverID uint64) ([]mcpsv
 	return items, nil
 }
 
+// ListToolsByServerIDs 按 server 批量取全部工具（spec 020 react 节点 server 级并集
+// 绑定）；单 SQL IN 批量（mcp_tools 既有 (mcp_server_id) 索引服务），id 升序确定。
+// 空入参零查询（同 ListToolsByIDs 先例，防 IN () 非法语法）。
+func (s *Store) ListToolsByServerIDs(ctx context.Context, serverIDs []uint64) ([]mcpsvc.MCPTool, error) {
+	if len(serverIDs) == 0 {
+		return []mcpsvc.MCPTool{}, nil
+	}
+	var items []mcpsvc.MCPTool
+	err := s.db.WithContext(ctx).
+		Select(selectTool).
+		Where("mcp_server_id IN ?", serverIDs).
+		Order("id").
+		Find(&items).Error
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 // CountToolsByServerIDs 列表聚合用批量计数：工具数按 server 分组（GROUP BY 一条
 // 查询覆盖当页，防 N+1）。map 无键 = 0；IN 写法理由同 ListServersByIDs。
 func (s *Store) CountToolsByServerIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error) {

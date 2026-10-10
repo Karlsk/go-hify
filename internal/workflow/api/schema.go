@@ -46,6 +46,7 @@ const (
 	NodeAPI                NodeType = "api"
 	NodeEnd                NodeType = "end"
 	NodeWorkflow           NodeType = "workflow"
+	NodeReact              NodeType = "react" // 图内 mini-agent（spec 020：模型 + mcp 并集工具集 + ReAct 多轮）
 )
 
 // ── NodeConfig 密封接口：实现集封闭本包，引擎 type switch 穷举（db_model §8）──
@@ -114,10 +115,12 @@ func (c ConditionConfig) Validate() error {
 }
 
 // KnowledgeRetrievalConfig 知识库检索（结果注入上下文）；KnowledgeBaseID 存在性
-// service 经 rag api 预检（db_model 决策 #9）。
+// service 经 rag api 预检（db_model 决策 #9）。query（spec 020 加法键）：{{var}} 模板，
+// 非空 strict 渲染作检索问句、空/缺省/渲染空串回退 input（spec 06 O1 加法修订零回归）。
 type KnowledgeRetrievalConfig struct {
 	KnowledgeBaseID uint64 `json:"knowledge_base_id,string"`
 	TopK            int    `json:"top_k,omitempty"` // 0 = 跟随默认；1-20（与 agent RAG 参数同界）
+	Query           string `json:"query,omitempty"` // 检索问句模板（空 = 回退 {{input}}）
 }
 
 func (KnowledgeRetrievalConfig) isNodeConfig() {}
@@ -215,6 +218,47 @@ func (c EndConfig) Validate() error {
 	return nil
 }
 
+// ReactConfig 图内 mini-agent 节点（spec 020）：绑定模型 + 工具集（mcp server 全部
+// 工具 ∪ 单独勾选工具，并集去重），节点内 ReAct 多轮自主调用后终答落变量池。循环
+// 本体 = platform/reactloop（Generate 非流式）；server 级绑定为执行期动态全量
+//（跟随 discover / 停用过滤），保存期不预检 ids（执行期 fail-fast，同 tool 节点先例）。
+type ReactConfig struct {
+	ModelID      uint64   `json:"model_id,string"`         // models.id；存在性 service 经 provider api 预检
+	SystemPrompt string   `json:"system_prompt,omitempty"` // 可选 {{var}} 模板（R10 扫，react 新节点从严）
+	Prompt       string   `json:"prompt"`                  // 必填 {{var}} 模板（R10 扫）
+	Temperature  float64  `json:"temperature,omitempty"`   // 0 = 跟随模型默认
+	ServerIDs    []uint64 `json:"server_ids,omitempty"`    // server 级绑定（动态全量）；与 ToolIDs 并集
+	ToolIDs      []uint64 `json:"tool_ids,omitempty"`      // 工具级绑定；与 ServerIDs 并集
+	MaxRounds    int      `json:"max_rounds,omitempty"`    // 工具轮上限；0/缺省 = reactloop 默认 8；1-16 合法
+}
+
+func (ReactConfig) isNodeConfig() {}
+
+// Validate 必填与域校验：model_id / prompt 必填；max_rounds ∈ {0}∪[1,16]（编排侧成本
+// 护栏）；两 ids 数组元素 >0（0  id 永无对应行，保存期挡）。
+func (c ReactConfig) Validate() error {
+	if c.ModelID == 0 {
+		return fmt.Errorf("model_id 必填")
+	}
+	if c.Prompt == "" {
+		return fmt.Errorf("prompt 必填")
+	}
+	if c.MaxRounds < 0 || c.MaxRounds > 16 {
+		return fmt.Errorf("max_rounds 取值 1-16（0 = 默认 8）")
+	}
+	for _, id := range c.ServerIDs {
+		if id == 0 {
+			return fmt.Errorf("server_ids 含非法元素 0")
+		}
+	}
+	for _, id := range c.ToolIDs {
+		if id == 0 {
+			return fmt.Errorf("tool_ids 含非法元素 0")
+		}
+	}
+	return nil
+}
+
 // WorkflowNodeConfig sub-workflow 嵌套节点（spec 08 §4.1 / §4.3）：引用一个 task 型
 // 工作流作为可组合任务函数。inputs 是「子 schema 字段 → 父图 {{var}} 模板」映射；
 // 键集语义（required 全覆盖、多余拒、无 schema 回退恰 {input}）与 workflow_id 的
@@ -265,6 +309,8 @@ func ParseNodeConfig(t NodeType, raw json.RawMessage) (NodeConfig, error) {
 		cfg = &EndConfig{}
 	case NodeWorkflow:
 		cfg = &WorkflowNodeConfig{}
+	case NodeReact:
+		cfg = &ReactConfig{}
 	default:
 		return nil, fmt.Errorf("%w: 未知节点类型 %q", errInvalidNodeConfig, t)
 	}

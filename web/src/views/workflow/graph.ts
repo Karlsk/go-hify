@@ -45,10 +45,13 @@ export type GraphParseResult =
   | { ok: true; config: GraphConfig }
   | { ok: false; error: string }
 
-// ---- 节点类型常量（画布面板五类；后端全集 7 类，其余手写 JSON 可携带、透传） ----
+// ---- 节点类型常量（spec 020 收口：画布面板八类 = 后端全集，手写 JSON 透传面不变） ----
 
 export const PALETTE_NODE_TYPES = [
   'llm',
+  'react',
+  'tool',
+  'knowledge_retrieval',
   'end',
   'condition',
   'api',
@@ -59,6 +62,9 @@ export type PaletteNodeType = (typeof PALETTE_NODE_TYPES)[number]
 
 export const NODE_TYPE_NAMES: Record<PaletteNodeType, string> = {
   llm: 'LLM 节点',
+  react: 'ReAct 节点',
+  tool: '工具节点',
+  knowledge_retrieval: '知识检索节点',
   end: '结束节点',
   condition: '条件节点',
   api: 'API 节点',

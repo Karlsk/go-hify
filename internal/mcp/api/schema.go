@@ -238,7 +238,11 @@ type GetToolsByIDsReq struct {
 	IDs []uint64
 }
 
-// ToolSourceReq 统一工具来源构造请求（chat 工具循环消费，chat_tool_loop_spec.md §4）。
+// ToolSourceReq 统一工具来源构造请求（chat 工具循环消费，chat_tool_loop_spec.md §4；
+// spec 020 加 ServerIDs：react 节点 server 级绑定）。
 type ToolSourceReq struct {
-	ToolIDs []uint64 // agent 绑定的 mcp_tools.id（存在性已由 agent 模块校验）
+	ToolIDs []uint64 // 按工具 id 绑定（agent / workflow tool 节点；存在性已由绑定方校验或执行期 fail-fast）
+	// ServerIDs 按 server 绑定 = 其全部工具的执行期动态全量（spec 020 加法）：跟随
+	// discover 新增工具、停用 server 工具静默消失；与 ToolIDs 并集（按 tool id 去重）。
+	ServerIDs []uint64
 }

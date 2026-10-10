@@ -35,9 +35,11 @@ type resolvedTool struct {
 // boundToolSource 绑定工具子集的 tool.Source 实现：Tools 出清单、Invoke 按调用名
 // 路由到所属 server per-call 调用。单 chat 轮内复用一个实例（ensure 缓存）；
 // mu 只保护 ensure 的惰性加载（Tools / Invoke 可能并发到达）。
+// 绑定面 = toolIDs ∪ serverIDs 并集（spec 020：server 级 = 其全部工具动态全量）。
 type boundToolSource struct {
-	svc     *service
-	toolIDs []uint64
+	svc       *service
+	toolIDs   []uint64
+	serverIDs []uint64
 
 	mu       sync.Mutex
 	loaded   bool
@@ -50,7 +52,7 @@ var _ tool.Source = (*boundToolSource)(nil)
 
 // ToolSourceFor 构造绑定工具来源（工厂方法，无 IO；mcpapi.MCPClientService 面）。
 func (s *service) ToolSourceFor(req mcpapi.ToolSourceReq) tool.Source {
-	return &boundToolSource{svc: s, toolIDs: req.ToolIDs}
+	return &boundToolSource{svc: s, toolIDs: req.ToolIDs, serverIDs: req.ServerIDs}
 }
 
 // Tools 返回启用 server 下的工具清单（空切片 = 无工具）。停用 server 的工具
@@ -92,25 +94,37 @@ func (b *boundToolSource) Invoke(ctx context.Context, call tool.ToolCall) tool.T
 	return tool.ToolResult{CallID: call.ID, Name: call.Name, Content: content}
 }
 
-// ensure 惰性加载绑定工具：ListToolsByIDs + ListServersByIDs → 过滤停用 server →
-// 派生调用名 → 生成 ToolDef。首次成功后缓存（单轮 Tools 与 Invoke 不重复查库）；
-// 失败不缓存（下次调用重试）。缺失 id 静默跳过（agent 绑定校验已挡新增绑定，
-// 行删除走 mcp_tools 级联 + agent_tools 同删，理论不达）。
+// ensure 惰性加载绑定工具：toolIDs ∪ serverIDs 并集（按 tool id 去重，toolIDs 序
+// 优先）+ ListServersByIDs → 过滤停用 server → 派生调用名 → 生成 ToolDef。首次成功
+// 后缓存（单轮 Tools 与 Invoke 不重复查库）；失败不缓存（下次调用重试）。缺失 id
+// 静默跳过（agent 绑定校验已挡新增绑定，行删除走 mcp_tools 级联 + agent_tools 同删，
+// 理论不达）；server 级面 = 执行期动态全量（discover 新增工具自动纳入）。
 func (b *boundToolSource) ensure(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.loaded {
 		return nil
 	}
-	if len(b.toolIDs) == 0 {
+	if len(b.toolIDs) == 0 && len(b.serverIDs) == 0 {
 		b.resolved = nil
 		b.byName = map[string]int{}
 		b.loaded = true
 		return nil
 	}
-	tools, err := b.svc.store.ListToolsByIDs(ctx, b.toolIDs)
-	if err != nil {
-		return fmt.Errorf("list bound tools: %w", err)
+	var tools []MCPTool
+	if len(b.toolIDs) > 0 {
+		byIDs, err := b.svc.store.ListToolsByIDs(ctx, b.toolIDs)
+		if err != nil {
+			return fmt.Errorf("list bound tools: %w", err)
+		}
+		tools = byIDs
+	}
+	if len(b.serverIDs) > 0 {
+		byServer, err := b.svc.store.ListToolsByServerIDs(ctx, b.serverIDs)
+		if err != nil {
+			return fmt.Errorf("list server tools: %w", err)
+		}
+		tools = unionToolsByID(tools, byServer)
 	}
 	serverIDs := make([]uint64, 0, len(tools))
 	seen := make(map[uint64]struct{}, len(tools))
@@ -148,6 +162,27 @@ func (b *boundToolSource) ensure(ctx context.Context) error {
 	}
 	b.loaded = true
 	return nil
+}
+
+// unionToolsByID 并集去重（spec 020 C4）：base 序优先，extra 中仅补 base 未含的
+// tool id（server 级面与 tool 级面重叠时只解析一次，调用名唯一性不变）。
+func unionToolsByID(base, extra []MCPTool) []MCPTool {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[uint64]struct{}, len(base))
+	for i := range base {
+		seen[base[i].ID] = struct{}{}
+	}
+	out := append([]MCPTool(nil), base...)
+	for i := range extra {
+		if _, dup := seen[extra[i].ID]; dup {
+			continue
+		}
+		seen[extra[i].ID] = struct{}{}
+		out = append(out, extra[i])
+	}
+	return out
 }
 
 // deriveCallName 派生 LLM 调用名：s{serverID}__{toolName}——server 前缀保证跨

@@ -833,3 +833,96 @@ func TestNodeRunSchemaContract(t *testing.T) {
 	assert.JSONEq(t, `{"seq":1,"node_key":"classify","node_type":"llm","status":"succeeded",`+
 		`"input":"i","output":"o","error_msg":"","duration_ms":5}`, string(b))
 }
+
+// ---- spec 020：ReactConfig 契约（FR-001 / C1）----
+
+// TestReactConfigValidate 校验域：model_id / prompt 必填；max_rounds 0|1-16；
+// 两 ids 数组元素 >0；纯推理形态（仅 model+prompt）合法。
+func TestReactConfigValidate(t *testing.T) {
+	t.Run("纯推理形态过", func(t *testing.T) {
+		assert.NoError(t, ReactConfig{ModelID: 3, Prompt: "任务：{{input}}"}.Validate())
+	})
+	t.Run("全键形态过", func(t *testing.T) {
+		assert.NoError(t, ReactConfig{ModelID: 3, Prompt: "p", SystemPrompt: "s",
+			Temperature: 0.3, ServerIDs: []uint64{1}, ToolIDs: []uint64{7}, MaxRounds: 16}.Validate())
+	})
+	t.Run("model_id 零拒", func(t *testing.T) {
+		assert.ErrorContains(t, ReactConfig{Prompt: "p"}.Validate(), "model_id")
+	})
+	t.Run("prompt 空拒", func(t *testing.T) {
+		assert.ErrorContains(t, ReactConfig{ModelID: 3}.Validate(), "prompt")
+	})
+	t.Run("max_rounds 越界拒", func(t *testing.T) {
+		assert.ErrorContains(t, ReactConfig{ModelID: 3, Prompt: "p", MaxRounds: 17}.Validate(), "max_rounds")
+		assert.ErrorContains(t, ReactConfig{ModelID: 3, Prompt: "p", MaxRounds: -1}.Validate(), "max_rounds")
+		assert.NoError(t, ReactConfig{ModelID: 3, Prompt: "p", MaxRounds: 0}.Validate(), "0 = 默认 8")
+		assert.NoError(t, ReactConfig{ModelID: 3, Prompt: "p", MaxRounds: 1}.Validate())
+	})
+	t.Run("ids 元素零拒", func(t *testing.T) {
+		assert.ErrorContains(t, ReactConfig{ModelID: 3, Prompt: "p", ServerIDs: []uint64{0}}.Validate(), "server_ids")
+		assert.ErrorContains(t, ReactConfig{ModelID: 3, Prompt: "p", ToolIDs: []uint64{1, 0}}.Validate(), "tool_ids")
+	})
+}
+
+// TestReactConfigSerialization 序列化三态：omitempty 键不出、model_id 字符串保形、
+// ids 数字数组形态；ParseNodeConfig 透传与坏 config 拒。
+func TestReactConfigSerialization(t *testing.T) {
+	t.Run("纯推理形态 omitempty 三键不出", func(t *testing.T) {
+		b, err := json.Marshal(ReactConfig{ModelID: 3, Prompt: "p"})
+		assert.NoError(t, err)
+		assert.Equal(t, `{"model_id":"3","prompt":"p"}`, string(b))
+	})
+	t.Run("全键往返保真", func(t *testing.T) {
+		cfg := ReactConfig{ModelID: 3, Prompt: "p", SystemPrompt: "s", Temperature: 0.3,
+			ServerIDs: []uint64{1, 2}, ToolIDs: []uint64{7}, MaxRounds: 4}
+		b, err := json.Marshal(cfg)
+		assert.NoError(t, err)
+		assert.Contains(t, string(b), `"server_ids":[1,2]`, "ids 数字数组形态")
+		assert.Contains(t, string(b), `"model_id":"3"`, "model_id 字符串保形")
+		var back ReactConfig
+		assert.NoError(t, json.Unmarshal(b, &back))
+		assert.Equal(t, cfg, back)
+	})
+	t.Run("空数组不出键", func(t *testing.T) {
+		b, err := json.Marshal(ReactConfig{ModelID: 3, Prompt: "p", ServerIDs: []uint64{}})
+		assert.NoError(t, err)
+		assert.NotContains(t, string(b), "server_ids")
+	})
+	t.Run("ParseNodeConfig 透传", func(t *testing.T) {
+		cfg, err := ParseNodeConfig(NodeReact, json.RawMessage(
+			`{"model_id":"3","prompt":"{{input}}","server_ids":[1],"max_rounds":2}`))
+		assert.NoError(t, err)
+		c, ok := cfg.(*ReactConfig)
+		assert.True(t, ok)
+		assert.Equal(t, uint64(3), c.ModelID)
+		assert.Equal(t, []uint64{1}, c.ServerIDs)
+		assert.Equal(t, 2, c.MaxRounds)
+	})
+	t.Run("ParseNodeConfig 坏 max_rounds 拒", func(t *testing.T) {
+		_, err := ParseNodeConfig(NodeReact, json.RawMessage(
+			`{"model_id":"3","prompt":"p","max_rounds":99}`))
+		assert.ErrorContains(t, err, "max_rounds")
+	})
+}
+
+// ---- spec 020：KnowledgeRetrievalConfig.query 加法键（FR-005 / C5）----
+
+func TestKnowledgeRetrievalConfigQuerySerialization(t *testing.T) {
+	t.Run("带 query 往返保真", func(t *testing.T) {
+		b, err := json.Marshal(KnowledgeRetrievalConfig{KnowledgeBaseID: 7, TopK: 3, Query: "{{llm1.topic}}"})
+		assert.NoError(t, err)
+		assert.Contains(t, string(b), `"query":"{{llm1.topic}}"`)
+		var back KnowledgeRetrievalConfig
+		assert.NoError(t, json.Unmarshal(b, &back))
+		assert.Equal(t, "{{llm1.topic}}", back.Query)
+	})
+	t.Run("缺省不出键（存量形态零变化）", func(t *testing.T) {
+		b, err := json.Marshal(KnowledgeRetrievalConfig{KnowledgeBaseID: 7})
+		assert.NoError(t, err)
+		assert.NotContains(t, string(b), "query")
+	})
+	t.Run("既有校验零变化", func(t *testing.T) {
+		assert.NoError(t, KnowledgeRetrievalConfig{KnowledgeBaseID: 7, Query: "{{input}}", TopK: 20}.Validate())
+		assert.ErrorContains(t, KnowledgeRetrievalConfig{KnowledgeBaseID: 7, TopK: 21}.Validate(), "top_k")
+	})
+}

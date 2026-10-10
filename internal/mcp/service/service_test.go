@@ -38,11 +38,13 @@ type stubStore struct {
 	listToolsByServer  func(ctx context.Context, serverID uint64) ([]MCPTool, error)
 	countTools         func(ctx context.Context, ids []uint64) (map[uint64]int64, error)
 	listToolsByIDsFunc func(ctx context.Context, ids []uint64) ([]MCPTool, error)
+	// spec 020：server 级并集绑定批量查询缝
+	listToolsByServerIDsFunc func(ctx context.Context, ids []uint64) ([]MCPTool, error)
 
 	calls struct {
 		createServer, getServerByID, updateServer, deleteServer int
 		upsertTools, listToolsByServer                          int
-		listToolsByIDs                                          int
+		listToolsByIDs, listToolsByServerIDs                    int
 	}
 }
 
@@ -120,6 +122,15 @@ func (s *stubStore) ListToolsByIDs(ctx context.Context, ids []uint64) ([]MCPTool
 	s.calls.listToolsByIDs++
 	if s.listToolsByIDsFunc != nil {
 		return s.listToolsByIDsFunc(ctx, ids)
+	}
+	return nil, nil
+}
+
+// ListToolsByServerIDs spec 020 server 级并集绑定批量查询 stub。
+func (s *stubStore) ListToolsByServerIDs(ctx context.Context, ids []uint64) ([]MCPTool, error) {
+	s.calls.listToolsByServerIDs++
+	if s.listToolsByServerIDsFunc != nil {
+		return s.listToolsByServerIDsFunc(ctx, ids)
 	}
 	return nil, nil
 }

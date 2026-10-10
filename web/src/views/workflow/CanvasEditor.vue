@@ -529,13 +529,27 @@ defineExpose({ getGraph })
   height: auto;
 }
 
-/* 面板节点色点：与画布节点类型色一致 */
+/* 面板节点色点：与画布节点类型色一致（spec 020：react = primary 深档，同族配 llm 浅档） */
 .hf-wf-node-dot-llm {
   background: var(--hf-primary-500);
 }
 
+.hf-wf-node-dot-react {
+  background: var(--hf-primary-700);
+}
+
 .hf-wf-node-dot-end {
   background: var(--hf-success);
+}
+
+/* spec 020：tool = accent 深档（api 浅档同族配对） */
+.hf-wf-node-dot-tool {
+  background: var(--hf-accent-600);
+}
+
+/* spec 020：knowledge_retrieval = success 深档（end 浅档同族配对） */
+.hf-wf-node-dot-knowledge_retrieval {
+  background: var(--hf-success-hover);
 }
 
 .hf-wf-node-dot-condition {
@@ -550,14 +564,32 @@ defineExpose({ getGraph })
   background: var(--hf-info);
 }
 
-/* 画布节点按类型差异化着色（默认节点主题的边框/底色覆盖） */
+/* 画布节点按类型差异化着色（默认节点主题的边框/底色覆盖；spec 020：react = primary
+   深档，与 llm 浅档同族配对——零新增 token） */
 .canvas-editor__flow :deep(.vue-flow__node.hf-wf-node-llm .vue-flow__node-default) {
   border-color: var(--hf-primary-300);
   background: var(--hf-primary-50);
 }
 
+.canvas-editor__flow :deep(.vue-flow__node.hf-wf-node-react .vue-flow__node-default) {
+  border-color: var(--hf-primary-700);
+  background: var(--hf-primary-100);
+}
+
 .canvas-editor__flow :deep(.vue-flow__node.hf-wf-node-end .vue-flow__node-default) {
   border-color: var(--hf-success-border);
+  background: var(--hf-success-soft);
+}
+
+/* spec 020：tool = accent 深档（api 浅档同族配对） */
+.canvas-editor__flow :deep(.vue-flow__node.hf-wf-node-tool .vue-flow__node-default) {
+  border-color: var(--hf-accent-600);
+  background: var(--hf-accent-100);
+}
+
+/* spec 020：knowledge_retrieval = success 深档（end 浅档同族配对） */
+.canvas-editor__flow :deep(.vue-flow__node.hf-wf-node-knowledge_retrieval .vue-flow__node-default) {
+  border-color: var(--hf-success-hover);
   background: var(--hf-success-soft);
 }
 

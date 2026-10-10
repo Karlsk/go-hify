@@ -56,6 +56,9 @@ type Store interface {
 	// ListToolsByIDs 批量取工具（agent 绑定校验经 mcpapi 间接消费）；缺失 id 静默
 	// 不在结果里，存在性判定由调用方比对 id 集合。
 	ListToolsByIDs(ctx context.Context, ids []uint64) ([]MCPTool, error)
+	// ListToolsByServerIDs 按 server 批量取全部工具（spec 020 react 节点 server 级
+	// 并集绑定）；空入参零查询。
+	ListToolsByServerIDs(ctx context.Context, serverIDs []uint64) ([]MCPTool, error)
 }
 
 // cacheManager 是 platform/cache 的窄接口：service 只用读 / 写 / 删三个动作，

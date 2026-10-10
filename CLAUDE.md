@@ -1277,18 +1277,18 @@ POST   /api/v1/conversations/{id}/messages   # 发消息（两模式，见下）
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-[specs/019-platform-reactloop/plan.md](specs/019-platform-reactloop/plan.md)
-(feature: platform 公共 ReAct 工具循环抽取 + chat 重构换用——spec 019：chat 引擎内
-多轮工具循环本体（轮循环/8 轮上限 nudge 收尾/错误即上下文/20k 截断单点/判定纪律
-只看 ToolCalls/冻结常量族）逐字下沉新包 internal/platform/reactloop（无状态 Run：
-消费 llm.Client + tool.Registry + 回调缝五钩 OnDelta/OnRound/OnToolRoundStart/
-OnToolCall/OnToolResult，钩子错误=中止信号）；双模式同本体（Stream 逐 delta /
-Generate 整体终态，020 react 节点消费后者）；chat 删自有循环体换用、SSE/落库/
-executions 全经回调保持现行为（对外契约零变化硬红线）；loadToolRegistry 降级链
-留 chat。三零边界：零迁移（恒 21 applied，00022 留给 020）、零新路由、零新哨兵、
-组合根零装配；验收门 = go 全量绿 + reactloop/chat-service 覆盖率 ≥80% + chat 回归
-零改动 + grep 三件（chat 常量零残留/eino/go-sdk 纪律）+ chat 工具手测零差异；
-spec 见 specs/019-platform-reactloop/spec.md，上位冻结
-docs/changelog/mcp/chat_tool_loop_spec.md；后续篇 020 = workflow react 节点 +
-ragNode 画布接入 + tool 节点表单)
+[specs/020-workflow-react-node/plan.md](specs/020-workflow-react-node/plan.md)
+(feature: workflow react 节点 + ragNode 画布接入 + tool 节点表单——spec 020：
+① react 节点（新 NodeType，迁移 00022 CHECK 加值）= 图内 mini-agent：ReactConfig
+{model_id,system_prompt?,prompt,temperature?,server_ids?,tool_ids?,max_rounds?}，
+执行链 strict 渲染→llm 解析→工具集并集（mcp ToolSourceReq 加 ServerIDs + store
+ListToolsByServerIDs + toolsource 去重解析）→ reactloop.Run Generate 模式→终答落池；
+每轮 executions 自记 + nodeIn tool_chain 可观测；失败分型 fail-fast 同 tool 先例；
+max_rounds 0=默认 8、1-16 保存期护栏；② ragNode 接画布 + query 加法键（空回退
+input，O1 加法修订，R10 扫 query）；③ tool 节点接画布表单（mcp 工具分组单选 +
+args 模板行，后端零改动）。palette 五扩八（着色既有色族深浅配对、零新增 token）；
+零新路由/哨兵/SSE 事件，chat/reactloop/组合根零改动；验收门 = go 全量 + workflow/mcp
+覆盖率 ≥80% + 22 applied + web 双门禁 + 手测 §13 三场景 + chat 零差异复跑；spec 见
+specs/020-workflow-react-node/spec.md（2026-10-10 起草 + Clarifications：tool_chain
+可观测 / executions Input 形态），前置 spec 019 reactloop（a01b3c7）)
 <!-- SPECKIT END -->

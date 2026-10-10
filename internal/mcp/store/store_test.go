@@ -321,3 +321,36 @@ func TestListToolsByIDs(t *testing.T) {
 	assert.Equal(t, uint64(7), items[0].MCPServerID, "绑定校验依赖 server_id 关联")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
+
+// ---- spec 020：ListToolsByServerIDs（react 节点 server 级并集绑定批量查询）----
+
+func TestListToolsByServerIDs(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(listToolsByServerIDsSQL)).
+		WithArgs(uint64(1), uint64(2)).
+		WillReturnRows(sqlmock.NewRows(toolCols).
+			AddRow(tvals(1, 1, "fetch", "抓取", `{"type":"object"}`, now)...).
+			AddRow(tvals(2, 1, "search", "搜索", `{"type":"object"}`, now)...).
+			AddRow(tvals(3, 2, "calc", "计算", `{"type":"object"}`, now)...))
+
+	items, err := s.ListToolsByServerIDs(context.Background(), []uint64{1, 2})
+	assert.NoError(t, err)
+	assert.Len(t, items, 3, "多 server 工具一次批量取回（无 N+1）")
+	assert.Equal(t, uint64(1), items[0].MCPServerID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestListToolsByServerIDsEmpty(t *testing.T) {
+	db, mock := newMockDB(t)
+	s := New(db)
+
+	items, err := s.ListToolsByServerIDs(context.Background(), nil)
+	assert.NoError(t, err)
+	assert.Empty(t, items)
+	assert.NoError(t, mock.ExpectationsWereMet(), "空入参零 SQL（防 IN () 非法语法）")
+}
+
+// listToolsByServerIDsSQL 期望 SQL（server 级并集绑定批量查询；IN 展开 + id 序确定）。
+const listToolsByServerIDsSQL = `SELECT id, mcp_server_id, name, description, input_schema, created_at, updated_at FROM "mcp_tools" WHERE mcp_server_id IN ($1,$2) ORDER BY id`
