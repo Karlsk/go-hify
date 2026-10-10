@@ -1,18 +1,24 @@
 <template>
-  <!-- 模板字段通用组件（FR-007，contracts §1）：textarea 主体 + 变量引用下拉。
+  <!-- 模板字段通用组件（FR-007，contracts §1）：textarea 主体 + 变量引用插入（次要动作）。
        哑组件——变量条目由外部渲染好传入（计算在 Inspector 层，research 决策 4/5），
        无图依赖、无 api 依赖；手写零干预（不清洗/不校验/不格式化既有文本）；
-       选中条目按 textarea selectionStart 光标位置插入 option.insert 完整 {{}} 文本。 -->
+       选中条目按 textarea selectionStart 光标位置插入 option.insert 完整 {{}} 文本。
+       spec 018 修复：插入下拉降级为小尺寸虚线 chip——filterable 下拉的打字是过滤词
+       非值，原「全宽下拉在上」的形态被误认为主输入位（直接打字"进不去"）；textarea
+       才是唯一值编辑主体，chip 只承担插入动作。 -->
   <div class="template-field">
     <el-select
       v-model="picker"
       :disabled="disabled"
-      placeholder="插入变量引用"
+      placeholder="插入变量"
       size="small"
       class="template-field__picker"
       filterable
       @change="onPick"
     >
+      <template #prefix>
+        <el-icon><Plus /></el-icon>
+      </template>
       <el-option-group v-for="g in variables" :key="g.group" :label="g.group">
         <el-option v-if="g.loading" :label="'加载中…'" :value="''" disabled />
         <el-option
@@ -58,6 +64,7 @@ export type VariableGroups = VariableGroup[]
 
 <script setup lang="ts">
 import { nextTick, ref } from 'vue'
+import { Plus } from '@element-plus/icons-vue'
 import type { InputInstance } from 'element-plus'
 
 const props = withDefaults(
@@ -113,8 +120,38 @@ function onPick(insert: string): void {
   width: 100%;
 }
 
+/* 插入下拉 = 次要动作（spec 018 修复）：小尺寸虚线 chip 观感——
+   区别于实线边框的值输入框，杜绝「点它打字」的输入位误认 */
 .template-field__picker {
   align-self: flex-start;
+  width: auto;
   max-width: 100%;
+}
+
+.template-field__picker :deep(.el-select__wrapper) {
+  min-height: 22px;
+  padding: 0 var(--hf-space-2);
+  gap: var(--hf-space-1);
+  border: 1px dashed var(--hf-primary-300);
+  border-radius: var(--hf-radius-sm);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  font-size: var(--hf-font-size-xs);
+}
+
+.template-field__picker :deep(.el-select__wrapper.is-hovering) {
+  background: var(--hf-primary-50);
+}
+
+.template-field__picker :deep(.el-select__wrapper.is-focused) {
+  background: var(--hf-primary-50);
+  border-color: var(--hf-primary-500);
+  box-shadow: none;
+}
+
+.template-field__picker :deep(.el-select__placeholder) {
+  color: var(--hf-primary-600);
+  font-size: var(--hf-font-size-xs);
 }
 </style>
