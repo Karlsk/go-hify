@@ -285,6 +285,8 @@ docker exec hify-pg-test psql -U hify -d hify -c \
 
 浏览器 UI 手测（本节 curl 不覆盖，需 web 前端）：验证 tool_call / tool_result 折叠卡片与历史回放分组，流式与历史两路径同一形态。实现契约见 [tool_events_frontend_spec.md](../changelog/chat/tool_events_frontend_spec.md)。
 
+> spec 019 注记（2026-10-10）：多轮工具循环本体自本节起归 `internal/platform/reactloop`（chat 经回调接线换用），手测面零变化——§6 流式 / §7 一次输出 / 本节工具事件各场景按原步骤复测即换用回归证明（SC-001）。
+
 **前置**：
 - web 前端已起（`cd web && npm run dev`），用 §2 账号登录；
 - Agent 已绑 MCP 工具且可被自然语言触发（server 发现 / 工具绑定步骤见 [mcp-manual-test.md](mcp-manual-test.md)）。

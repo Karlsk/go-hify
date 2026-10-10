@@ -6,7 +6,6 @@ package service
 // 未绑工具的回归由 turn_test.go 全体既有用例承担（toolSources 恒 nil、单轮路径）。
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -16,6 +15,7 @@ import (
 
 	chatapi "github.com/Karlsk/go-hify/internal/chat/api"
 	"github.com/Karlsk/go-hify/internal/platform/llm"
+	"github.com/Karlsk/go-hify/internal/platform/reactloop"
 	"github.com/Karlsk/go-hify/internal/platform/tool"
 )
 
@@ -39,7 +39,7 @@ func countingInvoke(calls *int, result tool.ToolResult) func(tool.ToolCall) tool
 func TestStreamToolRoundTrip(t *testing.T) {
 	var invokeCalls int
 	src := &stubToolSource{
-		defs:  []tool.ToolDef{testToolDef("s1__weather")},
+		defs:   []tool.ToolDef{testToolDef("s1__weather")},
 		invoke: countingInvoke(&invokeCalls, tool.ToolResult{Content: "北京 晴 25 度"}),
 	}
 	script := func(call int) (*schema.StreamReader[*schema.Message], error) {
@@ -126,7 +126,7 @@ func TestStreamToolRoundTrip(t *testing.T) {
 func TestStreamToolFailureIsErrorFedBack(t *testing.T) {
 	var invokeCalls int
 	src := &stubToolSource{
-		defs:  []tool.ToolDef{testToolDef("s1__weather")},
+		defs:   []tool.ToolDef{testToolDef("s1__weather")},
 		invoke: countingInvoke(&invokeCalls, tool.ToolResult{Content: "连接失败: server unreachable", IsError: true}),
 	}
 	script := func(call int) (*schema.StreamReader[*schema.Message], error) {
@@ -163,7 +163,7 @@ func TestStreamToolFailureIsErrorFedBack(t *testing.T) {
 func TestStreamToolInvalidArgsNoInvoke(t *testing.T) {
 	var invokeCalls int
 	src := &stubToolSource{
-		defs:  []tool.ToolDef{testToolDef("s1__weather")},
+		defs:   []tool.ToolDef{testToolDef("s1__weather")},
 		invoke: countingInvoke(&invokeCalls, tool.ToolResult{Content: "unreachable"}),
 	}
 	script := func(call int) (*schema.StreamReader[*schema.Message], error) {
@@ -183,7 +183,7 @@ func TestStreamToolInvalidArgsNoInvoke(t *testing.T) {
 	assert.Equal(t, chatapi.EventToolResult, events[1].Type)
 	payload, ok := events[1].Result.(chatapi.ToolResultPayload)
 	if assert.True(t, ok) {
-		assert.Equal(t, invalidToolArgsMsg, payload.Content)
+		assert.Equal(t, reactloop.InvalidArgsText, payload.Content)
 		assert.True(t, payload.IsError)
 	}
 
@@ -191,7 +191,7 @@ func TestStreamToolInvalidArgsNoInvoke(t *testing.T) {
 	ms := h.store.messagesOf(convID)
 	if assert.Len(t, ms, 4) {
 		assert.Equal(t, map[string]any{}, ms[1].ToolCalls[0]["args"])
-		assert.Equal(t, invalidToolArgsMsg, ms[2].Content)
+		assert.Equal(t, reactloop.InvalidArgsText, ms[2].Content)
 	}
 }
 
@@ -228,20 +228,20 @@ func TestStreamToolRoundsLimit(t *testing.T) {
 	// 上限轮请求：末条是 nudge（瞬态）、Tools 被摘掉
 	lastMsgs := h.streamer.lastMsgs()
 	assert.Equal(t, schema.User, lastMsgs[len(lastMsgs)-1].Role)
-	assert.Equal(t, maxToolRoundsNudge, lastMsgs[len(lastMsgs)-1].Content)
+	assert.Equal(t, reactloop.NudgeText, lastMsgs[len(lastMsgs)-1].Content)
 	assert.Empty(t, h.streamer.opts[8].Tools)
 	assert.Len(t, h.streamer.opts[7].Tools, 1) // 常规轮照常带工具
 
 	// done：强制 finish_reason（覆盖模型原值 tool_calls）
 	done := events[len(events)-1]
 	assert.Equal(t, chatapi.EventDone, done.Type)
-	assert.Equal(t, finishReasonMaxIterations, done.FinishReason)
+	assert.Equal(t, reactloop.FinishReasonMaxIterations, done.FinishReason)
 
 	// 落库：user + 8×(assistant+tool) + 空终答；nudge 不在其中
 	ms := h.store.messagesOf(convID)
 	assert.Len(t, ms, 18)
 	for _, m := range ms {
-		assert.NotEqual(t, maxToolRoundsNudge, m.Content) // nudge 瞬态：只进 LLM 请求不落库
+		assert.NotEqual(t, reactloop.NudgeText, m.Content) // nudge 瞬态：只进 LLM 请求不落库
 	}
 	assert.Equal(t, chatapi.RoleAssistant, ms[17].Role)
 	assert.Equal(t, "", ms[17].Content) // 上限轮无文本产出：空终答行（answered=true）
@@ -262,8 +262,8 @@ func TestStreamToolRegistryFailureDegrades(t *testing.T) {
 	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "打个招呼"}, collectEvents(&events, ""))
 	assert.NoError(t, err)
 
-	assert.Equal(t, 1, h.streamer.calls)          // 单轮：工具不可用不进循环
-	assert.Empty(t, h.streamer.opts[0].Tools)     // 无工具下发
+	assert.Equal(t, 1, h.streamer.calls)      // 单轮：工具不可用不进循环
+	assert.Empty(t, h.streamer.opts[0].Tools) // 无工具下发
 	assert.Equal(t, chatapi.EventDone, events[len(events)-1].Type)
 	ms := h.store.messagesOf(convID)
 	assert.Len(t, ms, 2) // user + assistant：无中间行
@@ -328,7 +328,7 @@ func TestStreamToolRoundStreamError(t *testing.T) {
 func TestStreamToolRoundClientGone(t *testing.T) {
 	var invokeCalls int
 	src := &stubToolSource{
-		defs:  []tool.ToolDef{testToolDef("s1__weather")},
+		defs:   []tool.ToolDef{testToolDef("s1__weather")},
 		invoke: countingInvoke(&invokeCalls, tool.ToolResult{Content: "unreachable"}),
 	}
 	script := func(call int) (*schema.StreamReader[*schema.Message], error) {
@@ -343,9 +343,9 @@ func TestStreamToolRoundClientGone(t *testing.T) {
 	var events []chatapi.StreamEvent
 	err := h.svc.Stream(userCtx(), chatapi.SendMessageReq{ConversationID: convID, Content: "天气"},
 		collectEvents(&events, chatapi.EventToolCall)) // tool_call 事件写失败 = 断连
-	assert.NoError(t, err)                             // 静默收尾
-	assert.Empty(t, events)                            // 首个事件即失败：无任何事件送达
-	assert.Zero(t, invokeCalls)                        // 不执行剩余调用（省一次工具 IO）
+	assert.NoError(t, err)      // 静默收尾
+	assert.Empty(t, events)     // 首个事件即失败：无任何事件送达
+	assert.Zero(t, invokeCalls) // 不执行剩余调用（省一次工具 IO）
 
 	// user + assistant 中间行；无 tool 行、无终答行
 	ms := h.store.messagesOf(convID)
@@ -390,40 +390,4 @@ func TestSendMessageToolMiddleRows(t *testing.T) {
 		assert.Equal(t, "北京 晴 25 度", ms[2].Content)
 		assert.Equal(t, chatapi.RoleAssistant, ms[3].Role)
 	}
-}
-
-// ---- 纯函数 ----
-
-func TestParseToolArgs(t *testing.T) {
-	cases := []struct {
-		name    string
-		raw     string
-		want    map[string]any
-		wantOK  bool
-	}{
-		{"空", "", map[string]any{}, true},
-		{"null", "null", map[string]any{}, true},
-		{"空对象", "{}", map[string]any{}, true},
-		{"合法对象", `{"city":"北京"}`, map[string]any{"city": "北京"}, true},
-		{"截断 JSON", `{"city":`, map[string]any{}, false},
-		{"数组非对象", `[1,2]`, map[string]any{}, false},
-		{"字符串非对象", `"x"`, map[string]any{}, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			args, ok := parseToolArgs(json.RawMessage(c.raw))
-			assert.Equal(t, c.wantOK, ok)
-			assert.Equal(t, c.want, args)
-		})
-	}
-}
-
-func TestTruncateToolContent(t *testing.T) {
-	assert.Equal(t, "短文本", truncateToolContent("短文本"))
-
-	long := strings.Repeat("长", maxToolResultRunes+100)
-	got := truncateToolContent(long)
-	assert.Len(t, []rune(got), maxToolResultRunes+1) // 截断 + 省略号
-	assert.True(t, strings.HasSuffix(got, "…"))
-	assert.Equal(t, strings.Repeat("长", maxToolResultRunes), strings.TrimSuffix(got, "…"))
 }

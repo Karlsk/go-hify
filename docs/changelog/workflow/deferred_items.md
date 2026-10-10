@@ -44,3 +44,10 @@
 - 现状：嵌套链每层独立 5min（executeChild 自包 `WithTimeoutCause`），请求 ctx 全程传播；同步路径墙钟仍受 nginx 300s 事实约束——超长同步链会在网关处断（拍板接受）。
 - 逃生阀：异步执行 + 提交-轮询模型（**重开 spec 06 异步边界**——同步纯函数契约、append-only 收尾统一写轨迹等前提需重议）；按节点 SSE 流式（与 #2 进度事件同族，onNodeDone 留缝是起点）。
 - 触发：真实长链需求出现（单层 5min 不够用的实际场景）。
+
+## 9. builtin 工具机制与内置工具——递延（2026-10-10 用户拍板剔除）
+
+- 原始诉求（spec 019 需求批）：「工具 node 可以单独使用 mcp 或者内置的某个工具」；经 2026-10-10 拍板**本轮剔除**：暂时只支持 mcp、无 builtin（全仓本无 builtin Source 实现，platform/tool 契约注释的「未来内置工具」时态不变）。
+- 复活形态候选：`platform/tool/builtin` 静态注册表实现 tool.Source（纯逻辑工具）；依赖业务模块的工具（如知识库检索）由该模块实现 Source、组合根注入（依赖方向合法）。ToolConfig 加法键 `builtin` 与 tool_id 互斥拒为自然落点。
+- 触发：出现第一个真实内置工具需求（或 react 节点工具集需要非 MCP 来源）时重开本篇。
+- 关联：spec 019（reactloop）已为 builtin 预留统一消费面——tool.Source 进 Registry 即生效，循环零改动。
